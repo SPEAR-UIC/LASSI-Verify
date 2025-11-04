@@ -1,0 +1,141 @@
+{
+    "HeCBench": {
+        "source_folder": "HeCBench",
+        "matrix-rotate": {
+            "app_folder": "matrix-rotate",
+            "app_params": ["30000", "100"],
+            "code_lines": 107
+        },
+        "marchingCubes": {
+            "app_folder": "marchingCubes",
+            "app_params": ["100"],
+            "code_lines": 574
+        },
+        "stu-matrix-rotate": {
+            "app_folder": "stu-matrix-rotate",
+            "app_params": ["30000", "100"],
+            "code_lines": 67
+        },
+        "all-pairs-distance": {
+            "app_folder": "all-pairs-distance",
+            "app_params": ["10000"],
+            "code_lines": 328
+        },
+        "chacha20": {
+            "app_folder": "chacha20",
+            "app_params": ["300000"],
+            "code_lines": 130
+        },
+        "murmurhash3": {
+            "app_folder": "murmurhash3",
+            "app_params": ["750000", "500"],
+            "code_lines": 245
+        },
+        "floydwarshall": {
+            "app_folder": "floydwarshall",
+            "app_params": ["2048", "100", "256"],
+            "code_lines": 295
+        },
+        "keogh": {
+            "app_folder": "keogh",
+            "app_params": ["256", "22500000", "100"],
+            "code_lines": 143
+        },
+        "jacobi": {
+            "app_folder": "jacobi",
+            "app_params": [""],
+            "code_lines": 235
+        },
+        "jaccard": {
+            "app_folder": "jaccard",
+            "app_params": ["1024", "512", "1000"],
+            "code_lines": 417
+        },
+        "threadfence": {
+            "app_folder": "threadfence",
+            "app_params": ["100", "250000000"],
+            "code_lines": 139
+        },
+        "layout": {
+            "app_folder": "layout",
+            "app_params": ["2500"],
+            "code_lines": 197
+        },
+        "atomicCost": {
+            "app_folder": "atomicCost",
+            "app_params": ["16", "10"],
+            "code_lines": 10
+        },
+        "segment-reduce": {
+            "app_folder": "segment-reduce",
+            "app_params": ["16384", "100"],
+            "code_lines": 95
+        },
+        "dense-embedding": {
+            "app_folder": "dense-embedding",
+            "app_params": ["100000", "128", "100"],
+            "code_lines": 193
+        },
+        "pathfinder": {
+            "app_folder": "pathfinder",
+            "app_params": ["100000", "10000", "2500"],
+            "code_lines": 286
+        },
+        "bsearch": {
+            "app_folder": "bsearch",
+            "app_params": ["8388608", "1000"],
+            "code_lines":279
+        },
+        "entropy": {
+            "app_folder": "entropy",
+            "app_params": ["10000", "1024", "1"],
+            "code_lines": 171
+        },
+        "extrema": {
+            "app_folder": "extrema",
+            "app_params": ["750"],
+            "code_lines": 349
+        },
+        "colorwheel": {
+            "app_folder": "colorwheel",
+            "app_params": ["10000", "256", "500000"],
+            "code_lines": 154
+        },
+        "randomAccess": {
+            "app_folder": "randomAccess",
+            "app_params": ["10"],
+            "code_lines": 158
+        },
+        "lid-driven-cavity": {
+            "app_folder": "lid-driven-cavity",
+            "app_params": [""],
+            "code_lines": 1079
+        },
+        "marchingCubes": {
+            "app_folder": "marchingCubes",
+            "app_params": ["100"],
+            "code_lines": 574
+        }
+    },
+    "Altis": {
+        "xxx":"xxx"
+    },
+    "Miniapps": {
+        "source_folder": "Miniapps",
+        "miniMDock": {
+            "app_folder": "miniMDock",
+            "app_params": ["-lfile", "./input/7cpa/7cpa_ligand.pdbqt", "-nrun 250"],
+            "code_lines": 2394
+        },
+        "XSBench_hip": {
+            "app_folder": "XSBench/hip",
+            "app_params": ["-m", "event", "-l", "1700000000"],
+            "code_lines": 1472
+        },
+        "XSBench": {
+            "app_folder": "XSBench/cuda",
+            "app_params": ["-m", "event", "-l", "1700000000"],
+            "code_lines": 2200
+        }
+    }
+}

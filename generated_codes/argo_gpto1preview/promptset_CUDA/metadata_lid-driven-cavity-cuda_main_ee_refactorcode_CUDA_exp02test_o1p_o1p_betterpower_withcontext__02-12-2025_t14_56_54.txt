@@ -1,0 +1,54 @@
+***** EXPERIMENT CONFIGURATION SUMMARY *****
+
+Application: lid-driven-cavity
+
+EE Refactoring: CUDA_ee
+
+LLM Source: argo
+Model: gpto1preview
+Model coder: gpt4o
+System Prompt Index: CUDA
+Code file template: generated_codes/argo_gpto1preview/promptset_CUDA/lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_exp02test_o1p_o1p_betterpower_withcontext
+
+LLM System Prompt: 
+
+You are an expert C++/CUDA engineer. Your goal is to refactor provided CUDA C++ code for energy efficiency by reducing GPU and CPU power consumption without losing any functionality of the original code. You must also carefully read and incorporate the best practices from the provided background documents. You always surround your generated code with the three characters ```.
+
+LLM Prompt for Code Generation: 
+
+Carefully follow all these instructions step-by-step: 
+STEP 1. Read the background knowledge and your background knowledge summaries about programming and energy-efficiency strategies. 
+STEP 2. Read your description and analysis of the source code's functions, classes, and overall program flow.
+STEP 3. Analyze inefficiencies in the code: identify redundant computations, inefficient memory usage, unnecessary synchronizations, thread divergence issues, and any other issues you find. 
+STEP 4. Output a summary of any identified inefficiencies. 
+STEP 5. Propose a refactoring plan that applies optimizations and specific best practices from the background knowledge to reduce energy usage.
+
+Power measurement: True
+
+----- METRICS -----
+Experiment date-time: 02-12-2025_t14_56_54
+Time (sec): 444.65
+Self-correction iteration count: 1
+
+
+----- SOURCE: EXECUTION OUTPUT -----Problem size: 512 x 512 
+Time = 0.000477, delt = 4.768372e-04, iter = 92522, res = 9.999751e-04
+Time = 0.000954, delt = 4.768372e-04, iter = 88410, res = 9.999561e-04
+Time = 0.001000, delt = 4.632568e-05, iter = 86674, res = 9.999808e-04
+
+Total execution time of the iteration loop: 21.126003 (s)
+
+
+
+----- GENERATED: EXECUTION OUTPUT -----Problem size: 512 x 512 
+Time = 0.000477, delt = 4.768372e-04, iter = 1, res = 0.000000e+00
+Time = 0.000954, delt = 4.768372e-04, iter = 92522, res = 9.999751e-04
+Time = 0.001000, delt = 4.632568e-05, iter = 88388, res = 9.999884e-04
+
+Total execution time of the iteration loop: 13.780791 (s)
+
+
+
+----- ENERGY EFFICIENCY METRICS -----
+Total Energy (J):   Source code: 2288.46  Refactored code: 1745.7
+Average Power (W):   Source code: 105.79  Refactored code: 80.72

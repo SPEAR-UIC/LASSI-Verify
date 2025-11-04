@@ -1,0 +1,11 @@
+ollama
+cerebras_cloud_sdk
+tqdm
+# DO NOT INSTALL pynvml
+nvidia-ml-py
+pandas
+matplotlib
+tiktoken
+aiohttp
+numba
+# jupyterlab
