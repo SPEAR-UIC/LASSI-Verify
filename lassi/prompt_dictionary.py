@@ -157,6 +157,8 @@ class PromptDictionary:
 
             "hip": self.load_context_file("HIP_C_Programming_Guide.md"),
 
+            "inv_asserts": self.load_context_file("Invariant_Assertions_Catalog.md")
+
         }
         
         # Code Generation Prompts

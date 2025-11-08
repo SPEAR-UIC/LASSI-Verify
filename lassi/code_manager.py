@@ -328,6 +328,8 @@ def execute_code(experiment_data_directory, code_version, zero_shot, trial_numbe
                         stderr_lines.append(stderr_output)
                         
                         return_code = process.returncode
+
+                        print("\nTHE RETURN CODE: ", return_code)
                         
                         if return_code != 0:
                             ## error_output = ''.join(stderr_lines)
