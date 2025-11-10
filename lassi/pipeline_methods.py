@@ -145,7 +145,8 @@ def test_source_code(app_name, experiment_data_directory,
                      energy_history,
                      power_history,
                      runtime_history,
-                     valid_code_history
+                     valid_code_history,
+                     second_test = False
                     ):
     """
     Compile, execute, and measure power profile of source code.
@@ -184,24 +185,30 @@ def test_source_code(app_name, experiment_data_directory,
         exe_file_path = execute_file  # directory + "/" + execute_file
         zero_shot = False
         execute_result, exe_output_source, total_energy_joules, ave_power, std_power, duration, metrics_results_string = lassi.code_manager.execute_code_selectvendor(experiment_data_directory, code_version, zero_shot, trial_number, directory, exe_file_path, exe_input_parameters, power_measure, code_source, target_lang, build_script, make_script, gpu_vendor="auto", wait=1)
-        input_content_llmjudge_dict["source_stdout"] = exe_output_source
-        input_content_llmjudge_dict["source_metrics"] = metrics_results_string
+        if not second_test:
+            input_content_llmjudge_dict["source_stdout"] = exe_output_source
+            input_content_llmjudge_dict["source_metrics"] = metrics_results_string
         # Save source code energy metrics:
         sourcecode_total_energy_joules = total_energy_joules
         sourcecode_ave_power = ave_power
         if execute_result != "0":
             return False
-        print("\n\nMeasure system idle power...")
-        idle_energy_joules, idle_ave_power, idle_std_power = lassi.get_power.idlepower_selectvendor(experiment_data_directory, trial_number, duration, gpu_vendor="auto")
-        actual_energy = sourcecode_total_energy_joules - idle_energy_joules
-        energy_history.append(round(sourcecode_total_energy_joules, 2))
-        actual_ave_power = sourcecode_ave_power - idle_ave_power
-        power_history.append(round(float(sourcecode_ave_power), 2))
-        runtime_history.append(round(float(duration),2))
-        valid_code_history.append("SOURCE")
+        
+        if not second_test:
+            print("\n\nMeasure system idle power...")
+            idle_energy_joules, idle_ave_power, idle_std_power = lassi.get_power.idlepower_selectvendor(experiment_data_directory, trial_number, duration, gpu_vendor="auto")
+            actual_energy = sourcecode_total_energy_joules - idle_energy_joules
+            energy_history.append(round(sourcecode_total_energy_joules, 2))
+            actual_ave_power = sourcecode_ave_power - idle_ave_power
+            power_history.append(round(float(sourcecode_ave_power), 2))
+            runtime_history.append(round(float(duration),2))
+            valid_code_history.append("SOURCE")
 
-    return (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power,
+    if not second_test:
+        return (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power,
             duration, energy_history, power_history, runtime_history, valid_code_history)
+    else:
+        return compile_result, execute_result
 
 
 def selfprompting_context_builder(generate_context_flag,

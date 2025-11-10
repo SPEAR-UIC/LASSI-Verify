@@ -73,7 +73,8 @@ def argo_fetch_with_curl(data):
             # Use dedent to remove any leading whitespace from the HTML template
             # Put everything on one line to avoid extra whitespace
             html_content = (
-                f"<pre style='background:#f8f8f8;padding:10px;border-radius:5px;border:1px solid #ddd;"
+                # f"<pre style='background:#f8f8f8;padding:10px;border-radius:5px;border:1px solid #ddd;"
+                f"<pre style='background:#000;color:#fff;padding:10px;border-radius:5px;border:1px solid #ddd;"
                 f"white-space:pre-wrap;font-family:monospace;margin:0;'>{display_text}</pre>"
                 f"<style>"
                 f"@keyframes blink {{0%{{opacity:1}}50%{{opacity:0}}100%{{opacity:1}}}}"

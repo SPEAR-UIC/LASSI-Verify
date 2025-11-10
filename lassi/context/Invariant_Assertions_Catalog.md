@@ -1,7 +1,12 @@
+# LASSI-Verify: Invariant Assertion Catalog for GPU Code Instrumentation
 
----
+## Your Task
+You are instrumenting GPU-accelerated scientific C++/CUDA/HIP code with invariant assertions to validate functional equivalence during code transformation. You must insert assertions that verify correctness properties while being compatible with GPU execution constraints.
 
-# Invariant Assertion Catalog for GPU Code Instrumentation
+## Target Code Context
+- **Languages:** C++ with CUDA or HIP frameworks
+- **Execution Model:** GPU-parallelized applications (kernels and host code)
+- **Domain:** Scientific computing and HPC applications
 
 ## Critical Distinction: Type A vs Type B Assertions
 
@@ -101,6 +106,36 @@ Identify:
 ## ❌ ANTI-PATTERNS: What NOT to Do
 
 These are examples of **INCORRECT** assertion insertions that violate the invariant-only rule:
+
+### ❌ WRONG: Conditional Compilation Flags Around Assertions
+```cpp
+// BAD - Wrapping assertions in preprocessor conditionals
+#ifdef DEBUG
+    assert(x > 0 && "X must be positive");  // WRONG
+#endif
+
+#ifndef NDEBUG
+    assert(isfinite(result));  // WRONG
+#endif
+
+// BAD - Using custom debug flags
+if (VALIDATION_ENABLED) {
+    assert(data != nullptr);  // WRONG
+}
+```
+**Why this is wrong:** Assertions should ALWAYS be present in the code. The C/C++ standard library already provides the `-DNDEBUG` compilation flag to disable assertions for production builds. Adding additional conditional compilation defeats the purpose of verification.
+
+**CORRECT:**
+```cpp
+// GOOD - Unconditional assertions (can be disabled via -DNDEBUG at compile time)
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
+// LASSI_INSTRUMENTATION - Validate input
+assert(x > 0 && "X must be positive");
+assert(isfinite(result) && "Result must be finite");
+assert(data != nullptr && "Data pointer must be valid");
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
 
 ### ❌ WRONG: Thread Execution Order Assumptions
 ```cpp
@@ -231,12 +266,37 @@ assert(angle >= 0.0 && angle < 2.0 * M_PI && "Angle must be in [0, 2π)");
 
 ### 1.4 Numerical Validity (Initialization)
 **Use when:** Checking input data for NaN/Inf
+
+**For small arrays (< 1 million elements):**
 ```c
 // LASSI_INSTRUMENTATION - Validate numerical inputs
 for (int i = 0; i < N; i++) {
     assert(!isnan(array[i]) && !isinf(array[i]) && "Input contains NaN or Inf");
 }
 ```
+
+**For large arrays (≥ 1 million elements) - USE SAMPLING:**
+```c
+// LASSI_INSTRUMENTATION - Validate numerical inputs (sampled for large arrays)
+// Check first 1000 elements
+for (int i = 0; i < 1000 && i < N; i++) {
+    assert(isfinite(array[i]) && "Input contains non-finite values");
+}
+// Check last 1000 elements
+for (int i = (N > 1000 ? N - 1000 : 0); i < N; i++) {
+    assert(isfinite(array[i]) && "Input contains non-finite values");
+}
+// Optionally check middle elements
+int mid_start = N / 2 - 500;
+int mid_end = N / 2 + 500;
+if (mid_start > 0 && mid_end < N) {
+    for (int i = mid_start; i < mid_end; i++) {
+        assert(isfinite(array[i]) && "Input contains non-finite values");
+    }
+}
+```
+
+**Rationale for sampling:** For arrays with millions of elements, checking every element can be prohibitively expensive (O(N) overhead). Sampling validates data quality while maintaining reasonable validation cost.
 
 ### 1.5 Buffer Size Adequacy
 **Use when:** Output buffers must be large enough
@@ -249,8 +309,25 @@ assert(output_size >= required_size && "Output buffer too small");
 **Use when:** Function behavior depends on configuration parameters
 ```c
 // LASSI_INSTRUMENTATION - Validate configuration
-assert(num_threads > 0 && num_threads <= MAX_THREADS && "Invalid thread count");
 assert(tolerance > 0.0 && tolerance < 1.0 && "Tolerance must be in (0,1)");
+assert(max_iterations > 0 && "Max iterations must be positive");
+```
+
+**For GPU kernel parameters (INVARIANT constraints only):**
+```c
+// LASSI_INSTRUMENTATION - Validate kernel parameters (general constraints)
+assert(block.x > 0 && block.y > 0 && "Block dimensions must be positive");
+assert(block.x * block.y <= 1024 && "Block size exceeds maximum threads per block");
+assert(grid.x > 0 && grid.y > 0 && "Grid dimensions must be positive");
+assert(grid.x * block.x >= N && grid.y * block.y >= N && "Grid must cover domain size");
+```
+
+**DO NOT check specific implementation values:**
+```c
+// WRONG - Implementation-specific (these will break with different optimizations)
+assert(num_threads == 256);  // DO NOT CHECK SPECIFIC THREAD COUNT
+assert(block.x == 16);       // DO NOT CHECK SPECIFIC BLOCK SIZE
+assert(grid.x == N/16);      // DO NOT CHECK SPECIFIC GRID SIZE
 ```
 
 ### 1.7 Data Structure Integrity
@@ -613,12 +690,21 @@ cudaMemcpy(h_result, d_result, N*sizeof(double), cudaMemcpyDeviceToHost);
 for (int i = 0; i < N; i++) assert(isfinite(h_result[i]));
 ```
 
-**Kernel Parameter Validation:**
+**Kernel Parameter Validation (CRITICAL - Invariant Constraints Only):**
 ```cpp
-// LASSI_INSTRUMENTATION - Validate kernel parameters
-assert(threads > 0 && threads <= 1024 && "Invalid thread count");
-assert(blocks > 0 && "Invalid block count");
-assert(N == blocks * threads || N < blocks * threads && "Grid size mismatch");
+// LASSI_INSTRUMENTATION - Validate kernel parameters (general constraints only)
+assert(block.x > 0 && block.y > 0 && "Block dimensions must be positive");
+assert(block.x * block.y <= 1024 && "Block size exceeds maximum threads per block");
+assert(grid.x > 0 && grid.y > 0 && "Grid dimensions must be positive");
+assert(grid.x * block.x >= N && grid.y * block.y >= N && "Grid must cover domain size");
+```
+
+**DO NOT validate implementation-specific values:**
+```cpp
+// WRONG - These are implementation-specific and will break with refactoring
+assert(block.x == 16 && block.y == 16);  // Specific block size
+assert(grid.x == N/16);                   // Specific grid configuration
+assert(threads == 256);                   // Specific thread count
 ```
 
 ### Cost Considerations:
@@ -632,6 +718,101 @@ assert(N == blocks * threads || N < blocks * threads && "Grid size mismatch");
 - Avoid expensive checks in performance-critical paths
 - Consider sampling for very large arrays (check subset of elements)
 - Use compile-time flags to disable assertions in production
+
+---
+
+## Category 8: Final Output Validation (5 patterns)
+
+**Always validate final output arrays after computation completes and data is transferred back to host.**
+
+### 8.1 Output Finite Values
+**Use when:** Any computation that produces floating-point results
+```c
+// LASSI_INSTRUMENTATION - Validate final output for finite values
+// Copy results back to host first
+cudaMemcpy(h_output, d_output, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+// For small arrays (< 1M elements)
+for (int i = 0; i < N; i++) {
+    assert(isfinite(h_output[i]) && "Final output contains non-finite values");
+}
+
+// For large arrays (≥ 1M elements) - use sampling
+for (int i = 0; i < 1000 && i < N; i++) {
+    assert(isfinite(h_output[i]) && "Final output contains non-finite values");
+}
+for (int i = (N > 1000 ? N - 1000 : 0); i < N; i++) {
+    assert(isfinite(h_output[i]) && "Final output contains non-finite values");
+}
+```
+
+### 8.2 Boundary Condition Preservation
+**Use when:** Problem has fixed boundary conditions that should not change
+```c
+// LASSI_INSTRUMENTATION - Validate boundary conditions preserved
+// For a 2D grid with Dirichlet boundaries
+for (int j = 0; j < N; j++) {
+    // Check left and right boundaries
+    float expected_left = boundary_function(j);
+    float expected_right = boundary_function(j);
+    assert(fabs(h_field[IDX(0, j)] - expected_left) < tolerance 
+           && "Left boundary condition violated");
+    assert(fabs(h_field[IDX(N-1, j)] - expected_right) < tolerance 
+           && "Right boundary condition violated");
+}
+for (int i = 0; i < N; i++) {
+    // Check top and bottom boundaries
+    float expected_bottom = boundary_function(i);
+    float expected_top = boundary_function(i);
+    assert(fabs(h_field[IDX(i, 0)] - expected_bottom) < tolerance 
+           && "Bottom boundary condition violated");
+    assert(fabs(h_field[IDX(i, N-1)] - expected_top) < tolerance 
+           && "Top boundary condition violated");
+}
+```
+
+### 8.3 Physical Constraints on Output
+**Use when:** Output must satisfy physical constraints
+```c
+// LASSI_INSTRUMENTATION - Validate physical constraints on output
+for (int i = 0; i < N; i++) {
+    assert(temperature[i] > 0.0 && "Temperature must remain positive");
+    assert(density[i] > 0.0 && "Density must remain positive");
+    assert(pressure[i] >= 0.0 && "Pressure cannot be negative");
+}
+```
+
+### 8.4 Solution Quality Check
+**Use when:** Iterative solvers - validate convergence criterion was met
+```c
+// LASSI_INSTRUMENTATION - Validate solution quality
+// Compute residual: ||b - Ax||
+double residual = 0.0;
+for (int i = 0; i < N; i++) {
+    double row_sum = 0.0;
+    for (int j = 0; j < N; j++) {
+        row_sum += A[i*N + j] * x[j];
+    }
+    double r = b[i] - row_sum;
+    residual += r * r;
+}
+residual = sqrt(residual / N);
+assert(residual < tolerance * 10.0 && "Solution does not meet convergence criterion");
+```
+
+### 8.5 Output Range Validation
+**Use when:** Output values must fall within expected ranges
+```c
+// LASSI_INSTRUMENTATION - Validate output range
+double min_val = h_output[0];
+double max_val = h_output[0];
+for (int i = 1; i < N; i++) {
+    if (h_output[i] < min_val) min_val = h_output[i];
+    if (h_output[i] > max_val) max_val = h_output[i];
+}
+assert(min_val >= expected_min && "Output below expected minimum");
+assert(max_val <= expected_max && "Output exceeds expected maximum");
+```
 
 ---
 
@@ -837,5 +1018,28 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
    - Use appropriate tolerances for floating-point comparisons
    - Typical values: 1e-6 to 1e-10 depending on numerical precision requirements
    - Relative tolerances preferred for conservation laws
+
+---
+
+## Extensibility
+
+Users can add custom assertions following this template:
+
+```c
+// LASSI_INSTRUMENTATION - [Custom domain-specific property]
+// Rationale: [Why this invariant matters for this code]
+[assertion code using only standard library functions]
+```
+
+**Example custom assertion:**
+```c
+// LASSI_INSTRUMENTATION - Quantum mechanical normalization
+// Rationale: Wave function must remain normalized in quantum simulation
+double norm_squared = 0.0;
+for (int i = 0; i < N; i++) {
+    norm_squared += wavefunction[i] * wavefunction[i];
+}
+assert(fabs(norm_squared - 1.0) < 1e-8 && "Wave function not normalized");
+```
 
 ---
