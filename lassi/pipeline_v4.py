@@ -151,7 +151,7 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     input_content_llmjudge_dict["refactored_code_lang"] = target_lang
         
-    print("\n----- WELCOME TO PIPELINE v3! CODE -----\n")
+    print("\n----- WELCOME TO PIPELINE v4! LASSI with VERIFICATION -----\n")
 
     vendors = detect_gpu_vendors()
     if not vendors:
@@ -172,26 +172,17 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Collect baseline energy measurements.
     if test_code_first:
         """Initial stage to run the SOURCE CODE and gather metrics."""
-        (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
-         energy_history, power_history, runtime_history, valid_code_history) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, source_file_path, build_script, make_script, directory, source_lang, target_lang,
+        compile_result, execute_result = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, source_file_path, build_script, make_script, directory, source_lang, target_lang,
                                                                                                 exe_input_parameters, code_compiler, code_compiler_kwds,
                                                                                                 yes_execute, power_measure, input_content_llmjudge_dict,
                                                                                                 energy_history, power_history, runtime_history, valid_code_history,
                                                                                                 second_test=False
                                                                                                )
-        # Save the output details for this as the "best" code version for metadata record
-        # This is necessary to capture now if no better refactored code is generated:
-        best_refactored_code_dict = input_content_llmjudge_dict
-
-        experiment_data["source_v0_energy_J"] = sourcecode_total_energy_joules
-        experiment_data["source_v0_avg_power_W"] = sourcecode_ave_power
-        experiment_data["source_v0_runtime_s"] = duration
 
         print(print("\n----- END OF STAGE 0: TEST SOURCE -----\n"))
         print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
 
 
-    
     # ------------------------------------------
     # ----- STAGE 1: VANILLA LLM REFACTOR -----
     # ------------------------------------------
@@ -250,9 +241,11 @@ def auto_code_llmgeneration_pipeline(prompts,
     time.sleep(5)
 
     # Generate Code Analysis of source code for verification
+    # Mode: Focus on invariant assertions
     # Before we begin the LASSI-EE iterations
     if run_code_analysis:
         code_analysis = lassi.pipeline_methods.generate_code_analysis(
+                            mode = "inv_asserts",
                             source_lang=source_lang,
                             input_code=input_code,
                             llm_source=llm_source,
@@ -265,7 +258,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         )
     else:
         code_analysis = "None"
-    verification_log["sourcecode_analysis"] = code_analysis
+    verification_log["sourcecode_analysis_invasserts"] = code_analysis
     
     
     # -----------------------------------------------------------
@@ -280,22 +273,66 @@ def auto_code_llmgeneration_pipeline(prompts,
     
     input_code = lassi.verify.code_insert_asserts(
         input_content_llmjudge_dict["source_code"],
-        llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=True
+        llm_source, model, num_ctx, system_prompt, verification_log["sourcecode_analysis_invasserts"], display_response, verifyprompt=True
+    )
+
+    # Generate Code Analysis of source code for verification
+    # Mode: Focus on passthrough data blocks
+    # Before we begin the LASSI-EE iterations
+    if run_code_analysis:
+        code_analysis = lassi.pipeline_methods.generate_code_analysis(
+                            mode = "passthrough_blocks",
+                            source_lang=source_lang,
+                            input_code=input_code,
+                            llm_source=llm_source,
+                            model=model,
+                            num_ctx=num_ctx,
+                            system_prompt=system_prompt,
+                            context_prompt=original_context_content_prompt,
+                            display_response=display_response,
+                            verifyprompt=verifyprompt
+                        )
+    else:
+        code_analysis = "None"
+    verification_log["sourcecode_analysis_passthrough"] = code_analysis
+    
+    input_code = lassi.verify.code_insert_passthrough(
+        input_code,
+        llm_source, model, num_ctx, system_prompt, verification_log["sourcecode_analysis_passthrough"], display_response, verifyprompt=True
     )
 
     input_content_llmjudge_dict["source_code"] = input_code
 
-    if test_code_first:
-        """Run the source code test AGAIN after instrumenting the invariant assertions."""
-        compile_result, execute_result = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory,
-                                                                                                                        code_version, trial_number, source_file_path, build_script,
-                                                                                                                        make_script, directory, source_lang, target_lang,
-                                                                                                                        exe_input_parameters, code_compiler, code_compiler_kwds,
-                                                                                                                        yes_execute, power_measure, input_content_llmjudge_dict,
-                                                                                                                        energy_history, power_history, runtime_history, valid_code_history,
-                                                                                                                        second_test=True
-                                                                                                                    )
+    # Now, we need save the instrumented version of the source code to be used by the pipeline
+    file_name_save = file_name + "_" + dt_string
+    verify_source_file_path = experiment_data_directory + "/" + file_name_save + "_Trial_SOURCE" + "." + refactored_code_extension
+    print("saving to file_path: ", verify_source_file_path)
+    os.makedirs(os.path.dirname(verify_source_file_path), exist_ok=True)
+    with open(verify_source_file_path, 'w') as file:
+        file.write(input_code)
+    file.close()
+    
 
+    if test_code_first:
+        """Run the source code test AGAIN after instrumenting the invariant assertions and passthrough data blocks."""
+        (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
+            energy_history, power_history, runtime_history, valid_code_history) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory,
+                                                                                    code_version, trial_number, verify_source_file_path, build_script,
+                                                                                    make_script, directory, source_lang, target_lang,
+                                                                                    exe_input_parameters, code_compiler, code_compiler_kwds,
+                                                                                    yes_execute, power_measure, input_content_llmjudge_dict,
+                                                                                    energy_history, power_history, runtime_history, valid_code_history,
+                                                                                    second_test=True
+                                                                                )
+
+        # Save the output details for this as the "best" code version for metadata record
+        # This is necessary to capture now if no better refactored code is generated:
+        best_refactored_code_dict = input_content_llmjudge_dict
+
+        experiment_data["source_v0_energy_J"] = sourcecode_total_energy_joules
+        experiment_data["source_v0_avg_power_W"] = sourcecode_ave_power
+        experiment_data["source_v0_runtime_s"] = duration
+        
     # Add source code instrumented with verification to the first index of code_blocks
     code_blocks.append(input_code)
     

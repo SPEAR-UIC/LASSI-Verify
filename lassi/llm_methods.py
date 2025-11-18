@@ -322,4 +322,11 @@ def code_generator_llm(llm_source, model, num_ctx, temp, system_prompt, content_
     else:
         extracted_text = ""
     
+    # -------------------------------------
+    # ----- GENERATED CODE PROCESSING -----
+    if extracted_text.startswith('c++') or extracted_text.startswith('cpp'):
+        extracted_text = extracted_text[3:]
+    if extracted_text.startswith('c'):
+        extracted_text = extracted_text[1:]
+
     return response_text, extracted_text

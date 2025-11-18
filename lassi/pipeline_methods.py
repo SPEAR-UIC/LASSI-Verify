@@ -185,7 +185,7 @@ def test_source_code(app_name, experiment_data_directory,
         exe_file_path = execute_file  # directory + "/" + execute_file
         zero_shot = False
         execute_result, exe_output_source, total_energy_joules, ave_power, std_power, duration, metrics_results_string = lassi.code_manager.execute_code_selectvendor(experiment_data_directory, code_version, zero_shot, trial_number, directory, exe_file_path, exe_input_parameters, power_measure, code_source, target_lang, build_script, make_script, gpu_vendor="auto", wait=1)
-        if not second_test:
+        if second_test:
             input_content_llmjudge_dict["source_stdout"] = exe_output_source
             input_content_llmjudge_dict["source_metrics"] = metrics_results_string
         # Save source code energy metrics:
@@ -194,7 +194,7 @@ def test_source_code(app_name, experiment_data_directory,
         if execute_result != "0":
             return False
         
-        if not second_test:
+        if second_test:
             print("\n\nMeasure system idle power...")
             idle_energy_joules, idle_ave_power, idle_std_power = lassi.get_power.idlepower_selectvendor(experiment_data_directory, trial_number, duration, gpu_vendor="auto")
             actual_energy = sourcecode_total_energy_joules - idle_energy_joules
@@ -204,7 +204,7 @@ def test_source_code(app_name, experiment_data_directory,
             runtime_history.append(round(float(duration),2))
             valid_code_history.append("SOURCE")
 
-    if not second_test:
+    if second_test:
         return (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power,
             duration, energy_history, power_history, runtime_history, valid_code_history)
     else:
@@ -341,7 +341,7 @@ def generate_refactoring_plan(source_lang,
     return refactoring_plan, code_to_refactor
 
 
-def generate_code_analysis(source_lang, input_code,
+def generate_code_analysis(mode, source_lang, input_code,
                               llm_source,
                               model,
                               num_ctx,
@@ -350,16 +350,78 @@ def generate_code_analysis(source_lang, input_code,
                               display_response,
                               verifyprompt=False
                              ):
-    code_analysis_instructions = """
-    You are a formal methods and parallel programming expert and you specialize in identifying key characteristics of a given CUDA code. The characteristics can be something like invariants (a property of the program state that is always true), properties, patterns, unit tests, etc. The goal is to use these characteristics to determine if a refactored version of the code provide the same general functionality. Your task is to:
-    1. Identify underlying assumptions of the code
-    2. Identify invariants
-    3. Identify design patterns
-    4. Identify memory access patterns
-    5. Identify memory allocation/deallocation
-    6. Other key characteristics of the code
-    Please output your findings in a json file format. Put "=====" before and after the json output.
-    """
+    if mode == "inv_asserts":
+        code_analysis_instructions = """
+        You are a formal methods and parallel programming expert and you specialize in identifying key characteristics of a given CUDA code. The characteristics can be something like invariants (a property of the program state that is always true), properties, patterns, unit tests, etc. The goal is to use these characteristics to determine if a refactored version of the code provide the same general functionality. Your task is to:
+        1. Identify underlying assumptions of the code
+        2. Identify invariants
+        3. Identify design patterns
+        4. Identify memory access patterns
+        5. Identify memory allocation/deallocation
+        6. Other key characteristics of the code
+        Please output your findings in a json file format. Put "=====" before and after the json output.
+        """
+    elif mode == "passthrough_blocks":
+        code_analysis_instructions = r"""
+            You are a GPU programming expert specializing in identifying computational outputs and data flow in parallel scientific codes. Your task is to analyze the given code to determine what data should be captured for passthrough verification testing.
+            
+            Passthrough testing compares the final computational results between source and refactored versions to verify functional equivalence. You need to identify:
+            
+            1. **PRIMARY OUTPUT BUFFERS**: Which device/host pointers contain the FINAL computational results?
+               - Exclude temporary/intermediate buffers used only during computation
+               - Identify the buffer name, data type, and element count
+               - Note if results are on device (need cudaMemcpy) or host (direct access)
+            
+            2. **COMPUTATION COMPLETION POINT**: Where in the code flow is computation complete?
+               - After which synchronization point? (cudaDeviceSynchronize, stream sync, etc.)
+               - Before which deallocation or return statement?
+               - At what point are results "finalized"?
+            
+            3. **SUCCESS/FAILURE INDICATORS**: How does the code signal success?
+               - PASS/FAIL print statements?
+               - Return codes (0 for success, -1 for failure)?
+               - Convergence criteria being met?
+            
+            4. **OUTPUT BUFFER CHARACTERISTICS**:
+               - Buffer name (e.g., d_f, d_result, output_array)
+               - Data type (float, double, int, complex, custom struct)
+               - Size determination (constant N, variable size, allocated size)
+               - Location (device memory, host memory, pinned memory)
+            
+            5. **MULTIPLE OUTPUT SCENARIOS**: Are there multiple distinct outputs?
+               - List each output buffer separately
+               - Indicate priority (primary vs secondary results)
+               - Note if some outputs are diagnostic/optional
+            
+            6. **EDGE CASES**:
+               - Can computation exit early (error conditions)?
+               - Are there multiple exit points with different outputs?
+               - Does output depend on runtime parameters or conditionals?
+            
+            Please output your findings in JSON format. Put "=====" before and after the JSON output.
+            
+            REQUIRED JSON STRUCTURE:
+            {
+              "primary_output_buffers": [
+                {
+                  "name": "buffer_name",
+                  "type": "data_type",
+                  "location": "device|host",
+                  "size_expression": "N*N|variable expression",
+                  "description": "what this buffer represents"
+                }
+              ],
+              "secondary_output_buffers": [...],
+              "computation_complete_after": "description of sync point or statement",
+              "insert_dump_before": ["list of statements before which dump should occur"],
+              "success_indicators": ["PASS print", "return 0", "convergence check"],
+              "edge_cases": ["early exit on error", "multiple paths"],
+              "notes": ["any additional context for instrumentation"]
+            }
+
+        ---
+        
+        """
 
     code_to_analyze = "\n\n[START OF CODE TO ANALYZE]\n" + input_code + "\n[/END OF CODE TO ANALYZE]"
     code_analysis_instructions = code_analysis_instructions + code_to_analyze

@@ -1,1045 +1,222 @@
-# LASSI-Verify: Invariant Assertion Catalog for GPU Code Instrumentation
+# Invariant Assertion Catalog
 
-## Your Task
-You are instrumenting GPU-accelerated scientific C++/CUDA/HIP code with invariant assertions to validate functional equivalence during code transformation. You must insert assertions that verify correctness properties while being compatible with GPU execution constraints.
+## Core Principle
+Insert **ONLY invariant assertions** (properties that survive ANY refactoring/parallelization). Never insert implementation-specific checks.
 
-## Target Code Context
-- **Languages:** C++ with CUDA or HIP frameworks
-- **Execution Model:** GPU-parallelized applications (kernels and host code)
-- **Domain:** Scientific computing and HPC applications
-
-## Critical Distinction: Type A vs Type B Assertions
-
-### ✅ Type A: Invariant Assertions (REQUIRED - INSERT THESE)
-Properties that remain true regardless of parallelization strategy or execution order:
-- Input validity constraints
-- Mathematical invariants (conservation laws, symmetry, physical laws)
-- Output validity and correctness
-- Numerical properties that must hold
-- **These survive ANY refactoring, optimization, or parallelization change**
-
-### ❌ Type B: Implementation-Specific Assertions (FORBIDDEN - NEVER INSERT THESE)
-Properties tied to specific execution patterns:
-- Thread execution order assumptions
-- Intermediate state checks assuming serial or specific parallel execution
-- Timing or performance metrics
-- Thread/block/warp-specific checks
-- Algorithm implementation details that change with optimization
-
-**YOU MUST INSERT ONLY TYPE A ASSERTIONS.**
-
----
-
-## GPU-Specific Considerations
-
-### Host vs Device Code
-- **Host code assertions:** Place assertions in host functions before kernel launches and after device-to-host transfers
-- **Device code assertions:** Use `assert()` in device code sparingly - device assertions have performance cost
-- **Preferred approach:** Validate invariants on **host side** after transferring results from device
-
-### Memory Transfer Points (Critical)
-Insert assertions at these strategic locations:
-1. **Before host-to-device transfer:** Validate input data
-2. **After device-to-host transfer:** Validate output data
-3. **Before kernel launch:** Validate kernel parameters
-4. **After kernel completion:** Validate results
-
-### Example GPU Code Instrumentation Pattern:
+## ❌ FORBIDDEN Patterns
 ```cpp
-// LASSI_INSTRUMENTATION - Input validation before GPU transfer
-assert(h_input != nullptr && N > 0);
-for (int i = 0; i < N; i++) {
-    assert(isfinite(h_input[i]));
-}
-
-cudaMemcpy(d_input, h_input, N * sizeof(double), cudaMemcpyHostToDevice);
-
-kernel<<<blocks, threads>>>(d_input, d_output, N);
-cudaDeviceSynchronize();
-
-cudaMemcpy(h_output, d_output, N * sizeof(double), cudaMemcpyDeviceToHost);
-
-// LASSI_INSTRUMENTATION - Output validation after GPU transfer
-for (int i = 0; i < N; i++) {
-    assert(isfinite(h_output[i]));
-}
-```
-
----
-
-## Your Instructions
-
-### Step 1: Analyze the Code
-Identify:
-- Kernel functions and host functions
-- Input/output data structures
-- Memory transfer points (cudaMemcpy, hipMemcpy)
-- Mathematical operations performed
-- Physical domain and expected invariants
-
-### Step 2: Select Minimal Relevant Assertions
-- Choose from the catalog below
-- Focus on properties that validate correctness
-- Prefer host-side assertions over device-side
-- Consider computational cost (avoid expensive checks in hot loops)
-
-### Step 3: Insert Assertions at Strategic Points
-- **Host function start:** Input validation
-- **Before device transfer:** Data validity
-- **After device transfer:** Output validation
-- **Host function end:** Final correctness checks
-
-### Step 4: Mark All Insertions
-```cpp
-// LASSI_INSTRUMENTATION - [Brief description of what you're checking]
-[assertion code here]
-```
-
-### Step 5: Preserve Original Code
-- Insert assertions around original code
-- Do NOT modify the original algorithm
-- Do NOT change kernel implementations
-- Only ADD assertion checks
-
----
-
-## ❌ ANTI-PATTERNS: What NOT to Do
-
-These are examples of **INCORRECT** assertion insertions that violate the invariant-only rule:
-
-### ❌ WRONG: Conditional Compilation Flags Around Assertions
-```cpp
-// BAD - Wrapping assertions in preprocessor conditionals
+// NEVER wrap in conditionals
 #ifdef DEBUG
-    assert(x > 0 && "X must be positive");  // WRONG
+    assert(...);  // WRONG
 #endif
 
-#ifndef NDEBUG
-    assert(isfinite(result));  // WRONG
-#endif
+// NEVER check implementation details
+assert(block.x == 16);      // WRONG - specific block size
+assert(threads == 256);     // WRONG - specific thread count
+assert(grid.x == N/16);     // WRONG - specific grid config
 
-// BAD - Using custom debug flags
-if (VALIDATION_ENABLED) {
-    assert(data != nullptr);  // WRONG
+// NEVER check execution order
+if (tid > 0) assert(data[tid-1] < data[tid]);  // WRONG - thread order
+
+// NEVER expensive device checks
+__global__ void kernel() {
+    for (int j = 0; j < N; j++) assert(...);  // WRONG - O(N) per thread
 }
 ```
-**Why this is wrong:** Assertions should ALWAYS be present in the code. The C/C++ standard library already provides the `-DNDEBUG` compilation flag to disable assertions for production builds. Adding additional conditional compilation defeats the purpose of verification.
 
-**CORRECT:**
+## ✅ Required Patterns
+
+### 1. Input Validation (Host-Side, Before H→D Transfer)
 ```cpp
-// GOOD - Unconditional assertions (can be disabled via -DNDEBUG at compile time)
 // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
-// LASSI_INSTRUMENTATION - Validate input
-assert(x > 0 && "X must be positive");
-assert(isfinite(result) && "Result must be finite");
-assert(data != nullptr && "Data pointer must be valid");
+// LASSI_INSTRUMENTATION - Input validation
+assert(ptr != nullptr && N > 0 && M > 0);
+
+// Small arrays: full check
+for (int i = 0; i < N; i++) {
+    assert(isfinite(array[i]));
+}
+
+// Large arrays (≥1M elements): sample first/last 1000
+for (int i = 0; i < 1000 && i < N; i++) {
+    assert(isfinite(array[i]));
+}
+for (int i = (N > 1000 ? N - 1000 : 0); i < N; i++) {
+    assert(isfinite(array[i]));
+}
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
-
-### ❌ WRONG: Thread Execution Order Assumptions
+### 2. Kernel Parameters (General Constraints Only)
 ```cpp
-// BAD - Assumes specific thread execution order
-__global__ void bad_kernel(double* data, int N) {
-    int tid = threadIdx.x;
-    // WRONG: This assumes thread 0 executes before thread 1
-    if (tid > 0) {
-        assert(data[tid-1] < data[tid]); // IMPLEMENTATION-SPECIFIC
-    }
-}
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
+// LASSI_INSTRUMENTATION - Kernel parameters
+assert(block.x > 0 && block.y > 0 && block.x * block.y <= 1024);
+assert(grid.x > 0 && grid.y > 0);
+assert(grid.x * block.x >= N && grid.y * block.y >= N);
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
-### ❌ WRONG: Device-Side Assertions for Expensive Checks
+### 3. Output Validation (Host-Side, After D→H Transfer)
 ```cpp
-// BAD - Expensive check in device code
-__global__ void bad_kernel(double* matrix, int N) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) {
-        // WRONG: O(N) check per thread = O(N²) total cost
-        for (int j = 0; j < N; j++) {
-            assert(isfinite(matrix[i*N + j]));
-        }
-    }
-}
-```
-**CORRECT:** Validate matrix on host after transfer
+cudaMemcpy(h_output, d_output, N * sizeof(float), cudaMemcpyDeviceToHost);
 
-### ❌ WRONG: Intermediate Algorithm State
-```cpp
-// BAD - Checks implementation-specific intermediate state
-for (int iter = 0; iter < max_iter; iter++) {
-    jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
-    
-    // WRONG: Monotonicity assumption won't hold for all parallel strategies
-    cudaMemcpy(h_x_new, d_x_new, N*sizeof(double), cudaMemcpyDeviceToHost);
-    double new_error = compute_error(h_x_new, N);
-    assert(new_error < prev_error); // IMPLEMENTATION-SPECIFIC
-    prev_error = new_error;
-}
-```
-**CORRECT:** Only check final convergence after all iterations
-
-### ❌ WRONG: Performance Metrics
-```cpp
-// BAD - Timing assertions are implementation-specific
-auto start = std::chrono::high_resolution_clock::now();
-kernel<<<blocks, threads>>>(d_data, N);
-cudaDeviceSynchronize();
-auto end = std::chrono::high_resolution_clock::now();
-auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-// WRONG: Performance will vary with refactoring
-assert(duration.count() < 100); // IMPLEMENTATION-SPECIFIC
-```
-
-### ❌ WRONG: Shared Memory Assumptions
-```cpp
-// BAD - Shared memory state during execution
-__global__ void bad_kernel(double* data, int N) {
-    __shared__ double shared_data[256];
-    int tid = threadIdx.x;
-    
-    shared_data[tid] = data[tid];
-    __syncthreads();
-    
-    // WRONG: Assumes specific shared memory layout
-    assert(shared_data[0] == data[0]); // IMPLEMENTATION-SPECIFIC
-}
-```
-
-### ✅ CORRECT Alternatives for Each Case:
-
-**Case 1 (Order):** Check final sorted property on host
-```cpp
-// GOOD - Check invariant property after kernel completes
-cudaMemcpy(h_data, d_data, N*sizeof(double), cudaMemcpyDeviceToHost);
-for (int i = 0; i < N-1; i++) {
-    assert(h_data[i] <= h_data[i+1]); // Sorted property is invariant
-}
-```
-
-**Case 2 (Expensive):** Validate on host
-```cpp
-// GOOD - Single O(N²) check on host
-cudaMemcpy(h_matrix, d_matrix, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-for (int i = 0; i < N*N; i++) {
-    assert(isfinite(h_matrix[i]));
-}
-```
-
-**Case 3 (Intermediate):** Check final convergence only
-```cpp
-// GOOD - Check final result satisfies convergence
-cudaMemcpy(h_x, d_x, N*sizeof(double), cudaMemcpyDeviceToHost);
-double residual = compute_residual(h_A, h_b, h_x, N);
-assert(residual < tol);
-```
-
----
-
-## Assertion Categories
-
-## Category 1: Input Validity (7 patterns)
-
-### 1.1 Pointer Validity
-**Use when:** Functions accept pointer arguments
-```c
-// LASSI_INSTRUMENTATION - Validate input pointers
-assert(ptr != NULL && "Input pointer must not be NULL");
-```
-
-### 1.2 Array Size Constraints
-**Use when:** Functions accept array dimensions
-```c
-// LASSI_INSTRUMENTATION - Validate array dimensions
-assert(N > 0 && M > 0 && "Array dimensions must be positive");
-assert(N * M > 0 && "Array dimensions must not overflow");
-```
-
-### 1.3 Value Range Constraints
-**Use when:** Inputs have valid ranges (probabilities, angles, indices)
-```c
-// LASSI_INSTRUMENTATION - Validate input ranges
-assert(probability >= 0.0 && probability <= 1.0 && "Probability must be in [0,1]");
-assert(index >= 0 && index < array_size && "Index must be within array bounds");
-assert(angle >= 0.0 && angle < 2.0 * M_PI && "Angle must be in [0, 2π)");
-```
-
-### 1.4 Numerical Validity (Initialization)
-**Use when:** Checking input data for NaN/Inf
-
-**For small arrays (< 1 million elements):**
-```c
-// LASSI_INSTRUMENTATION - Validate numerical inputs
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
+// LASSI_INSTRUMENTATION - Output validation
+// Finite values (use sampling for large arrays)
 for (int i = 0; i < N; i++) {
-    assert(!isnan(array[i]) && !isinf(array[i]) && "Input contains NaN or Inf");
+    assert(isfinite(h_output[i]));
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
-**For large arrays (≥ 1 million elements) - USE SAMPLING:**
-```c
-// LASSI_INSTRUMENTATION - Validate numerical inputs (sampled for large arrays)
-// Check first 1000 elements
-for (int i = 0; i < 1000 && i < N; i++) {
-    assert(isfinite(array[i]) && "Input contains non-finite values");
-}
-// Check last 1000 elements
-for (int i = (N > 1000 ? N - 1000 : 0); i < N; i++) {
-    assert(isfinite(array[i]) && "Input contains non-finite values");
-}
-// Optionally check middle elements
-int mid_start = N / 2 - 500;
-int mid_end = N / 2 + 500;
-if (mid_start > 0 && mid_end < N) {
-    for (int i = mid_start; i < mid_end; i++) {
-        assert(isfinite(array[i]) && "Input contains non-finite values");
-    }
-}
-```
+## Domain-Specific Invariants
 
-**Rationale for sampling:** For arrays with millions of elements, checking every element can be prohibitively expensive (O(N) overhead). Sampling validates data quality while maintaining reasonable validation cost.
+**Select patterns based on code analysis:**
 
-### 1.5 Buffer Size Adequacy
-**Use when:** Output buffers must be large enough
-```c
-// LASSI_INSTRUMENTATION - Validate buffer sizes
-assert(output_size >= required_size && "Output buffer too small");
-```
-
-### 1.6 Configuration Validity
-**Use when:** Function behavior depends on configuration parameters
-```c
-// LASSI_INSTRUMENTATION - Validate configuration
-assert(tolerance > 0.0 && tolerance < 1.0 && "Tolerance must be in (0,1)");
-assert(max_iterations > 0 && "Max iterations must be positive");
-```
-
-**For GPU kernel parameters (INVARIANT constraints only):**
-```c
-// LASSI_INSTRUMENTATION - Validate kernel parameters (general constraints)
-assert(block.x > 0 && block.y > 0 && "Block dimensions must be positive");
-assert(block.x * block.y <= 1024 && "Block size exceeds maximum threads per block");
-assert(grid.x > 0 && grid.y > 0 && "Grid dimensions must be positive");
-assert(grid.x * block.x >= N && grid.y * block.y >= N && "Grid must cover domain size");
-```
-
-**DO NOT check specific implementation values:**
-```c
-// WRONG - Implementation-specific (these will break with different optimizations)
-assert(num_threads == 256);  // DO NOT CHECK SPECIFIC THREAD COUNT
-assert(block.x == 16);       // DO NOT CHECK SPECIFIC BLOCK SIZE
-assert(grid.x == N/16);      // DO NOT CHECK SPECIFIC GRID SIZE
-```
-
-### 1.7 Data Structure Integrity
-**Use when:** Complex data structures are passed as input
-```c
-// LASSI_INSTRUMENTATION - Validate structure integrity
-assert(matrix->rows == matrix->cols && "Matrix must be square");
-assert(graph->num_edges <= graph->num_nodes * (graph->num_nodes - 1) / 2 
-       && "Invalid graph structure");
-```
-
----
-
-## Category 2: Conservation Laws (5 patterns)
-
-### 2.1 Mass/Energy Conservation
-**Use when:** Physical quantities should be conserved
-```c
-// LASSI_INSTRUMENTATION - Conservation check
-double initial_total = compute_total(array, N);
+### Conservation Laws
+```cpp
+// Mass/energy/sum conservation
+double initial = compute_sum(array, N);
 // ... computation ...
-double final_total = compute_total(array, N);
-double relative_error = fabs(final_total - initial_total) / fabs(initial_total);
-assert(relative_error < 1e-6 && "Mass/energy not conserved");
+double final = compute_sum(array, N);
+assert(fabs(final - initial) / fabs(initial) < 1e-6);
 ```
 
-### 2.2 Element Count Conservation
-**Use when:** Number of elements should not change (transforms, permutations)
-```c
-// LASSI_INSTRUMENTATION - Element count conservation
-int initial_count = count_elements(input, N);
-// ... computation ...
-int final_count = count_elements(output, M);
-assert(initial_count == final_count && "Element count not preserved");
-```
-
-### 2.3 Sum Conservation
-**Use when:** Total sum should remain constant
-```c
-// LASSI_INSTRUMENTATION - Sum conservation
-double initial_sum = 0.0;
-for (int i = 0; i < N; i++) initial_sum += array[i];
-// ... computation ...
-double final_sum = 0.0;
-for (int i = 0; i < N; i++) final_sum += array[i];
-assert(fabs(final_sum - initial_sum) < 1e-6 * fabs(initial_sum) 
-       && "Sum not conserved");
-```
-
-### 2.4 Norm Conservation
-**Use when:** Vector/matrix norms should be preserved (unitary transforms)
-```c
-// LASSI_INSTRUMENTATION - Norm conservation
-double initial_norm = compute_l2_norm(vector, N);
-// ... computation ...
-double final_norm = compute_l2_norm(vector, N);
-assert(fabs(final_norm - initial_norm) < 1e-6 && "L2 norm not preserved");
-```
-
-### 2.5 Probability Distribution Conservation
-**Use when:** Working with probability distributions
-```c
-// LASSI_INSTRUMENTATION - Probability conservation
-double sum = 0.0;
-for (int i = 0; i < N; i++) {
-    assert(probs[i] >= 0.0 && "Probabilities must be non-negative");
-    sum += probs[i];
-}
-assert(fabs(sum - 1.0) < 1e-6 && "Probabilities must sum to 1");
-```
-
----
-
-## Category 3: Symmetry Properties (4 patterns)
-
-### 3.1 Matrix Symmetry
-**Use when:** Operations should preserve symmetric matrices
-```c
-// LASSI_INSTRUMENTATION - Matrix symmetry check
+### Symmetry
+```cpp
+// Matrix symmetry
 for (int i = 0; i < N; i++) {
     for (int j = i + 1; j < N; j++) {
-        double diff = fabs(matrix[i*N + j] - matrix[j*N + i]);
-        assert(diff < 1e-10 && "Matrix symmetry violated");
+        assert(fabs(matrix[i*N+j] - matrix[j*N+i]) < 1e-10);
     }
 }
 ```
 
-### 3.2 Permutation Symmetry
-**Use when:** Result should be invariant under permutation of symmetric inputs
-```c
-// LASSI_INSTRUMENTATION - Permutation invariance
-// For commutative operations like addition or multiplication
-assert(result_AB == result_BA && "Operation should be commutative");
-```
-
-### 3.3 Reflection Symmetry
-**Use when:** Physical system has reflection symmetry
-```c
-// LASSI_INSTRUMENTATION - Reflection symmetry
-for (int i = 0; i < N/2; i++) {
-    double diff = fabs(field[i] - field[N-1-i]);
-    assert(diff < tolerance && "Reflection symmetry violated");
+### Physical Constraints
+```cpp
+// Positivity (temperature, density, energy)
+for (int i = 0; i < N; i++) {
+    assert(temperature[i] > 0.0 && density[i] > 0.0);
 }
+
+// Non-negativity (counts, probabilities)
+assert(count >= 0 && probability >= 0.0 && probability <= 1.0);
+
+// Boundary conditions preserved
+assert(fabs(field[boundary_idx] - expected_value) < tolerance);
 ```
 
-### 3.4 Rotational Symmetry
-**Use when:** System has rotational invariance
-```c
-// LASSI_INSTRUMENTATION - Rotational invariance
-// For 2D field with rotational symmetry
-double center_value = field[N/2][N/2];
-for (int r = 1; r < N/2; r++) {
-    // Check points at same radius have similar values
-    // (simplified example - actual implementation depends on coordinate system)
-}
-```
-
----
-
-## Category 4: Monotonicity (4 patterns)
-
-### 4.1 Non-Decreasing Sequence
-**Use when:** Output should be sorted or monotonically increasing
-```c
-// LASSI_INSTRUMENTATION - Monotonicity check (non-decreasing)
+### Monotonicity
+```cpp
+// Sorted/non-decreasing
 for (int i = 0; i < N - 1; i++) {
-    assert(array[i] <= array[i+1] && "Array should be non-decreasing");
+    assert(array[i] <= array[i+1]);
 }
+
+// Error decrease (final check only, not per-iteration)
+assert(final_error < tolerance);
 ```
 
-### 4.2 Non-Increasing Sequence
-**Use when:** Values should decrease (e.g., residuals, errors)
-```c
-// LASSI_INSTRUMENTATION - Monotonicity check (non-increasing)
-for (int i = 0; i < N - 1; i++) {
-    assert(array[i] >= array[i+1] && "Array should be non-increasing");
-}
+### Numerical Stability
+```cpp
+// Finite values (no NaN/Inf)
+assert(isfinite(value) && !isnan(value) && !isinf(value));
+
+// Condition number bounds
+assert(condition_number < 1e12);
 ```
 
-### 4.3 Strictly Decreasing Energy/Error
-**Use when:** Iterative algorithms should reduce error or energy
-```c
-// LASSI_INSTRUMENTATION - Convergence monotonicity
-assert(current_error < previous_error * (1.0 + 1e-10) 
-       && "Error should decrease monotonically");
-```
-
-### 4.4 Bounded Monotonicity
-**Use when:** Values increase/decrease but within bounds
-```c
-// LASSI_INSTRUMENTATION - Bounded monotonic increase
-for (int i = 0; i < N - 1; i++) {
-    assert(array[i] <= array[i+1] && "Should be non-decreasing");
-    assert(array[i+1] - array[i] <= max_increment && "Increment too large");
-}
-```
-
----
-
-## Category 5: Physical Constraints (6 patterns)
-
-### 5.1 Positivity
-**Use when:** Physical quantities must be positive (temperature, density, energy)
-```c
-// LASSI_INSTRUMENTATION - Physical positivity constraint
-for (int i = 0; i < N; i++) {
-    assert(temperature[i] > 0.0 && "Temperature must be positive");
-    assert(density[i] > 0.0 && "Density must be positive");
-}
-```
-
-### 5.2 Non-Negativity
-**Use when:** Quantities cannot be negative (counts, concentrations, probabilities)
-```c
-// LASSI_INSTRUMENTATION - Non-negativity constraint
-for (int i = 0; i < N; i++) {
-    assert(count[i] >= 0 && "Count cannot be negative");
-    assert(concentration[i] >= 0.0 && "Concentration cannot be negative");
-}
-```
-
-### 5.3 Upper Bounds
-**Use when:** Physical quantities have maximum values
-```c
-// LASSI_INSTRUMENTATION - Upper bound constraint
-for (int i = 0; i < N; i++) {
-    assert(occupancy[i] <= 1.0 && "Occupancy cannot exceed 1");
-    assert(efficiency[i] <= 1.0 && "Efficiency cannot exceed 100%");
-}
-```
-
-### 5.4 Speed of Light Constraint
-**Use when:** Velocities in relativistic simulations
-```c
-// LASSI_INSTRUMENTATION - Relativistic constraint
-const double C = 299792458.0; // Speed of light in m/s
-for (int i = 0; i < N; i++) {
-    double speed = sqrt(vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
-    assert(speed <= C && "Velocity cannot exceed speed of light");
-}
-```
-
-### 5.5 Thermodynamic Constraints
-**Use when:** Working with thermodynamic quantities
-```c
-// LASSI_INSTRUMENTATION - Thermodynamic constraints
-assert(temperature > 0.0 && "Temperature must be positive (Kelvin scale)");
-assert(entropy_change >= 0.0 && "Entropy cannot decrease in isolated system");
-assert(pressure > 0.0 && "Pressure must be positive");
-```
-
-### 5.6 Charge Conservation
-**Use when:** Electromagnetic simulations
-```c
-// LASSI_INSTRUMENTATION - Charge conservation
-double initial_charge = compute_total_charge(particles, N);
-// ... computation ...
-double final_charge = compute_total_charge(particles, N);
-assert(fabs(final_charge - initial_charge) < 1e-10 && "Charge not conserved");
-```
-
----
-
-## Category 6: Numerical Stability (5 patterns)
-
-### 6.1 NaN Detection (Output)
-**Use when:** Validating output for numerical errors
-```c
-// LASSI_INSTRUMENTATION - NaN detection
-for (int i = 0; i < N; i++) {
-    assert(!isnan(result[i]) && "Result contains NaN");
-}
-```
-
-### 6.2 Infinity Detection
-**Use when:** Checking for overflow/divergence
-```c
-// LASSI_INSTRUMENTATION - Infinity detection
-for (int i = 0; i < N; i++) {
-    assert(!isinf(result[i]) && "Result contains Infinity");
-}
-```
-
-### 6.3 Finite Value Check (Combined)
-**Use when:** Ensuring all output values are finite
-```c
-// LASSI_INSTRUMENTATION - Finite value check
-for (int i = 0; i < N; i++) {
-    assert(isfinite(result[i]) && "Result must be finite");
-}
-```
-
-### 6.4 Condition Number Bounds
-**Use when:** Matrix operations sensitive to conditioning
-```c
-// LASSI_INSTRUMENTATION - Conditioning check
-double condition_number = estimate_condition_number(matrix, N);
-assert(condition_number < 1e12 && "Matrix is ill-conditioned");
-```
-
-### 6.5 Relative Error Bounds
-**Use when:** Comparing computed result to known or expected value
-```c
-// LASSI_INSTRUMENTATION - Relative error bound
-double relative_error = fabs(computed - expected) / fabs(expected);
-assert(relative_error < tolerance && "Relative error exceeds tolerance");
-```
-
----
-
-## Category 7: Structural Invariants (4 patterns)
-
-### 7.1 Sparsity Pattern Preservation
-**Use when:** Sparse matrix operations should preserve zero structure
-```c
-// LASSI_INSTRUMENTATION - Sparsity preservation
-for (int i = 0; i < N; i++) {
-    for (int j = 0; j < N; j++) {
-        if (original_matrix[i*N + j] == 0.0) {
-            assert(fabs(result_matrix[i*N + j]) < 1e-15 
-                   && "Sparsity pattern violated");
-        }
-    }
-}
-```
-
-### 7.2 Diagonal Dominance
-**Use when:** Certain numerical methods require diagonally dominant matrices
-```c
-// LASSI_INSTRUMENTATION - Diagonal dominance check
+### Structural Invariants
+```cpp
+// Diagonal dominance (if required by method)
 for (int i = 0; i < N; i++) {
     double diag = fabs(matrix[i*N + i]);
     double row_sum = 0.0;
     for (int j = 0; j < N; j++) {
         if (i != j) row_sum += fabs(matrix[i*N + j]);
     }
-    assert(diag >= row_sum && "Matrix not diagonally dominant");
+    assert(diag >= row_sum);
 }
-```
 
-### 7.3 Positive Definiteness
-**Use when:** Matrix should remain positive definite (covariance, Gram matrices)
-```c
-// LASSI_INSTRUMENTATION - Positive definiteness check
-// Check all diagonal elements are positive (necessary condition)
+// Diagonal positivity (for positive definite)
 for (int i = 0; i < N; i++) {
-    assert(matrix[i*N + i] > 0.0 && "Diagonal must be positive");
+    assert(matrix[i*N + i] > 0.0);
 }
-// For full check, would need eigenvalue computation (expensive)
 ```
 
-### 7.4 Orthogonality
-**Use when:** Vectors or matrices should be orthogonal
-```c
-// LASSI_INSTRUMENTATION - Orthogonality check
-double dot_product = 0.0;
-for (int i = 0; i < N; i++) {
-    dot_product += vector1[i] * vector2[i];
-}
-assert(fabs(dot_product) < 1e-10 && "Vectors should be orthogonal");
-```
+## Selection Strategy
 
----
+1. **Analyze code domain** (CFD, linear algebra, iterative solver, etc.)
+2. **Select 3-5 relevant patterns** from above
+3. **Place at strategic points:**
+   - After input initialization → input validation
+   - After kernel parameters setup → parameter validation
+   - After final D→H transfer → output validation
+4. **Use sampling for arrays > 1M elements**
+5. **Always use protective comments**
 
-## Selection Guidelines for GPU Code
+## Domain Quick Reference
 
-### DO Insert Assertions For:
-- ✅ **Host-side input validation** (before cudaMemcpy H→D)
-- ✅ **Host-side output validation** (after cudaMemcpy D→H)
-- ✅ **Kernel launch parameter validation** (grid/block dimensions)
-- ✅ **Mathematical invariants** (conservation, symmetry, physical laws)
-- ✅ **Properties that survive ANY parallelization or optimization**
+- **CFD:** conservation (mass/energy/momentum), positivity (density/pressure/temp)
+- **Linear Algebra:** symmetry, orthogonality, norm conservation, conditioning
+- **Iterative Solvers:** convergence, residual bounds, monotonicity (final only)
+- **Molecular Dynamics:** particle count, energy conservation, positivity (distances)
+- **Monte Carlo:** probability sum to 1, non-negativity
 
-### DO NOT Insert Assertions For:
-- ❌ Thread/block/warp execution order
-- ❌ Shared memory state during kernel execution
-- ❌ Thread synchronization points
-- ❌ Performance metrics (kernel timing, memory bandwidth)
-- ❌ Implementation-specific GPU optimizations
-- ❌ Intermediate kernel states (unless copied to host)
+## Example: Jacobi Solver
 
-### GPU-Specific Guidelines:
-
-**Assertion Placement Priority:**
-1. **Host-side (preferred):** All invariant checks on CPU before/after GPU operations
-2. **Device-side (use sparingly):** Only for critical invariants that must be checked per-thread
-   - Device assertions have significant performance cost
-   - May cause kernel to fail silently or hang
-   - Prefer copying data to host for validation
-
-**Memory Transfer Validation:**
 ```cpp
-// ALWAYS validate before H→D transfer
-assert(h_data != nullptr);
-for (int i = 0; i < N; i++) assert(isfinite(h_data[i]));
-cudaMemcpy(d_data, h_data, N*sizeof(double), cudaMemcpyHostToDevice);
-
-// ALWAYS validate after D→H transfer  
-cudaMemcpy(h_result, d_result, N*sizeof(double), cudaMemcpyDeviceToHost);
-for (int i = 0; i < N; i++) assert(isfinite(h_result[i]));
-```
-
-**Kernel Parameter Validation (CRITICAL - Invariant Constraints Only):**
-```cpp
-// LASSI_INSTRUMENTATION - Validate kernel parameters (general constraints only)
-assert(block.x > 0 && block.y > 0 && "Block dimensions must be positive");
-assert(block.x * block.y <= 1024 && "Block size exceeds maximum threads per block");
-assert(grid.x > 0 && grid.y > 0 && "Grid dimensions must be positive");
-assert(grid.x * block.x >= N && grid.y * block.y >= N && "Grid must cover domain size");
-```
-
-**DO NOT validate implementation-specific values:**
-```cpp
-// WRONG - These are implementation-specific and will break with refactoring
-assert(block.x == 16 && block.y == 16);  // Specific block size
-assert(grid.x == N/16);                   // Specific grid configuration
-assert(threads == 256);                   // Specific thread count
-```
-
-### Cost Considerations:
-- **Low cost:** Pointer checks, single value checks, kernel parameter validation
-- **Medium cost:** O(N) checks on host after device-to-host transfer
-- **High cost:** O(N²) matrix checks on host
-- **Very high cost:** Device-side assertions (avoid if possible)
-
-**For large-scale GPU codes:**
-- Prefer low-medium cost host-side assertions
-- Avoid expensive checks in performance-critical paths
-- Consider sampling for very large arrays (check subset of elements)
-- Use compile-time flags to disable assertions in production
-
----
-
-## Category 8: Final Output Validation (5 patterns)
-
-**Always validate final output arrays after computation completes and data is transferred back to host.**
-
-### 8.1 Output Finite Values
-**Use when:** Any computation that produces floating-point results
-```c
-// LASSI_INSTRUMENTATION - Validate final output for finite values
-// Copy results back to host first
-cudaMemcpy(h_output, d_output, N * sizeof(float), cudaMemcpyDeviceToHost);
-
-// For small arrays (< 1M elements)
-for (int i = 0; i < N; i++) {
-    assert(isfinite(h_output[i]) && "Final output contains non-finite values");
-}
-
-// For large arrays (≥ 1M elements) - use sampling
-for (int i = 0; i < 1000 && i < N; i++) {
-    assert(isfinite(h_output[i]) && "Final output contains non-finite values");
-}
-for (int i = (N > 1000 ? N - 1000 : 0); i < N; i++) {
-    assert(isfinite(h_output[i]) && "Final output contains non-finite values");
-}
-```
-
-### 8.2 Boundary Condition Preservation
-**Use when:** Problem has fixed boundary conditions that should not change
-```c
-// LASSI_INSTRUMENTATION - Validate boundary conditions preserved
-// For a 2D grid with Dirichlet boundaries
-for (int j = 0; j < N; j++) {
-    // Check left and right boundaries
-    float expected_left = boundary_function(j);
-    float expected_right = boundary_function(j);
-    assert(fabs(h_field[IDX(0, j)] - expected_left) < tolerance 
-           && "Left boundary condition violated");
-    assert(fabs(h_field[IDX(N-1, j)] - expected_right) < tolerance 
-           && "Right boundary condition violated");
-}
-for (int i = 0; i < N; i++) {
-    // Check top and bottom boundaries
-    float expected_bottom = boundary_function(i);
-    float expected_top = boundary_function(i);
-    assert(fabs(h_field[IDX(i, 0)] - expected_bottom) < tolerance 
-           && "Bottom boundary condition violated");
-    assert(fabs(h_field[IDX(i, N-1)] - expected_top) < tolerance 
-           && "Top boundary condition violated");
-}
-```
-
-### 8.3 Physical Constraints on Output
-**Use when:** Output must satisfy physical constraints
-```c
-// LASSI_INSTRUMENTATION - Validate physical constraints on output
-for (int i = 0; i < N; i++) {
-    assert(temperature[i] > 0.0 && "Temperature must remain positive");
-    assert(density[i] > 0.0 && "Density must remain positive");
-    assert(pressure[i] >= 0.0 && "Pressure cannot be negative");
-}
-```
-
-### 8.4 Solution Quality Check
-**Use when:** Iterative solvers - validate convergence criterion was met
-```c
-// LASSI_INSTRUMENTATION - Validate solution quality
-// Compute residual: ||b - Ax||
-double residual = 0.0;
-for (int i = 0; i < N; i++) {
-    double row_sum = 0.0;
-    for (int j = 0; j < N; j++) {
-        row_sum += A[i*N + j] * x[j];
-    }
-    double r = b[i] - row_sum;
-    residual += r * r;
-}
-residual = sqrt(residual / N);
-assert(residual < tolerance * 10.0 && "Solution does not meet convergence criterion");
-```
-
-### 8.5 Output Range Validation
-**Use when:** Output values must fall within expected ranges
-```c
-// LASSI_INSTRUMENTATION - Validate output range
-double min_val = h_output[0];
-double max_val = h_output[0];
-for (int i = 1; i < N; i++) {
-    if (h_output[i] < min_val) min_val = h_output[i];
-    if (h_output[i] > max_val) max_val = h_output[i];
-}
-assert(min_val >= expected_min && "Output below expected minimum");
-assert(max_val <= expected_max && "Output exceeds expected maximum");
-```
-
----
-
-## Domain-Specific Guidance
-
-### Computational Fluid Dynamics (CFD)
-Key invariants:
-- Mass conservation
-- Energy conservation
-- Momentum conservation
-- Positivity of density, pressure, temperature
-- Speed limits (subsonic/supersonic bounds)
-
-### Linear Algebra
-Key invariants:
-- Matrix symmetry preservation
-- Orthogonality preservation
-- Norm conservation (unitary transforms)
-- Rank preservation (where applicable)
-- Conditioning bounds
-
-### Molecular Dynamics
-Key invariants:
-- Particle count conservation
-- Energy conservation (microcanonical ensemble)
-- Momentum conservation
-- Positivity of inter-particle distances
-- Temperature bounds
-
-### Monte Carlo Simulations
-Key invariants:
-- Probability sum to 1
-- Non-negativity of probabilities
-- Detailed balance (where applicable)
-- Acceptance ratio bounds
-
-### Iterative Solvers
-Key invariants:
-- Residual decrease (monotonicity)
-- Solution bounds
-- Convergence criteria satisfaction
-- Numerical stability
-
----
-
-## Example: GPU Jacobi Solver Instrumentation
-
-**INPUT CODE (before instrumentation):**
-```cpp
-__global__ void jacobi_kernel(double* A, double* b, double* x, double* x_new, int N) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) {
-        double sigma = 0.0;
-        for (int j = 0; j < N; j++) {
-            if (i != j) sigma += A[i*N + j] * x[j];
-        }
-        x_new[i] = (b[i] - sigma) / A[i*N + i];
-    }
-}
-
-void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double tol) {
-    double *d_A, *d_b, *d_x, *d_x_new;
+void jacobi_solver(float* A, float* b, float* x, int N, int max_iter, float tol) {
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
+    // LASSI_INSTRUMENTATION - Input validation
+    assert(A != nullptr && b != nullptr && x != nullptr && N > 0);
+    for (int i = 0; i < N*N; i++) assert(isfinite(A[i]));
+    for (int i = 0; i < N; i++) assert(isfinite(b[i]) && isfinite(x[i]));
+    // Diagonal non-zero (Jacobi requirement)
+    for (int i = 0; i < N; i++) assert(fabs(A[i*N + i]) > 1e-14);
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
     
-    cudaMalloc(&d_A, N*N*sizeof(double));
-    cudaMalloc(&d_b, N*sizeof(double));
-    cudaMalloc(&d_x, N*sizeof(double));
-    cudaMalloc(&d_x_new, N*sizeof(double));
+    // ... allocate device memory ...
+    // ... copy to device ...
     
-    cudaMemcpy(d_A, A, N*N*sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b, N*sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_x, x, N*sizeof(double), cudaMemcpyHostToDevice);
+    dim3 grid(N/16, N/16);
+    dim3 block(16, 16);
     
-    int threads = 256;
-    int blocks = (N + threads - 1) / threads;
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
+    // LASSI_INSTRUMENTATION - Kernel parameters
+    assert(block.x > 0 && block.y > 0 && block.x * block.y <= 1024);
+    assert(grid.x * block.x >= N && grid.y * block.y >= N);
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
     
-    for (int iter = 0; iter < max_iter; iter++) {
-        jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
-        cudaDeviceSynchronize();
-        std::swap(d_x, d_x_new);
-    }
+    // ... iteration loop ...
     
-    cudaMemcpy(x, d_x, N*sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(x, d_x, N * sizeof(float), cudaMemcpyDeviceToHost);
     
-    cudaFree(d_A); cudaFree(d_b); cudaFree(d_x); cudaFree(d_x_new);
-}
-```
-
-**YOUR OUTPUT (after instrumentation):**
-```cpp
-__global__ void jacobi_kernel(double* A, double* b, double* x, double* x_new, int N) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) {
-        double sigma = 0.0;
-        for (int j = 0; j < N; j++) {
-            if (i != j) sigma += A[i*N + j] * x[j];
-        }
-        x_new[i] = (b[i] - sigma) / A[i*N + i];
-    }
-}
-
-void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double tol) {
-    // LASSI_INSTRUMENTATION - Input validation (host-side)
-    assert(A != nullptr && b != nullptr && x != nullptr && "Input pointers must be valid");
-    assert(N > 0 && "Matrix dimension must be positive");
-    assert(max_iter > 0 && "Max iterations must be positive");
-    assert(tol > 0.0 && tol < 1.0 && "Tolerance must be in (0,1)");
-    
-    // LASSI_INSTRUMENTATION - Input numerical validity
-    for (int i = 0; i < N*N; i++) {
-        assert(isfinite(A[i]) && "Matrix A contains non-finite values");
-    }
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
+    // LASSI_INSTRUMENTATION - Output validation
+    for (int i = 0; i < N; i++) assert(isfinite(x[i]));
+    // Residual check
+    float residual = 0.0;
     for (int i = 0; i < N; i++) {
-        assert(isfinite(b[i]) && "Vector b contains non-finite values");
-        assert(isfinite(x[i]) && "Initial guess x contains non-finite values");
+        float ax = 0.0;
+        for (int j = 0; j < N; j++) ax += A[i*N + j] * x[j];
+        float r = b[i] - ax;
+        residual += r * r;
     }
+    residual = sqrtf(residual / N);
+    assert(residual < tol * 10.0);
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
     
-    // LASSI_INSTRUMENTATION - Diagonal dominance check (Jacobi requirement)
-    for (int i = 0; i < N; i++) {
-        assert(fabs(A[i*N + i]) > 1e-14 && "Diagonal element too small");
-    }
-    
-    // LASSI_INSTRUMENTATION - Matrix symmetry (if applicable to problem)
-    bool check_symmetry = true; // Set based on problem characteristics
-    if (check_symmetry) {
-        for (int i = 0; i < N; i++) {
-            for (int j = i + 1; j < N; j++) {
-                assert(fabs(A[i*N + j] - A[j*N + i]) < 1e-10 && "Matrix should be symmetric");
-            }
-        }
-    }
-    
-    double *d_A, *d_b, *d_x, *d_x_new;
-    
-    cudaMalloc(&d_A, N*N*sizeof(double));
-    cudaMalloc(&d_b, N*sizeof(double));
-    cudaMalloc(&d_x, N*sizeof(double));
-    cudaMalloc(&d_x_new, N*sizeof(double));
-    
-    cudaMemcpy(d_A, A, N*N*sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b, N*sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_x, x, N*sizeof(double), cudaMemcpyHostToDevice);
-    
-    int threads = 256;
-    int blocks = (N + threads - 1) / threads;
-    
-    for (int iter = 0; iter < max_iter; iter++) {
-        jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
-        cudaDeviceSynchronize();
-        std::swap(d_x, d_x_new);
-    }
-    
-    cudaMemcpy(x, d_x, N*sizeof(double), cudaMemcpyDeviceToHost);
-    
-    // LASSI_INSTRUMENTATION - Output validation (host-side after device-to-host transfer)
-    for (int i = 0; i < N; i++) {
-        assert(isfinite(x[i]) && "Solution x contains non-finite values");
-    }
-    
-    // LASSI_INSTRUMENTATION - Residual check (validates solution quality)
-    double residual_norm = 0.0;
-    for (int i = 0; i < N; i++) {
-        double ax_i = 0.0;
-        for (int j = 0; j < N; j++) {
-            ax_i += A[i*N + j] * x[j];
-        }
-        double r_i = b[i] - ax_i;
-        residual_norm += r_i * r_i;
-    }
-    residual_norm = sqrt(residual_norm);
-    assert(residual_norm < tol * 10.0 && "Solution does not satisfy convergence criterion");
-    
-    cudaFree(d_A); cudaFree(d_b); cudaFree(d_x); cudaFree(d_x_new);
+    // ... cleanup ...
 }
 ```
 
-**Key Points Demonstrated:**
-1. ✅ Assertions placed on **host side** (not in kernel)
-2. ✅ Validation **before** host-to-device transfer
-3. ✅ Validation **after** device-to-host transfer
-4. ✅ All assertions use standard library (`assert.h`, `math.h`)
-5. ✅ Assertions check **invariant properties** only
-6. ✅ Original kernel code **unchanged**
-7. ✅ Clear `// LASSI_INSTRUMENTATION` markers
+## Critical Reminders
 
----
-
-## Notes on Implementation
-
-1. **All assertions use standard library functions only:**
-   - `<assert.h>` for assert()
-   - `<math.h>` for isnan(), isinf(), isfinite(), fabs(), sqrt()
-   - No custom LASSI library required
-
-2. **Assertions marked with `// LASSI_INSTRUMENTATION`:**
-   - This marker tells the code generation LLM to preserve these sections
-   - Enables automated verification that assertions weren't modified
-
-3. **Rationale documentation:**
-   - Each assertion block should include a brief comment explaining what invariant is being checked
-   - This aids in debugging if assertions fail
-
-4. **Tolerance values:**
-   - Use appropriate tolerances for floating-point comparisons
-   - Typical values: 1e-6 to 1e-10 depending on numerical precision requirements
-   - Relative tolerances preferred for conservation laws
-
----
-
-## Extensibility
-
-Users can add custom assertions following this template:
-
-```c
-// LASSI_INSTRUMENTATION - [Custom domain-specific property]
-// Rationale: [Why this invariant matters for this code]
-[assertion code using only standard library functions]
-```
-
-**Example custom assertion:**
-```c
-// LASSI_INSTRUMENTATION - Quantum mechanical normalization
-// Rationale: Wave function must remain normalized in quantum simulation
-double norm_squared = 0.0;
-for (int i = 0; i < N; i++) {
-    norm_squared += wavefunction[i] * wavefunction[i];
-}
-assert(fabs(norm_squared - 1.0) < 1e-8 && "Wave function not normalized");
-```
-
----
+1. Host-side only (never in kernels)
+2. No conditional compilation (#ifdef DEBUG)
+3. No implementation-specific checks (block.x == 16)
+4. Use sampling for large arrays (>1M elements)
+5. Always use protective comments
+6. Standard library only (assert.h, cmath)
