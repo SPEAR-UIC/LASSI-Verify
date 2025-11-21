@@ -152,7 +152,12 @@ def test_source_code(app_name, experiment_data_directory,
     Compile, execute, and measure power profile of source code.
     """
     code_source = "source"  # generated
-    print("\n\n----- " + color.BLUE + "SOURCE CODE: Test compile and execute" + color.END + " -----")
+    if second_test:
+        second_test_label = "WITH INSERTS"
+    else:
+        second_test_label = ""
+
+    print("\n\n----- " + color.BLUE + "SOURCE CODE: Test compile and execute " + second_test_label + color.END + " -----")
     print("\nTest compile the original source code: " + str(source_file_path))
     if build_script:
         compile_result = lassi.code_manager.build_script_code("source_codes", code_build_script)

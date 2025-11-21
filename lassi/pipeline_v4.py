@@ -301,7 +301,15 @@ def auto_code_llmgeneration_pipeline(prompts,
         llm_source, model, num_ctx, system_prompt, verification_log["sourcecode_analysis_passthrough"], display_response, verifyprompt=True
     )
 
+    if input_code.startswith('c++') or input_code.startswith('cpp'):
+        input_code = input_code[3:]
+    if input_code.startswith('c'):
+        input_code = input_code[1:]
+    
     input_content_llmjudge_dict["source_code"] = input_code
+
+    print("\n\n===== WHAT IS THE CODE TO SAVE: ", input_code)
+    print("\n\n=====")
 
     # Now, we need save the instrumented version of the source code to be used by the pipeline
     file_name_save = file_name + "_" + dt_string
@@ -565,7 +573,6 @@ def auto_code_llmgeneration_pipeline(prompts,
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to generate code for energy efficiency -- improvement iteration." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, round(code_gen_temp,1), system_prompt, refactoring_plan_guide_iteration, display_response, verifyprompt)        
 
-        
         elif compile_result == "energy_efficiency" and energy_efficiency_refactor_success == True and not zero_shot:  #baseline_oneshot_goal:
 
             print("\n\n----- " + color.BOLD + color.BLUE + "EE Self-correction, New Refactor Plan " + color.END + " -----\n")
@@ -610,6 +617,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             # refactoring_plan_iteration = re.sub('\n', '', refactoring_plan)
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to generate code for energy efficiency -- with a new refactoring plan." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, code_gen_temp, system_prompt, refactoring_plan_guide, display_response, verifyprompt)
+        
         else:
             print("\n\n ????? NO CONDITION MET DURING ITERATION ?????")
             print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
@@ -767,8 +775,13 @@ def auto_code_llmgeneration_pipeline(prompts,
             # Do not enable feedback iteration in baseline mode
             #self_correction_power_counter = self_correction_power_counter_max + 1
             
+            # Merge source code analysis content:
+            verification_log["sourcecode_analysis"] = "\n\nInvariant Assertions Analysis: \n\n" + verification_log["sourcecode_analysis_invasserts"] + "\n\nPassthrough Data Analysis: \n\n" + verification_log["sourcecode_analysis_passthrough"]
             # Call LLM-as-a-judge to review SOURCE CODE and REFACTORED CODE to evaluate if likely valid
-            valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(target_lang, llm_source, model_judge, num_ctx, system_prompt, input_content_llmjudge_dict, power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt)
+            valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(
+                target_lang, llm_source, model_judge, num_ctx, system_prompt, input_content_llmjudge_dict,
+                power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt
+            )
             
             # Handle scenario where we might have a bad power measurement
             if total_energy_joules_refactor == 0:
@@ -926,6 +939,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         print(" power_improvement = " + str(round(power_improvement, 2)))
                         print("\n\n")
                         break
+            
             else:
                 # TODO: Change label: invalid or not more energy efficient
                 print("\n\n----- " + color.BOLD + color.BLUE + "WE HAVE GENERATED CODE THAT IS INVALID OR NOT MORE ENERGY EFFICIENT" + color.END + " -----\n")

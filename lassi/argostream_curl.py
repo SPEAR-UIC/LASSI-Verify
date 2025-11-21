@@ -13,7 +13,7 @@ def argo_fetch_with_curl(data):
         "-H", "Accept-Encoding: identity",
         "-H", "Accept: text/plain",
         "-H", "Cache-Control: no-cache",
-        "-H", "Host: apps-dev.inside.anl.gov"
+        "-H", "Host: apps-test.inside.anl.gov"
     ]
 
     # Check if payload is large (> 50KB as a safety threshold)
