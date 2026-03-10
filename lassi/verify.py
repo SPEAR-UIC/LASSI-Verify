@@ -11,64 +11,72 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
 
     # Append critical instruction to repsond with complete code
     content_prompt = """
-    You are a GPU-accelerated scientific CUDA C++ code instrumentation specialist.
-    
-    Given the following CUDA C++ source code, your task is to insert invariant assertion checks that validate functional equivalence during code transformation. These assertions will verify that mathematical and physical invariants hold before and after GPU computations while being compatible with GPU execution constraints.
-    
+    You are a GPU code verification specialist.
+
+    Your task is to instrument the provided CUDA C++ source code with **transformation-invariant
+    assertion checks** — properties that must hold in the original code AND any correct refactored
+    version, regardless of parallelization strategy, memory layout, or algorithmic optimization.
+
+    These assertions establish **observation points** where the original and any transformed code
+    must exhibit **observational equivalence** (identical behavior at program boundaries). They
+    function as empirical auxiliary variables, analogous to auxiliary variables in Owicki-Gries
+    parallel program verification: instrumentation added solely to observe computation properties
+    without altering the computation itself.
+
     **Critical Requirements:**
-    
+
     1. **Insert assertions ONLY on the host side** (CPU code), not inside device kernels
-    2. **Place assertions at strategic validation points:**
-       - After input validation (before cudaMemcpy host-to-device)
-       - After output retrieval (after cudaMemcpy device-to-host)
-       - Before any `return` statements
-       - After kernel completion and synchronization
-    
-    3. **Surround all assertion blocks with protective comments** so future LLM refactoring tasks will not modify them:
+    2. **Place assertions at key observation points:**
+       - At function entry: validate pointers, dimensions, and configuration parameters
+       - Before host-to-device transfers (cudaMemcpy H→D): validate input data
+       - After device-to-host transfers (cudaMemcpy D→H): validate output data
+       - At function exit: validate final result properties
+
+    3. **Surround all assertion blocks with protective comments** — these are CRITICAL:
+       they ensure assertions survive through subsequent LLM-driven transformation steps
+       without being removed or modified.
     ```cpp
        // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-       // LASSI_INSTRUMENTATION - [Brief description of what is being checked]
+       // LASSI_INSTRUMENTATION - [Brief description of invariant being checked]
        [your assertion code here]
-       // <<< END LASSI-VERIFY ASSERTIONS <
+       // <<< END LASSI-VERIFY ASSERTIONS <<<
     ```
-    
+
     4. **Use ONLY standard library functions:**
        - `#include <cassert>` or `#include <assert.h>` for assert()
        - `#include <cmath>` or `#include <math.h>` for isfinite(), isnan(), isinf(), fabs()
        - Do NOT create or reference any custom assertion libraries
-    
-    5. **Select assertions from the provided catalog below** that match the code's computational characteristics
-    
-    **Step-by-step process:**
-    
-    **Step 1: Analyze the source code**
-    - Review the provided CODE ANALYIS about this source code
-    - Identify input arrays/pointers and their sizes
-    - Identify output arrays/pointers and their sizes
-    - Identify memory transfer points (cudaMemcpy H→D and D→H)
-    - Determine the mathematical/physical domain (CFD, linear algebra, molecular dynamics, etc.)
-    - Identify any symmetry, conservation, or invariant properties that should hold
-    
-    **Step 2: Select minimal relevant assertions**
-    - Choose assertions from the catalog that validate correctness for THIS specific code
-    - Focus on properties that will remain true regardless of how the code is refactored or optimized
-    - Avoid redundant checks
-    
-    **Step 3: Insert assertion blocks**
-    - Add assertion blocks with protective commenting at the identified validation points
-    - Ensure all loops over host arrays use correct bounds from the source code
-    - Use variable names exactly as they appear in the source code
-    
-    **Step 4: Add required headers**
-    - Add `#include <cassert>` if not present
-    - Add `#include <cmath>` if not present (for isfinite, etc.)
-    
+
+    5. **Select minimal relevant assertions** from the provided catalog that match the code's
+       computational characteristics — prioritize foundational invariants (Layer 1), then add
+       domain-specific ones (Layer 2) where applicable. Avoid over-instrumentation.
+
+    **Your Analysis Approach:**
+
+    Rather than following a fixed procedure, analyze the code by answering these questions:
+
+    - **What is the computational domain?** (e.g., linear algebra, CFD, molecular dynamics,
+      iterative solver, stochastic methods) — this determines which domain invariants apply
+
+    - **What properties must be preserved across ANY correct transformation?**
+      - Input constraints: pointer validity, array bounds, value ranges, numerical validity
+      - Output constraints: correctness bounds, conservation laws, physical limits
+      - Mathematical laws: symmetry, conservation, monotonicity — but only where the
+        original problem requires them, not as assumptions about this implementation
+
+    - **Where are the natural observation points?** — function entry/exit and memory transfer
+      boundaries are the primary candidates; avoid checking intermediate kernel state
+
+    - **Which assertions are truly transformation-invariant?** — an assertion is valid only if
+      it would hold in any correct implementation of this computation, not just this specific
+      parallelization or optimization. When in doubt, do not insert the assertion.
+
     **Preserve all original code:**
     - Do not modify kernels, algorithmic logic, memory allocations, or performance optimizations
     - Do not remove or edit any existing code or comments
     - Only ADD assertion blocks with protective comments
     - Do not replace any original code with comment placeholders
-    
+
     ---
 
     """
@@ -85,7 +93,6 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
         
         **Do NOT include:**
         - Explanatory commentary about what you changed
-        - Markdown code fences
         - Descriptions of your reasoning
         - Summaries of insertions
         
@@ -103,7 +110,7 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     content_prompt = content_prompt + " [BEGIN SOURCE CODE]\n" + source_code + "\n[/END SOURCE CODE]"
     
     
-    print("\n----- " + color.BOLD + color.PURPLE + "STARTING CODE INSERT - Invarient Assertians" + color.END + " -----\n")
+    print("\n----- " + color.BOLD + color.PURPLE + "STARTING CODE INSERT - Invariant Assertions" + color.END + " -----\n")
     
     # print("\n\nDEBUG input parameter values:")
     # print("  llm_source: " + str(llm_source))
@@ -140,9 +147,12 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     # print("MATCH -- ", match)
     if match:
         extracted_code = match.group(1)
+        # Strip optional language specifier on the first line (e.g. "cpp\n" or "c++\n")
+        # LLMs commonly emit ```cpp ... ``` fences; group(1) captures the specifier too.
+        extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
     else:
         extracted_code = ""
 
-    print("\nEXTRACTED CODE: ", extracted_code)
+    # print("\nEXTRACTED CODE: ", extracted_code)  # DEBUG: uncomment to inspect extracted code block
     
     return extracted_code

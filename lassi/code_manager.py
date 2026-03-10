@@ -141,28 +141,23 @@ def compile_code(source_file, lang, code_compiler, code_compiler_kwds):
     # Split the compile keywords into a list of arguments
     compile_kwds_list = shlex.split(code_compiler_kwds)
 
+    # Strip the file extension to get the output binary path.
+    # Using os.path.splitext handles any source extension (.cu, .cpp, .hip)
+    # regardless of target language, preventing the source file from being
+    # overwritten when target_lang and source extension don't match (e.g.,
+    # target_lang="OMP" with a .cu source would previously not split on .cpp
+    # and nvcc would write the binary back over the source file).
+    output_file = os.path.splitext(source_file)[0]
+
     if lang == "OMP":
-        # The desired name of the compiled program
-        output_file = source_file.split('.cpp')[0]
         # Construct the compilation command
         compile_command = [code_compiler] + compile_kwds_list + [source_file, '-o', output_file]
-    
+
     elif lang == "CUDA":
-        # The desired name of the compiled program
-        output_file = source_file.split('.cu')[0]
         # Construct the compilation command
         compile_command = [code_compiler] + compile_kwds_list + [source_file, '-o', output_file]
-    
+
     elif lang == "HIP":  # NEW: Add HIP support
-        # The desired name of the compiled program
-        if source_file.endswith('.cu'):
-            output_file = source_file.split('.cu')[0]  # HIP can compile .cu files
-        elif source_file.endswith('.cpp'):
-            output_file = source_file.split('.cpp')[0]  # HIP can compile .cpp files
-        elif source_file.endswith('.hip'):
-            output_file = source_file.split('.hip')[0]  # Native HIP files
-        else:
-            output_file = source_file + '_compiled'  # Fallback
         # Construct the compilation command
         compile_command = [code_compiler] + compile_kwds_list + [source_file, '-o', output_file]
         
@@ -362,9 +357,10 @@ def execute_code(experiment_data_directory, code_version, zero_shot, trial_numbe
 
                 total_energy_joules = 0
                 ave_power = 0
-                
+                wall_end_time = time.time()  # Always capture; used for runtime measurement when power_measure=False
+
                 # Only continue power measurements if no exe error
-                if power_measure and (return_code == 0 or any("RESULTS" in s for s in stdout_lines)):           
+                if power_measure and (return_code == 0 or any("RESULTS" in s for s in stdout_lines)):
                     end_exe_time = time.time() - start_power_time
                     duration = end_exe_time - start_exe_time
                     # Continue collecting power data for a short time after inference
@@ -404,15 +400,20 @@ def execute_code(experiment_data_directory, code_version, zero_shot, trial_numbe
                         nvmlShutdown()
                     except NVMLError as err:
                         print(f"Failed to shutdown NVML: {err}")
-        
+
+                elif not power_measure and (return_code == 0 or any("RESULTS" in s for s in stdout_lines)):
+                    # Capture wall-clock duration and build metrics string for runtime (non-power) mode
+                    duration = wall_end_time - start_exe_time
+                    metrics_results_string = f"Code execution duration: {duration:.4f} seconds"
+
         except IOError as e:
             print(f"Pipeline error | An I/O error occurred: {e.strerror}")
         except Exception as e:
             print(f"Pipeline error | An error occurred: {e}")
     else:
         print(f"Pipeline error | The file {executable} does not exist.")
-    
-    
+
+
     # Check if the program ran successfully
     return_result = "0"  # default OK
     if any("RESULTS" in s for s in stdout_lines) or return_code == 0:
@@ -580,8 +581,9 @@ def execute_code_amd(experiment_data_directory, code_version, zero_shot, trial_n
 
                 total_energy_joules = 0
                 ave_power = 0
-                
-                if power_measure and (return_code == 0 or any("RESULTS" in s for s in stdout_lines)):            
+                wall_end_time = time.time()  # Always capture; used for runtime measurement when power_measure=False
+
+                if power_measure and (return_code == 0 or any("RESULTS" in s for s in stdout_lines)):
                     end_exe_time = time.time() - start_power_time
                     duration = end_exe_time - start_exe_time
                     time.sleep(15)
@@ -612,14 +614,19 @@ def execute_code_amd(experiment_data_directory, code_version, zero_shot, trial_n
                         ave_idle_power,
                         idle=False
                     )
-        
+
+                elif not power_measure and (return_code == 0 or any("RESULTS" in s for s in stdout_lines)):
+                    # Capture wall-clock duration and build metrics string for runtime (non-power) mode
+                    duration = wall_end_time - start_exe_time
+                    metrics_results_string = f"Code execution duration: {duration:.4f} seconds"
+
         except IOError as e:
             print(f"Pipeline error | An I/O error occurred: {e.strerror}")
         except Exception as e:
             print(f"Pipeline error | An error occurred: {e}")
     else:
         print(f"Pipeline error | The file {executable} does not exist.")
-    
+
     # ... (copy the return logic from original execute_code) ...
     return_result = "0"
     if any("RESULTS" in s for s in stdout_lines) or return_code == 0:

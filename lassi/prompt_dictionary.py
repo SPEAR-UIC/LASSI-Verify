@@ -3,7 +3,7 @@ import os
 class PromptDictionary:
     def __init__(self):
         
-        # Code Translation SYSTEM Prompts
+        # Code Transformation SYSTEM Prompts
         self.system_prompt_dict = {
             "general_system": "You are a professional coding AI assistant that specializes in translating parallelized code between coding frameworks.",
 
@@ -40,7 +40,16 @@ class PromptDictionary:
             "SYCL_to_CUDA": "You are a professional coding AI assistant that specializes in translating parallelized C++ code using SYCL to the CUDA framework. Provide only complete code without explanation. Surround your new generated code with the three characters ```.",
 
             "CUDA_to_SYCL": "You are a professional coding AI assistant that specializes in translating parallelized CUDA code to C++ code using SYCL. Provide only complete code without explanation. Surround your new generated code with the three characters ```.",
-            
+
+            # Runtime Performance Refactoring SYSTEM Prompts
+            "general_system_CUDA_runtime": "You are an expert C++/CUDA engineer. Your goal is to refactor provided CUDA C++ code to reduce wall-clock execution time by improving GPU and CPU utilization and parallelism, while preserving all original functionality and expected output of the provided code. You must also carefully read and incorporate the best practices and CUDA optimization techniques from the provided background documents and refactoring plans. You always surround your generated code with the three characters ```.",
+
+            "general_system_HIP_runtime": "You are an expert C++/HIP engineer. Your goal is to refactor provided HIP C++ code to reduce wall-clock execution time by improving GPU and CPU utilization and parallelism, while preserving all original functionality and expected output of the provided code. You must also carefully read and incorporate the best practices and HIP optimization techniques from the provided background documents and refactoring plans. You always surround your generated code with the three characters ```.",
+
+            "general_system_nocontext_CUDA_runtime": "You are an expert C++/CUDA engineer. Your goal is to refactor provided CUDA C++ code to reduce wall-clock execution time by improving GPU and CPU utilization and parallelism, while preserving all original functionality and expected output. You always surround your generated code with the three characters ```.",
+
+            "general_system_nocontext_HIP_runtime": "You are an expert C++/HIP engineer. Your goal is to refactor provided HIP C++ code to reduce wall-clock execution time by improving GPU and CPU utilization and parallelism, while preserving all original functionality and expected output. You always surround your generated code with the three characters ```.",
+
         }
         
         # Code Refactoring for Energy Efficiency TASK Prompts
@@ -93,7 +102,33 @@ class PromptDictionary:
 
             "CUDA_refactor_iteration": "Carefully follow these instructions step-by-step:\nSTEP 1: Select the most impactful of the improvements outlined in your refactoring plan that does not yet appear in the code below.\nSTEP 2: Rewrite the code to implement this one change with the intention to reduce runtime, reduce average power, or reduce total energy consumed.\n [REQUIREMENTS] Be sure to maintain all function, class, and kernel names, parameters, and return types. Preserve all original outputs. Ensure the code compiles with NVCC. Before generating the refactored code, briefly describe the changes you will make.",
 
-            "HIP_refactor_iteration": "Carefully follow these instructions step-by-step:\nSTEP 1: Select the most impactful of the improvements outlined in your refactoring plan that does not yet appear in the code below.\nSTEP 2: Rewrite the code to implement this one change with the intention to reduce runtime, reduce average power, or reduce total energy consumed.\n [REQUIREMENTS] Be sure to maintain all function, class, and kernel names, parameters, and return types. Preserve all original outputs. Ensure the code compiles with HIPCC. Before generating the refactored code, briefly describe the changes you will make."
+            "HIP_refactor_iteration": "Carefully follow these instructions step-by-step:\nSTEP 1: Select the most impactful of the improvements outlined in your refactoring plan that does not yet appear in the code below.\nSTEP 2: Rewrite the code to implement this one change with the intention to reduce runtime, reduce average power, or reduce total energy consumed.\n [REQUIREMENTS] Be sure to maintain all function, class, and kernel names, parameters, and return types. Preserve all original outputs. Ensure the code compiles with HIPCC. Before generating the refactored code, briefly describe the changes you will make.",
+
+            # Runtime Performance Refactoring TASK Prompts
+            # 2a. Baseline no-context prompts (used in zero-shot path)
+            "CUDA_baseline_nocontext_runtime": "Refactor the following CUDA C++ code to reduce wall-clock execution time by optimizing GPU utilization and parallelism, while preserving all functionality.",
+
+            "HIP_baseline_nocontext_runtime": "Refactor the following HIP C++ code to reduce wall-clock execution time by optimizing GPU utilization and parallelism, while preserving all functionality.",
+
+            "CUDA_baseline_runtime": "Carefully follow all these instructions step-by-step: \nSTEP 1. Read the background knowledge about programming and performance strategies. \nSTEP 2. Analyze inefficiencies in the CODE TO REFACTOR: identify redundant computations, inefficient memory usage, unnecessary synchronizations, thread divergence issues, and any other issues you find that could reduce total execution runtime.",
+
+            "HIP_baseline_runtime": "Carefully follow all these instructions step-by-step: \nSTEP 1. Read the background knowledge about programming and performance strategies. \nSTEP 2. Analyze inefficiencies in the CODE TO REFACTOR: identify redundant computations, inefficient memory usage, unnecessary synchronizations, thread divergence issues, and any other issues you find that could reduce total execution runtime.",
+
+            # 2b. Refactoring plan prompts (used in generate_refactoring_plan())
+            "CUDA_refactorplan_runtime": "Carefully follow all these instructions step-by-step: \nSTEP 1. Read the background knowledge, your background knowledge summaries about programming and runtime performance optimization strategies, and your description of the CPU/GPU system on which the code will be compiled and executed. \nSTEP 2. Read your description and analysis of the source code's functions, classes, and overall program flow.\nSTEP 3. Analyze performance bottlenecks in the CODE TO REFACTOR: identify redundant computations, inefficient memory access patterns, unnecessary synchronizations, thread divergence issues, suboptimal kernel launch configurations, and any other issues that increase execution time. \nSTEP 4. Output a summary of any identified bottlenecks. \nSTEP 5. Propose a code refactoring plan that applies your knowledge of the CPU/GPU compute system and optimizations and specific best practices from the background knowledge to reduce wall-clock execution time. Avoid generating code in your refactoring plan.",
+
+            "HIP_refactorplan_runtime": "Carefully follow all these instructions step-by-step: \nSTEP 1. Read the background knowledge, your background knowledge summaries about programming and runtime performance optimization strategies, and your description of the CPU/GPU system on which the code will be compiled and executed. \nSTEP 2. Read your description and analysis of the source code's functions, classes, and overall program flow.\nSTEP 3. Analyze performance bottlenecks in the CODE TO REFACTOR: identify redundant computations, inefficient memory access patterns, unnecessary synchronizations, thread divergence issues, suboptimal kernel launch configurations, and any other issues that increase execution time. \nSTEP 4. Output a summary of any identified bottlenecks. \nSTEP 5. Propose a code refactoring plan that applies your knowledge of the CPU/GPU compute system and optimizations and specific best practices from the background knowledge to reduce wall-clock execution time. Avoid generating code in your refactoring plan.",
+
+            # 2c. Code generation prompts (used directly in pipeline_v4.py)
+            # NOTE: _runtime and _iteration_runtime have identical text intentionally;
+            # they map to structurally different pipeline branches and may diverge later.
+            "CUDA_refactor_runtime": "Carefully follow these instructions step-by-step:\nSTEP 1: Select the most impactful of the improvements outlined in your refactoring plan that does not yet appear in the code below.\nSTEP 2: Rewrite the code to implement this one change with the intention to reduce wall-clock execution time.\n [REQUIREMENTS] Be sure to maintain all function, class, and kernel names, parameters, and return types. Preserve all original outputs. Ensure the code compiles with NVCC. Before generating the refactored code, briefly describe the changes you will make.",
+
+            "HIP_refactor_runtime": "Carefully follow these instructions step-by-step:\nSTEP 1: Select the most impactful of the improvements outlined in your refactoring plan that does not yet appear in the code below.\nSTEP 2: Rewrite the code to implement this one change with the intention to reduce wall-clock execution time.\n [REQUIREMENTS] Be sure to maintain all function, class, and kernel names, parameters, and return types. Preserve all original outputs. Ensure the code compiles with HIPCC. Before generating the refactored code, briefly describe the changes you will make.",
+
+            "CUDA_refactor_iteration_runtime": "Carefully follow these instructions step-by-step:\nSTEP 1: Select the most impactful of the improvements outlined in your refactoring plan that does not yet appear in the code below.\nSTEP 2: Rewrite the code to implement this one change with the intention to reduce wall-clock execution time.\n [REQUIREMENTS] Be sure to maintain all function, class, and kernel names, parameters, and return types. Preserve all original outputs. Ensure the code compiles with NVCC. Before generating the refactored code, briefly describe the changes you will make.",
+
+            "HIP_refactor_iteration_runtime": "Carefully follow these instructions step-by-step:\nSTEP 1: Select the most impactful of the improvements outlined in your refactoring plan that does not yet appear in the code below.\nSTEP 2: Rewrite the code to implement this one change with the intention to reduce wall-clock execution time.\n [REQUIREMENTS] Be sure to maintain all function, class, and kernel names, parameters, and return types. Preserve all original outputs. Ensure the code compiles with HIPCC. Before generating the refactored code, briefly describe the changes you will make."
 
             #Fix any additional  inefficiencies identified and other energy efficiency issues by re-writing the code using best practices in CUDA C++ optimization.
             #First, review the background knowledge and the code analysis to understand the code below.

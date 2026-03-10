@@ -7,7 +7,16 @@ import re
 from IPython.display import display, HTML
 
 def argo_fetch_with_curl(data):
-    url = "https://localhost:5000/argoapi/api/v1/resource/streamchat/"
+
+    local = True
+
+    if local:
+        host_url = "apps-dev.inside.anl.gov"
+    else:
+        host_url = "localhost:5000"
+    
+    url = f"https://{host_url}/argoapi/api/v1/resource/streamchat/"
+    
     headers = [
         "-H", "Content-Type: application/json",
         "-H", "Accept-Encoding: identity",
@@ -32,8 +41,10 @@ def argo_fetch_with_curl(data):
         # Small payload - pass directly
         data_arg = ["-d", data]
 
-    # Create an HTML display object for live streaming output
-    html_display = display(HTML(""), display_id=True)
+    # Live-streaming HTML widget (styled <pre> box with background).
+    # Commented out to avoid duplicate display alongside Markdown output in the notebook.
+    # Uncomment to re-enable real-time streaming visualization.
+    # html_display = display(HTML(""), display_id=True)
 
     try:
         # Run curl as a subprocess, capturing output as it streams
@@ -45,44 +56,46 @@ def argo_fetch_with_curl(data):
             text=True,
             bufsize=1  # Line-buffered for real-time output
         )
-    
+
         response_text = ""
-    
+
         # Read output line by line to maintain real-time streaming
         for line in iter(process.stdout.readline, ''):
             # Append new content and escape HTML characters for safety
             response_text += line
-            escaped_text = html.escape(response_text)
-    
-            # (Optional) If you want to add specific styling to tags, e.g. <think> tags:
-            styled_text = re.sub(
-                r'&lt;think&gt;',
-                '<span style="color: #d32f2f; font-weight: bold;">&lt;think&gt;</span>',
-                escaped_text
-            )
-            styled_text = re.sub(
-                r'&lt;/think&gt;',
-                '<span style="color: #d32f2f; font-weight: bold;">&lt;/think&gt;</span>',
-                styled_text
-            )
-            
-            # Create typewriter effect with a blinking cursor
-            display_text = f"{styled_text}<span style='border-right:2px solid;animation:blink 1s infinite'> </span>"
-            
-            # Update the display output with styled text
-            # Use dedent to remove any leading whitespace from the HTML template
-            # Put everything on one line to avoid extra whitespace
-            html_content = (
-                f"<pre style='background:#f8f8f8;padding:10px;border-radius:5px;border:1px solid #ddd;"
-                f"white-space:pre-wrap;font-family:monospace;margin:0;'>{display_text}</pre>"
-                f"<style>"
-                f"@keyframes blink {{0%{{opacity:1}}50%{{opacity:0}}100%{{opacity:1}}}}"
-                f"</style>"
-            )
-            
-            # Update the display output with styled text
-            html_display.update(HTML(html_content))
-            
+            # escaped_text = html.escape(response_text)
+
+            # # (Optional) If you want to add specific styling to tags, e.g. <think> tags:
+            # styled_text = re.sub(
+            #     r'&lt;think&gt;',
+            #     '<span style="color: #d32f2f; font-weight: bold;">&lt;think&gt;</span>',
+            #     escaped_text
+            # )
+            # styled_text = re.sub(
+            #     r'&lt;/think&gt;',
+            #     '<span style="color: #d32f2f; font-weight: bold;">&lt;/think&gt;</span>',
+            #     styled_text
+            # )
+
+            # # Create typewriter effect with a blinking cursor
+            # display_text = f"{styled_text}<span style='border-right:2px solid;animation:blink 1s infinite'> </span>"
+
+            # # Update the display output with styled text
+            # # Use dedent to remove any leading whitespace from the HTML template
+            # # Put everything on one line to avoid extra whitespace
+            # html_content = (
+            #     f"<pre class='lassi-out' style='padding:10px;border-radius:5px;"
+            #     f"white-space:pre-wrap;font-family:monospace;margin:0;'>{display_text}</pre>"
+            #     f"<style>"
+            #     f".lassi-out{{background:#f0f0f0;color:#1e1e1e;border:1px solid #ccc;}}"
+            #     f"@media(prefers-color-scheme:dark){{.lassi-out{{background:#1e1e1e;color:#d4d4d4;border:1px solid #444;}}}}"
+            #     f"@keyframes blink {{0%{{opacity:1}}50%{{opacity:0}}100%{{opacity:1}}}}"
+            #     f"</style>"
+            # )
+
+            # # Update the display output with styled text
+            # html_display.update(HTML(html_content))
+
             # print(line, end="", flush=True)  # Print each chunk live
             #output += line  # Capture full response
     

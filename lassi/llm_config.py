@@ -134,9 +134,11 @@ def cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp=0.2, verify
             display_text = f"{styled_text}<span style='border-right:2px solid;animation:blink 1s infinite'> </span>"  
             # Put everything on one line to avoid extra whitespace
             html_content = (
-                f"<pre style='background:#f8f8f8;padding:10px;border-radius:5px;border:1px solid #ddd;"
+                f"<pre class='lassi-out' style='padding:10px;border-radius:5px;"
                 f"white-space:pre-wrap;font-family:monospace;margin:0;'>{display_text}</pre>"
                 f"<style>"
+                f".lassi-out{{background:#f0f0f0;color:#1e1e1e;border:1px solid #ccc;}}"
+                f"@media(prefers-color-scheme:dark){{.lassi-out{{background:#1e1e1e;color:#d4d4d4;border:1px solid #444;}}}}"
                 f"@keyframes blink {{0%{{opacity:1}}50%{{opacity:0}}100%{{opacity:1}}}}"
                 f"</style>"
             )
@@ -221,9 +223,11 @@ def ollama_llm(model, num_ctx, system_prompt, content_prompt, temp=0.2, verifypr
             display_text = f"{styled_text}<span style='border-right:2px solid;animation:blink 1s infinite'> </span>"  
             # Put everything on one line to avoid extra whitespace
             html_content = (
-                f"<pre style='background:#f8f8f8;padding:10px;border-radius:5px;border:1px solid #ddd;"
+                f"<pre class='lassi-out' style='padding:10px;border-radius:5px;"
                 f"white-space:pre-wrap;font-family:monospace;margin:0;'>{display_text}</pre>"
                 f"<style>"
+                f".lassi-out{{background:#f0f0f0;color:#1e1e1e;border:1px solid #ccc;}}"
+                f"@media(prefers-color-scheme:dark){{.lassi-out{{background:#1e1e1e;color:#d4d4d4;border:1px solid #444;}}}}"
                 f"@keyframes blink {{0%{{opacity:1}}50%{{opacity:0}}100%{{opacity:1}}}}"
                 f"</style>"
             )

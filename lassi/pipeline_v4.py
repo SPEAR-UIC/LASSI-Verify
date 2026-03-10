@@ -69,7 +69,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                                      exe_input_parameters,
                                      meta_data_file,
                                      power_measure,
-                                     test_code_first,
+                                     # test_code_first DEPRECATED: Stage 0 (source code test) is now always required
+                                     #   to collect baseline metrics for both SOURCE_orig and SOURCE_verify comparisons.
                                      yes_power_feedback,
                                      dt_string,
                                      baseline_oneshot_goal,
@@ -151,7 +152,7 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     input_content_llmjudge_dict["refactored_code_lang"] = target_lang
         
-    print("\n----- WELCOME TO PIPELINE v3! CODE -----\n")
+    print("\n----- WELCOME TO PIPELINE v4! CODE -----\n")
 
     vendors = detect_gpu_vendors()
     if not vendors:
@@ -163,31 +164,36 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     report_gpu_memory()
         
-    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END) 
+    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END) 
     
     # --------------------------------
     # ----- STAGE 0: TEST SOURCE -----
     # --------------------------------
     # Test compile and execute the source code to validate compiler and execution environment.
     # Collect baseline energy measurements.
-    if test_code_first:
-        """Initial stage to run the SOURCE CODE and gather metrics."""
-        (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
-         energy_history, power_history, runtime_history, valid_code_history) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, source_file_path, build_script, make_script, directory, source_lang, target_lang,
-                                                                                                exe_input_parameters, code_compiler, code_compiler_kwds,
-                                                                                                yes_execute, power_measure, input_content_llmjudge_dict,
-                                                                                                energy_history, power_history, runtime_history, valid_code_history
-                                                                                               )
-        # Save the output details for this as the "best" code version for metadata record
-        # This is necessary to capture now if no better refactored code is generated:
-        best_refactored_code_dict = input_content_llmjudge_dict
+    """Initial stage to run the SOURCE CODE and gather metrics."""
+    (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
+     energy_history, power_history, runtime_history, valid_code_history) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, source_file_path, build_script, make_script, directory, source_lang, target_lang,
+                                                                                            exe_input_parameters, code_compiler, code_compiler_kwds,
+                                                                                            yes_execute, power_measure, input_content_llmjudge_dict,
+                                                                                            energy_history, power_history, runtime_history, valid_code_history
+                                                                                           )
+    # Save the output details for this as the "best" code version for metadata record
+    # This is necessary to capture now if no better refactored code is generated.
+    # Snapshot with dict() so subsequent runs don't overwrite the stored values.
+    best_refactored_code_dict = dict(input_content_llmjudge_dict)
 
-        experiment_data["source_v0_energy_J"] = sourcecode_total_energy_joules
-        experiment_data["source_v0_avg_power_W"] = sourcecode_ave_power
-        experiment_data["source_v0_runtime_s"] = duration
+    experiment_data["source_v0_energy_J"] = sourcecode_total_energy_joules
+    experiment_data["source_v0_avg_power_W"] = sourcecode_ave_power
+    experiment_data["source_v0_runtime_s"] = duration
 
-        print(print("\n----- END OF STAGE 0: TEST SOURCE -----\n"))
-        print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+    # Append original (uninstrumented) source code as code_blocks[0] = SOURCE_orig.
+    # Used by the vanilla LLM judge and as the non-instrumented comparison baseline.
+    code_blocks.append(input_code)
+    valid_code_history[-1] = "SOURCE_orig"  # Override "SOURCE" label from test_source_code
+
+    print(print("\n----- END OF STAGE 0: TEST SOURCE -----\n"))
+    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
 
 
     
@@ -218,7 +224,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     self_correction_counter = 0
     self_correction_power_counter = 0
 
-    # Pull in prompts used for base LLM
+    # Pull in prompts used for base (vanilla) LLM
     # Same prompting strategy for STAGE 1 and STAGE 2
     original_context_content_prompt, refactor_instructions, system_prompt = lassi.pipeline_methods.selfprompting_context_builder(
         generate_context_flag,
@@ -232,7 +238,8 @@ def auto_code_llmgeneration_pipeline(prompts,
         input_code=input_code,
         total_energy_joules=sourcecode_total_energy_joules,
         ave_power=sourcecode_ave_power,
-        verifyprompt=verifyprompt
+        verifyprompt=verifyprompt,
+        power_measure=power_measure,
     )
 
     # Locally hosted open-source LLMs
@@ -274,9 +281,11 @@ def auto_code_llmgeneration_pipeline(prompts,
     #  we next prompt LLM inference to insert Invariant Assertians into the source code
     #  with protective commenting to ensure subsequent LLM-driven code transformations do not
     #  change the assertians. (Next TODO is to insert passthrough data dump blocks.)
-    # Let's overwright the source code file in input_content_llmjudge_dict["source_code"]
-    #  -- if we need the original source later, then we can create a new dictionary key
-    
+    # Save original source before instrumentation so the vanilla LLM zero-shot stage
+    #  receives the unaltered source code (not the assertion-instrumented version).
+    # original_input_code is now accessible as code_blocks[0] (SOURCE_orig).
+    original_input_code = input_code
+
     input_code = lassi.verify.code_insert_asserts(
         input_content_llmjudge_dict["source_code"],
         llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=True
@@ -284,16 +293,28 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     input_content_llmjudge_dict["source_code"] = input_code
 
-    if test_code_first:
-        """Run the source code test AGAIN after instrumenting the invariant assertions."""
-        (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
-         energy_history, power_history, runtime_history, valid_code_history) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, source_file_path, build_script, make_script, directory, source_lang, target_lang,
-                                                                                                exe_input_parameters, code_compiler, code_compiler_kwds,
-                                                                                                yes_execute, power_measure, input_content_llmjudge_dict,
-                                                                                                energy_history, power_history, runtime_history, valid_code_history
-                                                                                               )
+    # Write the instrumented source to disk so test_source_code compiles and runs it —
+    # not the original .cu file. This gives true SOURCE_verify metrics that include
+    # any overhead from the inserted invariant assertion checks.
+    source_base, source_ext = os.path.splitext(source_file_path)
+    verify_source_file_path = source_base + "_verify" + source_ext
+    with open(verify_source_file_path, 'w') as _vf:
+        _vf.write(input_code)
+    print(f"\n----- LASSI-Verify: instrumented source written to {verify_source_file_path} -----")
 
-    # Add source code instrumented with verification to the first index of code_blocks
+    """Run the instrumented source code to capture SOURCE_verify baseline metrics.
+    Compiles and executes verify_source_file_path (the assertion-instrumented .cu file),
+    so history[1] reflects the true overhead of the invariant assertion instrumentation."""
+    (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
+     energy_history, power_history, runtime_history, valid_code_history) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
+                                                                                            exe_input_parameters, code_compiler, code_compiler_kwds,
+                                                                                            yes_execute, power_measure, input_content_llmjudge_dict,
+                                                                                            energy_history, power_history, runtime_history, valid_code_history
+                                                                                           )
+    valid_code_history[-1] = "SOURCE_verify"  # Override "SOURCE" label from test_source_code
+
+    # Append instrumented source code as code_blocks[1] = SOURCE_verify.
+    # LASSI pipeline refactors from this baseline; the LASSI judge compares against it.
     code_blocks.append(input_code)
     
     
@@ -307,11 +328,14 @@ def auto_code_llmgeneration_pipeline(prompts,
     ):
         # After the initial zero-shot and iteration attempts until no improvement, then
         # Update the prompt strategy with context and self-prompting responses.
-        if change_strategy and not zero_shot and compile_result == "energy_efficiency":             
+        if change_strategy and not zero_shot and compile_result == "energy_efficiency":
             print("\n\n" + color.BOLD + "CHANGE PROMPT STRATEGY! -----" + color.END)
             print("\n\n----- " + color.BOLD + color.BLUE + "STARTING LASSI: ITERATIVE SELF-PROMPTING WITH CONTEXT AND SELF-CORRECTION" + color.END + " -----\n")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
             generate_context_flag = True
+            # Reset tracking to SOURCE_verify (code_blocks[1]) as the LASSI baseline.
+            # LASSI refactors from the assertion-instrumented source and must beat its metrics.
+            tracking_best_version = 1
             original_context_knowledge, context_prompt, system_prompt = lassi.pipeline_methods.selfprompting_context_builder(
                 generate_context_flag,
                 get_system_info_flag,
@@ -324,9 +348,11 @@ def auto_code_llmgeneration_pipeline(prompts,
                 display_response=display_response,
                 use_context_summaries_only=use_context_summaries_only,
                 input_code=code_blocks[tracking_best_version],
-                total_energy_joules=energy_history[tracking_best_version],
-                ave_power=power_history[tracking_best_version],
-                verifyprompt=verifyprompt
+                original_code=original_input_code,  # Pass uninstrumented source for code description step
+                total_energy_joules=energy_history[tracking_best_version] if power_measure else runtime_history[tracking_best_version],
+                ave_power=power_history[tracking_best_version] if power_measure else 0.0,
+                verifyprompt=verifyprompt,
+                power_measure=power_measure,
             )
             change_strategy = False
 
@@ -335,12 +361,12 @@ def auto_code_llmgeneration_pipeline(prompts,
             # Increment code version for Stage 1
             code_version = code_version + 1
             print("\n\n----- " + color.BOLD + color.BLUE + "STARTING STAGE 1: BASE LLM REFACTORING WITHOUT SELF-CORRECTION " + color.END + " -----\n")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
             
             # BUILD REFACTING INSTRUCTION PROMPT
             instructions_prompt = refactor_instructions
-            # Append the source code to the prompt
-            instructions_prompt = instructions_prompt + "\n\n[START OF CODE TO REFACTOR]\n" + input_code + "\n[/END OF CODE TO REFACTOR]"                
+            # Append the ORIGINAL (uninstrumented) source code -- vanilla LLM should not see assertion instrumentation
+            instructions_prompt = instructions_prompt + "\n\n[START OF CODE TO REFACTOR]\n" + original_input_code + "\n[/END OF CODE TO REFACTOR]"
             # Save the original context + energy efficiency context for re-use during energy efficiency correction
             standalone_basellm_prompt_tokens = lassi.token_analysis.token_count(instructions_prompt)
 
@@ -358,7 +384,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             + Stopping condition through 0.2 increments of LLM temperature parameter until = 1.
             """
             print("\n\n----- " + color.BOLD + color.BLUE + "STARTING STAGE 2: BASE LLM REFACTORING WITH SELF-CORRECTION " + color.END + " -----\n")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
             
             # CALL THE LLM to generate the Stage 2 code refactoring using the source code
             # Prompting was built before WHILE loop initiates
@@ -381,8 +407,8 @@ def auto_code_llmgeneration_pipeline(prompts,
             # Append the background knowledge and/or LLM-generated summaries
             # instructions_prompt = instructions_prompt + "\n\n" + original_context_content_prompt
             instructions_prompt_core_iterations = instructions_prompt  # Save off for next iteration
-            # Append the source code to the prompt
-            instructions_prompt = instructions_prompt + "\n\n[START OF CODE TO REFACTOR]\n" + input_code + "\n[/END OF CODE TO REFACTOR]"
+            # Append the ORIGINAL (uninstrumented) source code -- vanilla LLM should not see assertion instrumentation
+            instructions_prompt = instructions_prompt + "\n\n[START OF CODE TO REFACTOR]\n" + original_input_code + "\n[/END OF CODE TO REFACTOR]"
             # instructions_prompt = instructions_prompt + "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and consumed a total energy of " + str(round(sourcecode_total_energy_joules, 2)) + " Joules at an average power of " + str(round(sourcecode_ave_power, 2)) + " Watts, which includes the idle system energy consumption and average power.\n"
                  
             # Save the original context + energy efficiency context for re-use during energy efficiency correction
@@ -398,7 +424,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             This condition is for handling CODE ERRORS during compilation or execution.
             """
             print("\n\n----- " + color.BOLD + color.BLUE + "HANDLING CODE ERRORS " + color.END + " -----\n")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
            
             # CALL THE LLM WITH CODE ERROR CORRECTION - COMPILE TIME OR RUN TIME
             print("\n\n----- " + color.BOLD + color.RED + "SELF-CORRECTION: " + str(self_correction_counter) + color.END + " -----")
@@ -434,7 +460,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             Re-attempt until energy efficiency improvement is not acheived (then change prompting strategy).
             """
             print("\n\n----- " + color.BOLD + color.BLUE + "ITERATION FOR STAGE 2: BASE LLM REFACTORING WITH SELF-CORRECTION " + color.END + " -----\n")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
            
             # CALL THE LLM to generate the another base LLM code refactoring using the prior refactored code
             # Using the same prompting as in the compile_result == "start" condition.
@@ -456,7 +482,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         elif compile_result == "energy_efficiency" and energy_efficiency_refactor_success == False and not zero_shot:  #baseline_oneshot_goal:
             
             print("\n\n----- " + color.BOLD + color.BLUE + "EE Self-correction, Increment LLM temp " + color.END + " -----\n")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
             
             """
             This condition only runs after zero_shot first attempt is completed.
@@ -481,13 +507,16 @@ def auto_code_llmgeneration_pipeline(prompts,
             # otherwise, new refactoring plans will only be created when
             # a new "best" code version is generated by the pipeline.
             if self_correction_power_counter == 0:
-                # Generate a new refactoring plan following a new "best" version of the refactored code
-                print(f"  Using refactored code version to write refactoring plan: {tracking_best_version}")  # The -1 because we are not needing the index number here.
+                # Generate a new refactoring plan following a new "best" version of the refactored code.
+                # When tracking_best_version <= 1 (SOURCE_orig or SOURCE_verify), pass the uninstrumented
+                # original source so the LLM focuses on the algorithm, not the assertion instrumentation.
+                plan_input_code = original_input_code if tracking_best_version <= 1 else code_blocks[tracking_best_version]
+                print(f"  Using refactored code version to write refactoring plan: {tracking_best_version} (uninstrumented original: {tracking_best_version <= 1})")
                 refactoring_plan, code_to_refactor = lassi.pipeline_methods.generate_refactoring_plan(
                     source_lang=source_lang,
-                    input_code=code_blocks[tracking_best_version],
-                    total_energy_joules=energy_history[tracking_best_version],
-                    ave_power=power_history[tracking_best_version],
+                    input_code=plan_input_code,
+                    total_energy_joules=energy_history[tracking_best_version] if power_measure else runtime_history[tracking_best_version],
+                    ave_power=power_history[tracking_best_version] if power_measure else 0.0,
                     llm_source=llm_source,
                     model=model,
                     num_ctx=num_ctx,
@@ -496,8 +525,20 @@ def auto_code_llmgeneration_pipeline(prompts,
                     prior_refactoring_plans=bad_refactor_plans,
                     display_response=display_response,
                     few_shot_learning=few_shot_learning,
-                    verifyprompt=verifyprompt
+                    verifyprompt=verifyprompt,
+                    power_measure=power_measure,
                 )
+                # When tracking_best_version <= 1, the plan was written using original_input_code
+                # (uninstrumented) to help the LLM focus on the algorithm. But the actual code
+                # to refactor must be code_blocks[1] (SOURCE_verify, with assertion instrumentation),
+                # not the original. For tracking_best_version >= 2, plan_input_code ==
+                # code_blocks[tracking_best_version] so code_to_refactor is already correct.
+                if tracking_best_version <= 1:
+                    code_to_refactor = "\n\n[START OF CODE TO REFACTOR]\n" + code_blocks[1] + "\n[/END OF CODE TO REFACTOR]"
+                    if power_measure:
+                        code_to_refactor += "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and consumed a total energy of " + str(round(energy_history[1], 2)) + " Joules at an average power of " + str(round(power_history[1], 2)) + " Watts, which includes the idle system energy consumption and average power.\n"
+                    else:
+                        code_to_refactor += "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and had a wall-clock execution time of " + str(round(runtime_history[1], 4)) + " seconds.\n"
             else:
                 # Build a list of tuples (index, code_chunk) where the status is "VALID"
                 ## valid_prior_codes = [(i, code) for i, (code, status) in enumerate(zip(code_blocks, valid_code_history)) if (status == "VALID" or status == "SOURCE" or status == "basellm_VALID")]
@@ -509,13 +550,17 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # CHANGE IDEA: Only work on the last 'best' code version, instead of the last 'valid' code
                 # Refactor the latest "BEST" code from the list (best = tracking code)
                 code_to_refactor = code_blocks[tracking_best_version]
-                code_to_refactor = code_to_refactor + "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and consumed a total energy of " + str(round(energy_history[tracking_best_version], 2)) + " Joules at an average power of " + str(round(power_history[tracking_best_version], 2)) + " Watts, which includes the idle system energy consumption and average power.\n"
+                if power_measure:
+                    code_to_refactor = code_to_refactor + "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and consumed a total energy of " + str(round(energy_history[tracking_best_version], 2)) + " Joules at an average power of " + str(round(power_history[tracking_best_version], 2)) + " Watts, which includes the idle system energy consumption and average power.\n"
+                else:
+                    code_to_refactor = code_to_refactor + "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and had a wall-clock execution time of " + str(round(runtime_history[tracking_best_version], 4)) + " seconds.\n"
                 print(f"... Prior code index selected to refactor: {tracking_best_version}")
                 
             # Context:
             # if only the first pass, then refactoring_plan_original will be for the source code,
             # otherwise, it will include the latest refactoring plan for the best code
-            refactoring_plan_guide_iteration = prompts.get_code_ee_refactoring_prompt(source_lang + "_refactor_iteration")
+            iter_suffix = "_refactor_iteration" if power_measure else "_refactor_iteration_runtime"
+            refactoring_plan_guide_iteration = prompts.get_code_ee_refactoring_prompt(source_lang + iter_suffix)
             # Append few-shot learning examples
             if few_shot_learning:
                 refactoring_plan_guide_iteration = refactoring_plan_guide_iteration + "\n\n" + prompts.get_codeknowledge(source_lang + "_c_few_shot_examples")
@@ -531,7 +576,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         elif compile_result == "energy_efficiency" and energy_efficiency_refactor_success == True and not zero_shot:  #baseline_oneshot_goal:
 
             print("\n\n----- " + color.BOLD + color.BLUE + "EE Self-correction, New Refactor Plan " + color.END + " -----\n")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
             
             """
             This condition only runs after zero_shot first attempt is completed.
@@ -539,16 +584,22 @@ def auto_code_llmgeneration_pipeline(prompts,
             The condition will generate a new refactoring plan for the latest best code.
             """
             print("\n\n----- " + color.BOLD + color.PURPLE + "SELF-IMPROVEMENT FOR ENERGY EFFICIENCY: " + str(energy_efficiency_iteration) + color.END + " -----\n")
-            print(f"  Using *just improved* refactored code version: {tracking_best_version}")  # The -1 because we are not needing the index number here.
-            
+            print(f"  Using *just improved* refactored code version: {tracking_best_version} (uninstrumented original: {tracking_best_version <= 1})")
+
             #report_gpu_memory(llm_source)
 
-            # Generate a new refactoring plan following a new "best" version of the refactored code
+            # Generate a new refactoring plan following a new "best" version of the refactored code.
+            # For the experiment, LASSI always starts from SOURCE_verify (index 1) to keep the
+            # vanilla LLM vs. LASSI comparison clean — even if vanilla LLM found a better version.
+            # When tracking_best_version <= 1 (SOURCE_orig or SOURCE_verify), pass the uninstrumented
+            # original source so the LLM focuses on the algorithm, not the assertion instrumentation.
+            # Metrics still come from track_history[tracking_best_version] (SOURCE_verify baseline).
+            plan_input_code = original_input_code if tracking_best_version <= 1 else code_blocks[tracking_best_version]
             refactoring_plan, code_to_refactor = lassi.pipeline_methods.generate_refactoring_plan(
                 source_lang=source_lang,
-                input_code=code_blocks[tracking_best_version],
-                total_energy_joules=energy_history[tracking_best_version],
-                ave_power=power_history[tracking_best_version],
+                input_code=plan_input_code,
+                total_energy_joules=energy_history[tracking_best_version] if power_measure else runtime_history[tracking_best_version],
+                ave_power=power_history[tracking_best_version] if power_measure else 0.0,
                 llm_source=llm_source,
                 model=model,
                 num_ctx=num_ctx,
@@ -557,10 +608,22 @@ def auto_code_llmgeneration_pipeline(prompts,
                 prior_refactoring_plans=bad_refactor_plans,
                 display_response=display_response,
                 few_shot_learning=False,
-                verifyprompt=verifyprompt
+                verifyprompt=verifyprompt,
+                power_measure=power_measure,
             )
+            # Same split as in the iteration block: plan used original_input_code for clean algorithm
+            # analysis, but the actual code to refactor must be code_blocks[1] (SOURCE_verify with
+            # assertions). For tracking_best_version >= 2, both plan and code_to_refactor already
+            # use code_blocks[tracking_best_version] consistently.
+            if tracking_best_version <= 1:
+                code_to_refactor = "\n\n[START OF CODE TO REFACTOR]\n" + code_blocks[1] + "\n[/END OF CODE TO REFACTOR]"
+                if power_measure:
+                    code_to_refactor += "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and consumed a total energy of " + str(round(energy_history[1], 2)) + " Joules at an average power of " + str(round(power_history[1], 2)) + " Watts, which includes the idle system energy consumption and average power.\n"
+                else:
+                    code_to_refactor += "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and had a wall-clock execution time of " + str(round(runtime_history[1], 4)) + " seconds.\n"
 
-            refactoring_plan_guide = prompts.get_code_ee_refactoring_prompt(source_lang + "_refactor")
+            refactor_suffix = "_refactor" if power_measure else "_refactor_runtime"
+            refactoring_plan_guide = prompts.get_code_ee_refactoring_prompt(source_lang + refactor_suffix)
             # Append few-shot learning examples
             if few_shot_learning:
                 refactoring_plan_guide = refactoring_plan_guide + "\n\n" + prompts.get_codeknowledge(source_lang + "_c_few_shot_examples")
@@ -574,7 +637,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, code_gen_temp, system_prompt, refactoring_plan_guide, display_response, verifyprompt)
         else:
             print("\n\n ????? NO CONDITION MET DURING ITERATION ?????")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
         
         # -------------------------------------
         # ----- GENERATED CODE PROCESSING -----
@@ -584,7 +647,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             code_block = code_block[1:]    
     
         print("\n\n----- " + color.BOLD + color.BLUE + "POST-PROCESSING of GENERATED CODE" + color.END + " -----\n")
-        print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+        print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
         
         # SAVE THE GENERATIVE CODE -- before compiling
         # If make script, then save edited code as same filename and extension
@@ -719,7 +782,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         if yes_power_feedback and yes_execute and compile_result == "" and execute_result == "0" and self_correction_power_counter <= self_correction_power_counter_max:
 
             print("\n\n----- " + color.BOLD + color.BLUE + "POWER METRICS Feedback Loop " + color.END + " -----\n")
-            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
             
             if not zero_shot:  # baseline_oneshot_goal:
                 # This will initiate the subsequent iterations to introduce context and self-prompting
@@ -730,10 +793,19 @@ def auto_code_llmgeneration_pipeline(prompts,
             #self_correction_power_counter = self_correction_power_counter_max + 1
             
             # Call LLM-as-a-judge to review SOURCE CODE and REFACTORED CODE to evaluate if likely valid
-            valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(target_lang, llm_source, model_judge, num_ctx, system_prompt, input_content_llmjudge_dict, power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt)
+            # For the zero-shot (vanilla LLM) pass, judge against the original uninstrumented source code.
+            # For the LASSI pipeline (not zero_shot), judge against the assertion-instrumented source code.
+            # code_blocks[0]=SOURCE_orig, code_blocks[1]=SOURCE_verify (both always pre-populated before while loop).
+            if zero_shot:
+                judge_dict = dict(input_content_llmjudge_dict)  # shallow copy to avoid mutating the shared dict
+                judge_dict["source_code"] = code_blocks[0]      # compare vanilla LLM against original source
+            else:
+                judge_dict = input_content_llmjudge_dict         # compare LASSI against instrumented source
+            valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(target_lang, llm_source, model_judge, num_ctx, system_prompt, judge_dict, power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt)
             
             # Handle scenario where we might have a bad power measurement
-            if total_energy_joules_refactor == 0:
+            # (only applies in EE mode; in runtime mode energy is always 0)
+            if power_measure and total_energy_joules_refactor == 0:
                 valid_code_flag = "INVALID"
             # valid_code_flag can be: (1) "VALID", (2) "INVALID", or (3) "NONE"
             if not zero_shot:
@@ -777,9 +849,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                     experiment_data["base_v1_avg_power_W"] = ave_power_refactor
                     experiment_data["base_v1_runtime_s"] = duration_refactor
                     experiment_data["base_v1_valid"] = valid_code_flag
-                    experiment_data["base_v1_energy_diff"] = round(((total_energy_joules_refactor - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2)
-                    experiment_data["base_v1_avg_power_diff"] = round(((ave_power_refactor - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2)
-                    experiment_data["base_v1_runtime_diff"] = round(((duration_refactor - duration) / duration) * 100 ,2)
+                    experiment_data["base_v1_energy_diff"] = round(((total_energy_joules_refactor - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if power_measure and sourcecode_total_energy_joules != 0 else "NA"
+                    experiment_data["base_v1_avg_power_diff"] = round(((ave_power_refactor - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if power_measure and sourcecode_ave_power != 0 else "NA"
+                    experiment_data["base_v1_runtime_diff"] = round(((duration_refactor - duration) / duration) * 100 ,2) if duration != 0 else "NA"
                     # experiment_data["base_v1_optimization_methods"] = "None"
                 elif stage == "stage2":
                     experiment_data["base_v2_energy_J"] = total_energy_joules_refactor
@@ -787,14 +859,18 @@ def auto_code_llmgeneration_pipeline(prompts,
                     experiment_data["base_v2_runtime_s"] = duration_refactor
                     experiment_data["base_v2_valid"] = valid_code_flag
                     experiment_data["base_v2_selfcorrections"] = iteration_log["v2"]["self_correction_count"]
-                    experiment_data["base_v2_energy_diff"] = round(((total_energy_joules_refactor - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2)
-                    experiment_data["base_v2_avg_power_diff"] = round(((ave_power_refactor - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2)
-                    experiment_data["base_v3_runtime_diff"] = round(((duration_refactor - duration) / duration) * 100 ,2)
+                    experiment_data["base_v2_energy_diff"] = round(((total_energy_joules_refactor - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if power_measure and sourcecode_total_energy_joules != 0 else "NA"
+                    experiment_data["base_v2_avg_power_diff"] = round(((ave_power_refactor - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if power_measure and sourcecode_ave_power != 0 else "NA"
+                    experiment_data["base_v3_runtime_diff"] = round(((duration_refactor - duration) / duration) * 100 ,2) if duration != 0 else "NA"
                     experiment_data["base_v2_optimization_methods"] = "None"
+            # Select optimization metric: energy (EE mode) or runtime (runtime/translation mode)
+            track_history = energy_history if power_measure else runtime_history
+            current_metric = total_energy_joules_refactor if power_measure else duration_refactor
+
             if (
-                total_energy_joules_refactor < energy_history[tracking_best_version]
+                current_metric < track_history[tracking_best_version]
                 and valid_code_flag == "VALID"
-            ):  
+            ):
                 # WE HAVE A WINNER!
                 # sourcecode_total_energy_joules:  # or ave_power_refactor < sourcecode_ave_power:
                 # Save the Refactoring Plan for this code version
@@ -814,14 +890,16 @@ def auto_code_llmgeneration_pipeline(prompts,
                         # NOTE: WE ARE NOT GOING TO DO STAGE 2 FOR THE FIRST LASSI-EE RESEARCH (mtd: 09-06-2025)
                         change_strategy = True
                         zero_shot = False  # Stop base LLM attempt after one try.
-                
+
                 """ Let's only care about the total energy consumption and not average power. """
-                print("\n\n***** Generated refactored code is more energy efficient than source or previous code! *****")
+                print("\n\n***** Generated refactored code is better than source or previous code! *****")
                 print("... based on refactoring from code at index: " + str(tracking_best_version) + "\n\n")
                 energy_efficiency_iteration += 1
                 energy_efficiency_refactor_success = True
-                # Save the output details for this "best" code version for metadata record:
-                best_refactored_code_dict = input_content_llmjudge_dict
+                # Save the output details for this "best" code version for metadata record.
+                # Snapshot with dict() — input_content_llmjudge_dict is mutated by every
+                # subsequent code run, so a reference assignment would always reflect the last run.
+                best_refactored_code_dict = dict(input_content_llmjudge_dict)
                 # Reset the LLM temperature parameter for subsquent code generation
                 code_gen_temp = 0.2
                 # I THINK WE HAVE THE FOLLOWING NOW WITH THE BETTER VERSION TRACKING:
@@ -830,68 +908,68 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # Then, if follow-up is not a success, then STOP and return the latest success.
                 # We need to track the refactor VERSION, so may need to have a list
                 # May want a list for each code vesion as well. Whew. We are going to be tracking a lot here.
-                if len(energy_history) > 1 and len(power_history) > 1:
+                if len(track_history) > 1:
                     if len(code_blocks) > 0:
                         # If we have saved a "best" code refactor,
                         # then compare the latest to the best
-                        previous_energy = energy_history[tracking_best_version]
-                        current_energy = energy_history[-1]
-                        previous_power = power_history[tracking_best_version]
-                        current_power = power_history[-1]
+                        previous_metric = track_history[tracking_best_version]
+                        current_metric_val = track_history[-1]
                     else:
                         # If we haven't saved a "best" code refactor,
                         # then just compare to the source code
-                        previous_energy = energy_history[0]
-                        current_energy = energy_history[-1]
-                        previous_power = power_history[0]
-                        current_power = power_history[-1]
-                    
+                        previous_metric = track_history[0]
+                        current_metric_val = track_history[-1]
+                    previous_power = power_history[tracking_best_version] if len(power_history) > 1 else 0
+                    current_power = power_history[-1] if len(power_history) > 1 else 0
+
                     # Track the "best" code generation
-                    # If current_energy is < previous_energy, 
+                    # If current_metric_val is < previous_metric,
                     # then update tracking version to this current code generation.
                     # Otherwise, do not change the tracking version (keep it the same)
-                    if current_energy < previous_energy:
-                        tracking_best_version = code_version  # IGNORE this comment: code_version has already been incremented, so we need to step one back
-                    
-                    print("\n\n----- " + color.BOLD + color.BLUE + "COMPARING CURRENT vs PREV ENERGY VALUES " + color.END + " -----\n")
-                    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
-                    
+                    if current_metric_val < previous_metric:
+                        # Use len(code_blocks)-1: robust against code_version/code_blocks offset
+                        # (code_blocks[0]=SOURCE_orig, [1]=SOURCE_verify, [2+]=generated codes).
+                        tracking_best_version = len(code_blocks) - 1
+
+                    print("\n\n----- " + color.BOLD + color.BLUE + "COMPARING CURRENT vs PREV VALUES " + color.END + " -----\n")
+                    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
+
                     # Calculate the fractional improvement
-                    if previous_energy != 0:
-                        energy_improvement = (previous_energy - current_energy) / previous_energy
+                    if previous_metric != 0:
+                        metric_improvement = (previous_metric - current_metric_val) / previous_metric
                     else:
-                        energy_improvement = current_energy
-                    if previous_power != 0:
+                        metric_improvement = current_metric_val
+                    if power_measure and previous_power != 0:
                         power_improvement = (previous_power - current_power) / previous_power
                     else:
-                        power_improvement = current_power
+                        power_improvement = metric_improvement  # fall back to primary metric when not measuring power
 
-                    # Check if an improvement is < 1% AND that measurement is still better than the source code
-                    energy_stagnant = energy_improvement < 0.011 and current_energy < energy_history[0]
-                    power_stagnant = power_improvement < 0.011 and current_power < power_history[0]
+                    # Check if an improvement is < 1% AND that measurement is still better than SOURCE_verify (index 1)
+                    metric_stagnant = metric_improvement < 0.011 and current_metric_val < track_history[1]
+                    power_stagnant = power_measure and power_improvement < 0.011 and current_power < power_history[0]
 
                     # Stopping condition:
                     # Stop if at least one metric is stagnant, while the other is not improving by more than 1%
-                    # Do NOT stop if both are worsening (negative improvement values)    
+                    # Do NOT stop if both are worsening (negative improvement values)
                     # Adjustment (03.20.2025): only allow stagnation stop on energy consuption, increase min ee iteration
                     if (
-                        energy_efficiency_iteration > 4 
+                        energy_efficiency_iteration > 4
                         and
-                        (energy_stagnant)  # or power_stagnant)
+                        (metric_stagnant)  # or power_stagnant)
                         and
-                        (energy_improvement > 0 or power_improvement > 0)
+                        (metric_improvement > 0 or power_improvement > 0)
                     ):
-                        print("\n\n-----> LASSI for Energy Efficiency IS FINISHED! <-----\n")
-                        print(" energy_stagnant = " + str(energy_stagnant))
+                        print("\n\n-----> LASSI IS FINISHED! <-----\n")
+                        print(" metric_stagnant = " + str(metric_stagnant))
                         print(" power_stagnant = " + str(power_stagnant))
-                        print(" energy_improvement = " + str(round(energy_improvement, 2)))
+                        print(" metric_improvement = " + str(round(metric_improvement, 2)))
                         print(" power_improvement = " + str(round(power_improvement, 2)))
                         print("\n\n")
                         break
             else:
                 # TODO: Change label: invalid or not more energy efficient
                 print("\n\n----- " + color.BOLD + color.BLUE + "WE HAVE GENERATED CODE THAT IS INVALID OR NOT MORE ENERGY EFFICIENT" + color.END + " -----\n")
-                print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+                print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
                 
                 compile_result = "energy_efficiency"
                 if zero_shot:
@@ -912,9 +990,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                 energy_efficiency_refactor_success = False
                                 
                 if (valid_code_flag == "VALID"):
-                    print("\n\n***** Generated refactored code is NOT more energy efficient than source or previous code... *****")
+                    print("\n\n***** Generated refactored code is NOT better than source or previous code... *****")
                     if not zero_shot:
-                        print("\n" + color.GREEN + color.BOLD + " ----- ENERGY EFFICIENCY REVIEW: Let's provide feedback on the energy consumption. -----" + color.END + "\n\n")
+                        print("\n" + color.GREEN + color.BOLD + " ----- OPTIMIZATION REVIEW: Let's provide feedback on the metrics. -----" + color.END + "\n\n")
                 elif valid_code_flag != "VALID":
                     print("\n\n" + color.RED + color.BOLD + " ----- GENERATED REFACTORED CODE: May be INVALID or not determined. ----- " + color.END + "\n\n")
                     # We're done!
@@ -940,7 +1018,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     
     print("\n\n----- " + color.BOLD + color.GREEN + "LASSI-EE CODE GENERATION COMPLETE" + color.END + " -----\n")
 
-    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
     
     end_time_minutes = round(end_time/60, 2)
     print("CODE GENERATION TIME: " + str(end_time_minutes) + " minutes.")
@@ -951,58 +1029,58 @@ def auto_code_llmgeneration_pipeline(prompts,
     #     print(" Self-improvement ee refactor count: " + str(self_correction_power_counter))
     print(" Total Energy Efficiency Self-improvement iteration count: " + str(len(energy_history) - 2))
     print(" Energy efficiency improvements: " + str(energy_efficiency_iteration))
+    # code_blocks layout: [0]=SOURCE_orig, [1]=SOURCE_verify, [2]=vanilla LLM Stage 1,
+    # [3+]=LASSI-generated codes. tracking_best_version indexes into this layout.
     if tracking_best_version == 0:
-        tracking_best_version_label = "SOURCE"
+        tracking_best_version_label = "SOURCE_orig"
     elif tracking_best_version == 1:
-        tracking_best_version_label = "STANDALONE BASE LLM"
+        tracking_best_version_label = "SOURCE_verify"
     elif tracking_best_version == 2:
-        tracking_best_version_label = "SELF-CORRECTED BASE LLM"
+        tracking_best_version_label = "STANDALONE BASE LLM"
     else:
-        tracking_best_version_label = "v" + str(tracking_best_version)
+        tracking_best_version_label = "LASSI v" + str(tracking_best_version)
     print(" Best code, version: " + tracking_best_version_label + "\n" )
 
-    # If no code refactor v1+ resulted in lower energy consumption,
-    # then look to see if any one of the LASSI v3+ had lower ave power.
-    if tracking_best_version_label == "SOURCE":
+    # code_blocks layout: [0]=SOURCE_orig, [1]=SOURCE_verify, [2]=vanilla LLM, [3+]=LASSI.
+    # If no generated code beat SOURCE_verify, check whether any had lower ave power (EE mode).
+    smallest_index, smallest_ave_power_value = None, None  # Initialize before conditionals
+    if tracking_best_version_label in ("SOURCE_orig", "SOURCE_verify"):
         source_ave_power_value = power_history[0]
         # Filter pairs (index, value) where:
         # - value is less than source_ave_power_value
-        # - index is not 1
+        # - index is not 0 or 1 (exclude both source versions)
         # - the corresponding valid_code_history value is "VALID"
         filtered = [
             (i, v)
             for i, v in enumerate(power_history)
-            if v < source_ave_power_value and i != 1 and valid_code_history[i] == "VALID"
+            if v < source_ave_power_value and i > 1 and valid_code_history[i] == "VALID"
         ]
         if filtered:
             smallest_index, smallest_ave_power_value = min(filtered, key=lambda x: x[1])
-        else:
-            smallest_index, smallest_ave_power_value = None, None
-        
+
         if smallest_ave_power_value is not None:
-            print(" Best ave power in refactored code, version: " + str(smallest_index-1) + "\n" )
+            print(" Best ave power in refactored code, version: " + str(smallest_index) + "\n" )
     elif "BASE LLM" in tracking_best_version_label:
-        source_ave_power_value = min(power_history[1], power_history[2])
+        source_ave_power_value = min(power_history[0], power_history[1], power_history[2])
         # Filter pairs (index, value) where:
         # - value is less than source_ave_power_value
-        # - index is not 0
+        # - index is not 0, 1, or 2 (exclude both source versions and vanilla LLM)
         # - the corresponding valid_code_history value is "VALID"
         filtered = [
             (i, v)
             for i, v in enumerate(power_history)
-            if v < source_ave_power_value and i != 0 and valid_code_history[i] == "VALID"
+            if v < source_ave_power_value and i > 2 and valid_code_history[i] == "VALID"
         ]
         if filtered:
             smallest_index, smallest_ave_power_value = min(filtered, key=lambda x: x[1])
-        else:
-            smallest_index, smallest_ave_power_value = None, None
-        
+
         if smallest_ave_power_value is not None:
-            print(" Best ave power over Base LLM in refactored code, version: " + str(smallest_index-1) + "\n" )
-        
-        
-    # Prompt the LLM to compare the codes between SOURCE and the "BEST" refactored version
-    if (tracking_best_version != 0):
+            print(" Best ave power over Base LLM in refactored code, version: " + str(smallest_index) + "\n" )
+
+
+    # Prompt the LLM to compare the codes between SOURCE and the "BEST" refactored version.
+    # Only run if a generated code exists (tracking_best_version > 1; indices 0-1 are source versions).
+    if (tracking_best_version > 1):
 
         # TODO: Complete organizing this into lassi.llm_methods.llm_code_compare()
         
@@ -1081,10 +1159,11 @@ def auto_code_llmgeneration_pipeline(prompts,
     if yes_power_feedback:
         
         print("\n\n----- " + color.BOLD + color.BLUE + "SAVING FINAL RESULTS" + color.END + " -----\n")
-        print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " ***"  + color.END)
+        print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
         
-        # Save "best" index
-        if (tracking_best_version_label == "SOURCE" or tracking_best_version_label == "BASE LLM") and smallest_index is not None:
+        # Save "best" index: if no generated code beat the source/vanilla baseline on the
+        # primary metric but one had lower ave power, use that as the "best" for logging.
+        if (tracking_best_version_label in ("SOURCE_orig", "SOURCE_verify", "STANDALONE BASE LLM")) and smallest_index is not None:
             best_index = smallest_index
         else:
             best_index = tracking_best_version
@@ -1099,9 +1178,9 @@ def auto_code_llmgeneration_pipeline(prompts,
         experiment_data["lassiee_llm_temp"] = iteration_log["v" + str(best_index)]["LLM_temperature"] if best_index > 0  else "N/A"
         experiment_data["lassiee_selfcorrections"] = iteration_log["v" + str(best_index)]["self_correction_count"] if best_index > 0  else "N/A"
         experiment_data["lassiee_eeiterations"] = iteration_log["v" + str(best_index)]["energy_refactor_count"] if best_index > 0  else "N/A"
-        experiment_data["lassiee_energy_diff"] = round(((energy_history[best_index] - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if best_index > 0  else "N/A"
-        experiment_data["lassiee_avg_power_diff"] = round(((power_history[best_index] - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if best_index > 0  else "N/A"
-        experiment_data["lassiee_runtime_diff"] = round(((runtime_history[best_index] - duration) / duration) * 100 ,2) if best_index > 0  else "N/A"
+        experiment_data["lassiee_energy_diff"] = round(((energy_history[best_index] - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if best_index > 0 and power_measure and sourcecode_total_energy_joules != 0 else "N/A"
+        experiment_data["lassiee_avg_power_diff"] = round(((power_history[best_index] - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if best_index > 0 and power_measure and sourcecode_ave_power != 0 else "N/A"
+        experiment_data["lassiee_runtime_diff"] = round(((runtime_history[best_index] - duration) / duration) * 100 ,2) if best_index > 0 and duration != 0 else "N/A"
         match_code_comparison_response = re.search(r"\[OPTIMIZATION LIST\](.*?)\[/OPTIMIZATION LIST\]", code_comparison_response, re.DOTALL)
         if match_code_comparison_response:
             optimization_list_text = match_code_comparison_response.group(1).strip()

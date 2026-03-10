@@ -191,8 +191,12 @@ def test_source_code(app_name, experiment_data_directory,
         sourcecode_ave_power = ave_power
         if execute_result != "0":
             return False
-        print("\n\nMeasure system idle power...")
-        idle_energy_joules, idle_ave_power, idle_std_power = lassi.get_power.idlepower_selectvendor(experiment_data_directory, trial_number, duration, gpu_vendor="auto")
+        idle_energy_joules = 0
+        idle_ave_power = 0
+        idle_std_power = 0
+        if power_measure:
+            print("\n\nMeasure system idle power...")
+            idle_energy_joules, idle_ave_power, idle_std_power = lassi.get_power.idlepower_selectvendor(experiment_data_directory, trial_number, duration, gpu_vendor="auto")
         actual_energy = sourcecode_total_energy_joules - idle_energy_joules
         energy_history.append(round(sourcecode_total_energy_joules, 2))
         actual_ave_power = sourcecode_ave_power - idle_ave_power
@@ -216,10 +220,11 @@ def selfprompting_context_builder(generate_context_flag,
                                   display_response=None,
                                   use_context_summaries_only=None,
                                   input_code=None,
+                                  original_code=None,  # Uninstrumented source for code description step; defaults to input_code
                                   total_energy_joules=None,
                                   ave_power=None,
-                                  verifyprompt=False
-                                 ):
+                                  verifyprompt=False,
+                                  power_measure=True):   # power_measure=False selects runtime optimization prompts
     """
     Update the system and user content prompts to include
     background context and self-prompted context.
@@ -231,9 +236,11 @@ def selfprompting_context_builder(generate_context_flag,
     if generate_context_flag:
         # Fetch system prompt when using context
         if source_lang == "CUDA":
-            general_system_prompt = prompts.get_system_prompt("general_system_cuda_ee")
+            sys_key = "general_system_cuda_ee" if power_measure else "general_system_CUDA_runtime"
+            general_system_prompt = prompts.get_system_prompt(sys_key)
         elif source_lang == "HIP":
-            general_system_prompt = prompts.get_system_prompt("general_system_hip_ee")
+            sys_key = "general_system_hip_ee" if power_measure else "general_system_HIP_runtime"
+            general_system_prompt = prompts.get_system_prompt(sys_key)
         # Inject provided knowledge context--must be provided from top-level LASSI framework script.
         content = "" + input_context + "\n\n"  # [BEGIN CONTEXT KNOWLEDGE]  [/END CONTEXT KNOWLEDGE]
 
@@ -242,7 +249,7 @@ def selfprompting_context_builder(generate_context_flag,
         # Request LLM summarization of provided context knowledge
         # Note, the input_context object includes all context requested by the user in the LASSI framework.
         print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to summarize context knowledge." + color.END + "\n")
-        llm_code_knowledge_summary_response = lassi.llm_methods.code_knowledge_llm(llm_source, model, num_ctx, general_system_prompt, input_context, target_lang, display_response, verifyprompt)
+        llm_code_knowledge_summary_response = lassi.llm_methods.code_knowledge_llm(llm_source, model, num_ctx, general_system_prompt, input_context, target_lang, display_response, verifyprompt, power_measure=power_measure)
         
         if use_context_summaries_only:
             # Save only LLM summary as context
@@ -262,8 +269,11 @@ def selfprompting_context_builder(generate_context_flag,
 
             
         # Requet LLM summary description of the provided SOURCE code
+        # Use original_code (uninstrumented) if provided so the LLM describes the clean source
+        # without being distracted by invariant assertion instrumentation comments.
+        code_for_description = original_code if original_code is not None else input_code
         print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to describe the source code." + color.END + "\n")
-        llm_code_description_response = lassi.llm_methods.code_description_llm(llm_source, model, num_ctx, general_system_prompt, input_context, input_code, display_response, verifyprompt)
+        llm_code_description_response = lassi.llm_methods.code_description_llm(llm_source, model, num_ctx, general_system_prompt, input_context, code_for_description, display_response, verifyprompt)
         content = content + "[YOUR ANALYSIS OF THE SOURCE CODE TO REFACTOR]\n" + llm_code_description_response + "\n\n"
         # refactor_instructions = prompts.get_code_ee_refactoring_prompt(str(source_lang + "_refactor"))  # Includes prompt to generate a refactoring plan
 
@@ -271,11 +281,14 @@ def selfprompting_context_builder(generate_context_flag,
         # For initial zero-shot attempt
         # Fetch system prompt when not using context
         if source_lang == "CUDA":
-            general_system_prompt = prompts.get_system_prompt("general_system_nocontext_cuda_ee")
+            sys_key = "general_system_nocontext_cuda_ee" if power_measure else "general_system_nocontext_CUDA_runtime"
+            general_system_prompt = prompts.get_system_prompt(sys_key)
         elif source_lang == "HIP":
-            general_system_prompt = prompts.get_system_prompt("general_system_nocontext_hip_ee")
+            sys_key = "general_system_nocontext_hip_ee" if power_measure else "general_system_nocontext_CUDA_runtime"
+            general_system_prompt = prompts.get_system_prompt(sys_key)
         content = ""  # "Think carefully before developing the code following these instructions."
-        content = content + "\n\n" + prompts.get_code_ee_refactoring_prompt(str(source_lang + "_baseline_nocontext"))
+        baseline_key = source_lang + "_baseline_nocontext" if power_measure else source_lang + "_baseline_nocontext_runtime"
+        content = content + "\n\n" + prompts.get_code_ee_refactoring_prompt(baseline_key)
         
     
     # Save the original context prompt for re-use during error correction.
@@ -298,23 +311,36 @@ def generate_refactoring_plan(source_lang,
                               prior_refactoring_plans,
                               display_response,
                               few_shot_learning=False,
-                              verifyprompt=False
-                             ):
+                              verifyprompt=False,
+                              power_measure=True):   # power_measure=False selects runtime optimization prompts
+                                                     # NOTE: when power_measure=False, total_energy_joules holds the
+                                                     # runtime duration value (passed from runtime_history at call sites)
 
     # Prompt structure: GOAL - RETURN FORMAT - WARNINGS - CONTEXT
-    refactoring_plan_instructions = prompts.get_code_ee_refactoring_prompt(source_lang + "_refactorplan")
+    plan_key = source_lang + "_refactorplan" if power_measure else source_lang + "_refactorplan_runtime"
+    refactoring_plan_instructions = prompts.get_code_ee_refactoring_prompt(plan_key)
     
     # Prepend the Context:
     refactoring_plan_instructions = refactoring_plan_instructions + "\n\n" + context_prompt
     
     # Append previous failed plans (if available)
     if len(prior_refactoring_plans) > 0:
-        refactoring_plan_instructions = refactoring_plan_instructions + "\n\n" + "For reference to your refactoring plan, the following plans were previously used that did not result in a successful outcome of code that was functionally equivalent to the source code and reduced energy consumption during runtime. Based on these previous plans, try to not repeat specific ideas that may have been unsuccessful." 
+        if power_measure:
+            failed_plan_context = "For reference to your refactoring plan, the following plans were previously used that did not result in a successful outcome of code that was functionally equivalent to the source code and reduced energy consumption during runtime. Based on these previous plans, try to not repeat specific ideas that may have been unsuccessful."
+        else:
+            failed_plan_context = "For reference to your refactoring plan, the following plans were previously used that did not result in a successful outcome of code that was functionally equivalent to the source code and reduced wall-clock execution time. Based on these previous plans, try to not repeat specific ideas that may have been unsuccessful."
+        refactoring_plan_instructions = refactoring_plan_instructions + "\n\n" + failed_plan_context
         refactoring_plan_instructions = refactoring_plan_instructions + "\n" + " | PREVIOUS FAILED PLAN: ".join(prior_refactoring_plans)
     
     # Append code to be refactored for generating the plan
     code_to_refactor = "\n\n[START OF CODE TO REFACTOR]\n" + input_code + "\n[/END OF CODE TO REFACTOR]"
-    code_to_refactor = code_to_refactor + "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and consumed a total energy of " + str(round(total_energy_joules, 2)) + " Joules at an average power of " + str(round(ave_power, 2)) + " Watts, which includes the idle system energy consumption and average power.\n"
+    if power_measure:
+        metric_context = "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and consumed a total energy of " + str(round(total_energy_joules, 2)) + " Joules at an average power of " + str(round(ave_power, 2)) + " Watts, which includes the idle system energy consumption and average power.\n"
+    else:
+        # NOTE: total_energy_joules holds the runtime duration value when power_measure=False
+        # (runtime_history[tracking_best_version] is passed in that argument slot at call sites)
+        metric_context = "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and had a wall-clock execution time of " + str(round(total_energy_joules, 4)) + " seconds.\n"
+    code_to_refactor = code_to_refactor + metric_context
     refactoring_plan_instructions = refactoring_plan_instructions + code_to_refactor
     
     # Generate the refactoring plan
@@ -351,7 +377,7 @@ def generate_code_analysis(source_lang, input_code,
     4. Identify memory access patterns
     5. Identify memory allocation/deallocation
     6. Other key characteristics of the code
-    Please output your findings in a json file format. Put "=====" before and after the json output.
+    Please output your findings in a json file format. Wrap the json output in a ```json code fence.
     """
 
     code_to_analyze = "\n\n[START OF CODE TO ANALYZE]\n" + input_code + "\n[/END OF CODE TO ANALYZE]"

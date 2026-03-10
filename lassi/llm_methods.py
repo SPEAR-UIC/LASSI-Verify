@@ -47,7 +47,11 @@ def llm_call(intent, llm_source, model, num_ctx, system_prompt, content_prompt, 
 
     print("\n\n----- " + color.BOLD + color.BLUE + "LLM RESPONSE: " + intent + color.END + " -----\n")
     if display_response:
-        display(Markdown(response_text))
+        if intent == "code analysis":
+            # Code analysis responses contain a Markdown table — render rather than print raw text.
+            display(Markdown(response_text))
+        else:
+            print(response_text)
 
     return response_text
 
@@ -136,7 +140,7 @@ def llm_judge(target_lang, llm_source, model, num_ctx, system_prompt, input_cont
                 The characteristics will be given in a json format and will be given between the tags: "<rubric>" and "</rubric>".
                 The {target_lang} code you are to evaluate will be given between "<code>" and "</code>".
                 Please give a simple "PASS" or "FAIL" evaluation and also list which criteria pass and which fail (without additional details).
-                Please put your final, overall evaluation between the tags: "<result>" and "</result>" and put the list in a table format.
+                Please put your final, overall evaluation between the tags: "<result>" and "</result>" and put the list in a Markdown table format (using | and - characters). Do not use HTML tags in your response.
                 """
             code_rubric = "\n\n<rubric>\n" + sourcecode_analysis + "\n</rubric>"
             code_to_analyze = "\n\n<code>\n" + input_content_dict['refactored_code'] + "\n</code>"
@@ -154,11 +158,17 @@ def llm_judge(target_lang, llm_source, model, num_ctx, system_prompt, input_cont
     return response_validation, response_text, code_analysis
 
     
-def code_knowledge_llm(llm_source, model, num_ctx, system_prompt, input_context, target_lang, display_response, verifyprompt=False):
+def code_knowledge_llm(llm_source, model, num_ctx, system_prompt, input_context, target_lang, display_response, verifyprompt=False, power_measure=True):
 
-    content_prompt = """
+    if power_measure:
+        content_prompt = """
     Read and Analyze: First, read the following background knowledge.
     Then, summarize its key relevant points that we should apply to refactoring code for improving energy efficiency.
+    """
+    else:
+        content_prompt = """
+    Read and Analyze: First, read the following background knowledge.
+    Then, summarize its key relevant points that we should apply to refactoring code for reducing wall-clock execution time.
     """
 
     if target_lang == "OMP":

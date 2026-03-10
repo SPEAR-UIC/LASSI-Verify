@@ -25,6 +25,37 @@ Properties tied to specific execution patterns:
 
 ---
 
+## Assertion Selection Framework
+
+When analyzing code, work through these layers in order. Stop when you have sufficient coverage — do not add assertions from deeper layers simply because they exist in the catalog.
+
+### Layer 1: Universal Invariants (Always Applicable)
+Apply to **all** GPU codes before selecting anything else:
+- **1.1** Pointer validity (input and output pointers non-null)
+- **1.2** Array dimension constraints (sizes positive and non-overflowing)
+- **1.4** Numerical validity of inputs (NaN/Inf checks before H→D transfer)
+- **6.3** Numerical validity of outputs (finite-value check after D→H transfer)
+
+### Layer 2: Domain Invariants (Conditionally Applicable)
+Apply when your analysis identifies the computational domain:
+- **Linear Algebra / Solvers**: matrix symmetry (3.1), conditioning (6.4), convergence residual (6.5)
+- **CFD / Physics simulations**: conservation laws (2.1, 2.3), positivity constraints (5.1, 5.2)
+- **Molecular Dynamics**: particle count conservation (2.2), energy conservation (2.1), temperature bounds (5.5)
+- **Iterative Solvers**: final convergence criterion (6.5) — check the residual after all iterations, not intermediate monotonicity
+- **Stochastic / Monte Carlo**: probability conservation (2.5), non-negativity (5.2)
+- **Transforms / Permutations**: element count conservation (2.2), norm conservation if unitary (2.4)
+
+### Layer 3: Problem-Specific Invariants (Rarely Applicable)
+Apply only when the specific problem structure clearly requires it:
+- Sparsity pattern preservation (7.1) — only for sparse matrix operations
+- Diagonal dominance (7.2) — only if the algorithm requires it and the original code enforces it
+- Orthogonality (7.4) — only for orthogonalization algorithms
+- Symmetry under permutation (3.2, 3.3, 3.4) — only when the problem has explicit symmetry
+
+**When in doubt about any Layer 3 assertion, omit it.** A false positive assertion — one that fails in the original code due to an incorrect assumption — is worse than a missing assertion.
+
+---
+
 ## GPU-Specific Considerations
 
 ### Host vs Device Code
@@ -753,15 +784,11 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
         assert(fabs(A[i*N + i]) > 1e-14 && "Diagonal element too small");
     }
     
-    // LASSI_INSTRUMENTATION - Matrix symmetry (if applicable to problem)
-    bool check_symmetry = true; // Set based on problem characteristics
-    if (check_symmetry) {
-        for (int i = 0; i < N; i++) {
-            for (int j = i + 1; j < N; j++) {
-                assert(fabs(A[i*N + j] - A[j*N + i]) < 1e-10 && "Matrix should be symmetric");
-            }
-        }
-    }
+    // NOTE: Matrix symmetry is NOT inserted here.
+    // Jacobi iteration does not require a symmetric matrix — many valid Jacobi problems
+    // use non-symmetric diagonally-dominant systems. Inserting a symmetry check would be
+    // a Type B (implementation-specific) assertion for this code. Only add symmetry
+    // checks if the source code itself explicitly requires or documents symmetry.
     
     double *d_A, *d_b, *d_x, *d_x_new;
     
@@ -812,9 +839,10 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
 2. ✅ Validation **before** host-to-device transfer
 3. ✅ Validation **after** device-to-host transfer
 4. ✅ All assertions use standard library (`assert.h`, `math.h`)
-5. ✅ Assertions check **invariant properties** only
+5. ✅ Assertions check **transformation-invariant properties** only
 6. ✅ Original kernel code **unchanged**
 7. ✅ Clear `// LASSI_INSTRUMENTATION` markers
+8. ✅ No symmetry assumption inserted — Jacobi does not require symmetric matrices
 
 ---
 
