@@ -319,9 +319,9 @@ def code_generator_llm(llm_source, model, num_ctx, temp, system_prompt, content_
         print("(hidden)\n\n")
         # display(Markdown(response_text))
 
-    # Extract only the code block - 
+    # Extract only the code block -
     # Search for the ``` pattern in the text
-    #   Regular expression pattern to match text between triple backticks 
+    #   Regular expression pattern to match text between triple backticks
     #   that represent code blocks within generated responses from the LLM.
     pattern = r"```(.*?)```"
     match = re.search(pattern, response_text, re.DOTALL)
@@ -330,6 +330,17 @@ def code_generator_llm(llm_source, model, num_ctx, temp, system_prompt, content_
     if match:
         extracted_text = match.group(1)
     else:
-        extracted_text = ""
-    
+        # Fallback: LLM response did not include code fences.
+        # Try to extract from the first preprocessor directive or CUDA/C++ keyword.
+        # This prevents code_block from being "" when the LLM omits backticks, which
+        # would cause compile errors (empty .cu file) and break error-correction prompts.
+        fallback_pattern = r'((?:#include|#pragma|#define|__global__|extern\s+"C").*)'
+        fallback_match = re.search(fallback_pattern, response_text, re.DOTALL)
+        if fallback_match:
+            extracted_text = fallback_match.group(1)
+            print("\n[WARNING] code_generator_llm: no code fences in LLM response; extracted from first code directive.")
+        else:
+            extracted_text = response_text
+            print("\n[WARNING] code_generator_llm: no code fences or code directives found; using full response as code.")
+
     return response_text, extracted_text

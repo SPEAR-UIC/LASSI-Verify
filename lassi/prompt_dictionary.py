@@ -192,7 +192,39 @@ class PromptDictionary:
 
             "hip": self.load_context_file("HIP_C_Programming_Guide.md"),
 
-            "inv_asserts": self.load_context_file("Invariant_Assertions_Catalog.md")
+            "inv_asserts": self.load_context_file("Invariant_Assertions_Catalog.md"),
+
+            "passthrough_catalog": self.load_context_file("Passthrough_Catalog.md"),
+
+            "passthrough_compare_fallback": """You are comparing the stdout output of two GPU programs for empirical equivalence.
+
+Program A is SOURCE_verify — the source-as-specification reference whose observable behavior
+defines the correctness criterion for this transformation. Program B is a LASSI-generated
+refactored version. Both programs were instrumented with LASSI-VERIFY PASSTHROUGH blocks
+that print computational state to stdout at key observation points.
+
+Your task: determine whether the two outputs represent equivalent computational results.
+
+IMPORTANT GUIDELINES:
+- Account for floating-point nondeterminism. Parallel GPU reductions may reorder summations,
+  producing bit-level differences that are scientifically acceptable. Focus on meaningful
+  semantic differences (wrong algorithm, wrong data, wrong dimensions) rather than minor
+  numerical variation. The comparison checks min, max, mean, and sample values (not sum,
+  which accumulates per-element noise at large N). Near-zero statistics like mean should
+  be judged against the field's dynamic range (the max statistic), not against zero.
+- If the passthrough blocks are absent or malformed in both outputs, answer SKIP.
+- If Program B is clearly computing different values (wrong order of magnitude, different
+  sign, NaN where A had finite values, different element counts), answer FAIL.
+- If the differences are consistent with floating-point reordering or minor numerical drift
+  within acceptable tolerance, answer PASS.
+
+Answer with EXACTLY one of:
+  PASS  — the outputs are computationally equivalent within acceptable floating-point tolerance
+  FAIL  — the outputs differ in a meaningful way indicating a semantic error in Program B
+  SKIP  — passthrough blocks are absent or too malformed to compare
+
+Follow your answer with one sentence of reasoning.
+"""
 
         }
         

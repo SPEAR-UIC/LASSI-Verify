@@ -11,120 +11,119 @@ prompts = PromptDictionary()
 def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False):
 
     content_prompt = r"""
-        You are preparing GPU-accelerated scientific code for verification testing via passthrough data comparison.
+        You are preparing GPU-accelerated scientific code for Tier 2 empirical equivalence checking
+        as part of the LASSI-Verify verification framework.
 
-        Given the following source code, your task is to inject a data-dump block that captures the final computational results to stdout for verification analysis.
+        Your task is to instrument the source code with **passthrough data blocks** at key observation
+        points. These blocks capture computational state to stdout in a structured, labeled format.
+        Both the source (SOURCE_verify) and every LASSI-generated refactored version will carry these
+        blocks unaltered, enabling deterministic comparison of observable output at each observation
+        point to verify that any refactored code preserves the computational behavior of the source.
 
-        **CRITICAL REQUIREMENTS:**
-        1. The data dump MUST execute every time (no conditional flags)
-        2. Insert the dump block AFTER all GPU computation completes but BEFORE any memory deallocations
-        3. The dump should NOT affect GPU execution or power measurements
-        4. Preserve ALL original code without modification
-        5. Use protective comment markers so future LLM refactoring preserves this block
+        **CRITICAL PRESERVATION REQUIREMENT:**
+        The source code already contains LASSI-VERIFY ASSERTIONS blocks inserted by Tier 1. You MUST
+        preserve ALL existing blocks marked with:
+            // >>> BEGIN LASSI-VERIFY ASSERTIONS ... >>>
+            // <<< END LASSI-VERIFY ASSERTIONS <<<
+        and ALL existing blocks marked with:
+            // >>> BEGIN LASSI-VERIFY PASSTHROUGH ... >>>
+            // <<< END LASSI-VERIFY PASSTHROUGH <<<
+        Do NOT modify, remove, or restructure any of these existing blocks. Only ADD new passthrough
+        blocks at additional observation points.
 
         **STEP 1: Identify the computing environment**
-        - Detect the programming language: C++ or Fortran
-        - Detect the GPU API: CUDA (cudaMalloc/cudaMemcpy) or HIP (hipMalloc/hipMemcpy) or other
-        - Identify appropriate memory copy functions and syntax
+        - Programming language: C++ or Fortran
+        - GPU API: CUDA (cudaMalloc/cudaMemcpy) or HIP (hipMalloc/hipMemcpy)
+        - Appropriate memory copy function and DeviceToHost constant
 
-        **STEP 2: Identify primary output buffer(s)**
-        - Locate the device pointer(s) holding FINAL computational results (not intermediate/temporary buffers)
-        - Determine: buffer name, data type, total element count
-        - If multiple distinct output buffers exist, identify all of them
+        **STEP 2: Select observation points**
+        Using the passthrough catalog guidance below, identify 2-5 observation points where the
+        source and any refactored code should produce identical output:
+        - REQUIRED: at least one block capturing the primary output buffer at program completion
+        - OPTIONAL: intermediate checkpoints after major kernels or at iteration boundaries
+        - Insert AFTER cudaDeviceSynchronize() (or equivalent) and AFTER D→H copy where applicable
+        - Insert BEFORE any memory deallocations (cudaFree, hipFree, free)
 
-        **STEP 3: Determine data characteristics**
-        - Infer the exact data type (float, double, int, complex, etc.)
-        - Calculate or infer total element count from allocation size or loop bounds
-        - Identify appropriate format specifiers for printf (e.g., %f for float, %lf for double, %d for int)
+        **STEP 3: Insert labeled passthrough blocks**
 
-        **STEP 4: Inject the passthrough data dump block**
+        For each observation point, insert a block with this EXACT structure. The label must be
+        unique, descriptive, and consistent in the BEGIN and END markers:
 
-        Insert this block at the optimal location:
-        - AFTER: all GPU kernels complete and cudaDeviceSynchronize() (or equivalent)
-        - BEFORE: any return statements
-        - BEFORE: any memory deallocations (cudaFree, hipFree, free, etc.)
-
-        Use this template structure, adapting it for the specific code:
         ```cpp
-        // >>> BEGIN LASSI-VERIFY PASSTHROUGH (do not edit or delete this block) >>>
-
-        printf("\\n=== BEGIN PASSTHROUGH DATA ===\\n");
-
-        // For each output buffer identified:
+        // >>> BEGIN LASSI-VERIFY PASSTHROUGH [label] (do not edit or delete this block) >>>
         {
-            printf("Buffer: <buffer_name>\\n");
-            printf("Type: <data_type>\\n");
-            printf("Elements: <total_element_count>\\n");
+            // --- LASSI-VERIFY PASSTHROUGH: <brief description> ---
+            <dtype>* lv_host_buf = (<dtype>*) malloc(<N> * sizeof(<dtype>));
+            <memcpy_fn>(lv_host_buf, <device_ptr>, <N> * sizeof(<dtype>), <DeviceToHost>);
 
-            // Allocate host buffer
-            <data_type>* host_buf = (<data_type>*) malloc(<total_elems> * sizeof(<data_type>));
-
-            // Copy from device to host using appropriate API
-            <memcpy_function>(host_buf, <device_ptr>, <total_elems> * sizeof(<data_type>), <DeviceToHost>);
-
-            // Calculate and print statistics
-            <data_type> min_val = host_buf[0], max_val = host_buf[0];
-            double sum = 0.0;
-            for(size_t i = 0; i < <total_elems>; i++) {
-                if(host_buf[i] < min_val) min_val = host_buf[i];
-                if(host_buf[i] > max_val) max_val = host_buf[i];
-                sum += host_buf[i];
+            <dtype> lv_min = lv_host_buf[0], lv_max = lv_host_buf[0];
+            double lv_sum = 0.0;
+            for (int lv_i = 0; lv_i < <N>; lv_i++) {
+                if (lv_host_buf[lv_i] < lv_min) lv_min = lv_host_buf[lv_i];
+                if (lv_host_buf[lv_i] > lv_max) lv_max = lv_host_buf[lv_i];
+                lv_sum += (double)lv_host_buf[lv_i];
             }
-            double mean = sum / <total_elems>;
+            double lv_mean = lv_sum / <N>;
 
-            printf("Statistics: min=<format>, max=<format>, mean=<format>, sum=<format>\\n",
-                   min_val, max_val, mean, sum);
+            printf("\n=== BEGIN LASSI-VERIFY PASSTHROUGH [label] ===\n");
+            printf("Buffer: <buffer_name>\n");
+            printf("Type: <dtype_name>\n");
+            printf("Elements: %d\n", (int)<N>);
+            printf("Statistics: min=%.17g, max=%.17g, mean=%.17g\n",
+                   (double)lv_min, (double)lv_max, lv_mean);
 
-            // Print sample values (first 10 and last 10)
-            int sample_size = (<total_elems> < 10) ? <total_elems> : 10;
-            printf("First %d values: ", sample_size);
-            for(int i = 0; i < sample_size; i++) {
-                printf("<format> ", host_buf[i]);
+            int lv_sample = (<N> < 10) ? (int)<N> : 10;
+            printf("Sample_first10:");
+            for (int lv_i = 0; lv_i < lv_sample; lv_i++)
+                printf(" %.17g", (double)lv_host_buf[lv_i]);
+            printf("\n");
+
+            if (<N> > 10) {
+                printf("Sample_last10:");
+                for (int lv_i = (int)<N> - 10; lv_i < (int)<N>; lv_i++)
+                    printf(" %.17g", (double)lv_host_buf[lv_i]);
+                printf("\n");
             }
-            printf("\\n");
-
-            if(<total_elems> > 10) {
-                printf("Last 10 values: ");
-                for(size_t i = <total_elems> - 10; i < <total_elems>; i++) {
-                    printf("<format> ", host_buf[i]);
-                }
-                printf("\\n");
-            }
-
-            free(host_buf);
+            printf("=== END LASSI-VERIFY PASSTHROUGH [label] ===\n");
+            free(lv_host_buf);
         }
-
-        printf("=== END PASSTHROUGH DATA ===\\n");
-
-        // <<< END LASSI-VERIFY PASSTHROUGH <
+        // <<< END LASSI-VERIFY PASSTHROUGH <<<
         ```
 
-        **ADAPTATION NOTES:**
-        - Replace `<buffer_name>`, `<data_type>`, `<total_elems>`, `<device_ptr>` with actual values from the code
-        - Replace `<memcpy_function>` with: cudaMemcpy (CUDA), hipMemcpy (HIP), etc.
-        - Replace `<DeviceToHost>` with: cudaMemcpyDeviceToHost (CUDA), hipMemcpyDeviceToHost (HIP), etc.
-        - Replace `<format>` with appropriate printf format: %f (float), %lf (double), %d (int), etc.
-        - For Fortran: adapt syntax to Fortran conventions (write statements instead of printf, etc.)
-        - If data type is complex/custom: extract real components or adapt printing appropriately
+        **Template substitution rules:**
+        - Replace `[label]` with a descriptive unique label (e.g., `[final_solution]`, `[post_kernel_A]`)
+          — the SAME label must appear in the C++ comment, the BEGIN printf, and the END printf
+        - Replace `<dtype>` with the actual C++ data type (double, float, int, etc.)
+        - Replace `<dtype_name>` with the string name of the data type (e.g., "double")
+        - Replace `<N>` with the element count expression from the code
+        - Replace `<device_ptr>` with the actual device pointer variable name
+        - Replace `<buffer_name>` with the variable name of the device buffer
+        - Replace `<memcpy_fn>` with: cudaMemcpy (CUDA) or hipMemcpy (HIP)
+        - Replace `<DeviceToHost>` with: cudaMemcpyDeviceToHost (CUDA) or hipMemcpyDeviceToHost (HIP)
+        - Use the `lv_` prefix for ALL passthrough-local variables to avoid name collisions
+        - For float buffers: cast to double in printf calls (already shown as `(double)lv_host_buf[lv_i]`)
+        - For integer buffers: use `%d` instead of `%.17g`, no cast needed
 
-        **STEP 5: Add required headers**
-        Ensure these headers are present (if not already included):
-        - C++: `<cstdio>`, `<cstdlib>`, `<algorithm>` (or C equivalents)
-        - Fortran: appropriate ISO_C_BINDING if interfacing with C
+        **STEP 4: Add required headers if not present**
+        - C++: `<cstdio>` / `<stdio.h>` for printf, `<cstdlib>` / `<stdlib.h>` for malloc/free
 
         **PRESERVATION REQUIREMENTS:**
-        - Do NOT modify any algorithmic logic, loops, or GPU kernels
-        - Do NOT remove or modify existing code or comments
+        - Do NOT modify any algorithmic logic, loops, GPU kernels, or original comments
+        - Do NOT remove or alter any existing LASSI-VERIFY ASSERTIONS or PASSTHROUGH blocks
         - Do NOT change performance-critical sections
-        - ONLY add: the data dump block and any minimally required headers
+        - ONLY add: new passthrough blocks and any minimally required headers
 
         **OUTPUT INSTRUCTIONS:**
-        Output ONLY the complete, modified source code. Do not include any explanatory text, commentary, or markdown formatting - just the raw source code ready to compile.
+        Output ONLY the complete, modified source code ready to compile. Do not include explanatory
+        text, commentary, or markdown formatting outside of a single code fence.
 
         ----
 
     """
 
+    content_prompt = content_prompt + prompts.get_codeknowledge("passthrough_catalog")
+
+    content_prompt = content_prompt + "\n\n----\n\n"
     content_prompt = content_prompt + " [BEGIN CODE ANALYSIS]\n" + code_analysis + "\n[/END CODE ANALYSIS]\n\n"
     content_prompt = content_prompt + " [BEGIN SOURCE CODE]\n" + source_code + "\n[/END SOURCE CODE]\n"
 
@@ -317,5 +316,281 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
         extracted_code = ""
 
     # print("\nEXTRACTED CODE: ", extracted_code)  # DEBUG: uncomment to inspect extracted code block
-    
+
     return extracted_code
+
+
+def compare_passthrough_outputs(spec_stdout, generated_stdout,
+                                tolerance=1e-6,
+                                llm_source=None, model=None, num_ctx=None,
+                                system_prompt=None, verifyprompt=False):
+    """
+    Tier 2 empirical equivalence check. Compare passthrough output from a generated
+    code against the source-as-specification reference (SOURCE_verify stdout).
+
+    Implements the source-as-specification premise: SOURCE_verify's observable behavior
+    is the correctness criterion. A transformation is correct if it preserves this
+    behavior; the framework makes no claim about whether the source itself is correct.
+
+    Hybrid comparison approach:
+    1. Deterministic layer (primary): parse labeled blocks, compare min/max/mean and
+       sample values using numpy allclose-style mixed tolerance:
+           |a - b| <= atol + rtol * max(|a|, |b|)
+       where atol = |spec_max| * rtol (derived per-block from the spec's max statistic).
+       This anchors the absolute tolerance to the field's actual dynamic range, preventing
+       false positives from near-zero statistics (e.g., converged Jacobi mean ~1e-12).
+       `sum` is intentionally excluded: it equals mean×N and accumulates per-element
+       floating-point noise at large N, making it an unreliable correctness criterion.
+    2. LLM-mediated layer (fallback): invoked when structured parsing fails or is
+       incomplete (e.g., LLM did not emit expected format). Returns PASS/FAIL + rationale.
+
+    Returns:
+        verdict (str): "PASS" | "PASS (LLM)" | "FAIL" | "FAIL (LLM)" | "SKIP"
+        diagnostic (dict): structured result for self-correction context and logs.
+            Keys: verdict, method, tolerance, blocks_compared, failures, summary
+    """
+    # ------------------------------------------------------------------
+    # Deterministic layer: extract and match labeled blocks by label
+    # ------------------------------------------------------------------
+    # Regex: match BEGIN...END pairs by label, capturing label and block body
+    block_pattern = re.compile(
+        r'=== BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\] ===\n(.*?)\n=== END LASSI-VERIFY PASSTHROUGH \[[^\]]+\] ===',
+        re.DOTALL
+    )
+    # Regex for the Statistics line within a block.
+    # Uses [^,\s]+ (non-comma, non-whitespace) so each capture group stops cleanly at
+    # the comma delimiter and does not consume subsequent fields.
+    # `sum` is optional: older instrumented codes may include it, but it is no longer
+    # compared (sum = mean × N accumulates per-element FP noise at large N, making it
+    # an unreliable correctness criterion for large grids).
+    stats_pattern = re.compile(
+        r'Statistics:\s*min=([^,\s]+),\s*max=([^,\s]+),\s*mean=([^,\s]+)'
+    )
+    # Regex for sample value lines
+    sample_pattern = re.compile(
+        r'Sample_(first10|last10):(.*)'
+    )
+
+    def extract_blocks(stdout_text):
+        """Return dict mapping label → block body string."""
+        return {m.group(1): m.group(2) for m in block_pattern.finditer(stdout_text)}
+
+    def parse_stats(block_body):
+        """Parse Statistics line; return dict of {min, max, mean} as floats, or None.
+        sum is intentionally excluded: it equals mean×N and accumulates per-element
+        floating-point noise at large N, producing unreliable relative errors."""
+        m = stats_pattern.search(block_body)
+        if not m:
+            return None
+        try:
+            return {
+                'min':  float(m.group(1)),
+                'max':  float(m.group(2)),
+                'mean': float(m.group(3)),
+            }
+        except ValueError:
+            return None
+
+    def parse_samples(block_body):
+        """Return list of floats for Sample_first10 and Sample_last10 lines."""
+        samples = []
+        for m in sample_pattern.finditer(block_body):
+            try:
+                vals = [float(v) for v in m.group(2).split()]
+                samples.extend(vals)
+            except ValueError:
+                pass
+        return samples
+
+    def allclose_pass(a, b, rtol, atol):
+        """numpy.allclose-style check: |a-b| <= atol + rtol*max(|a|,|b|).
+        atol is anchored to the field's dynamic range (|spec_max| * rtol), so
+        near-zero statistics (e.g., converged Jacobi mean ~1e-12) are compared
+        against the actual field scale rather than against zero."""
+        return abs(a - b) <= atol + rtol * max(abs(a), abs(b))
+
+    def abs_err(a, b):
+        """Absolute error for failure reporting."""
+        return abs(a - b)
+
+    spec_blocks = extract_blocks(spec_stdout)
+    gen_blocks  = extract_blocks(generated_stdout)
+
+    # If no labeled blocks found in either output, skip Tier 2 gracefully
+    if not spec_blocks and not gen_blocks:
+        diagnostic = {
+            "verdict":         "SKIP",
+            "method":          "deterministic",
+            "tolerance":       tolerance,
+            "blocks_compared": 0,
+            "failures":        [],
+            "summary":         "SKIP: No LASSI-VERIFY PASSTHROUGH blocks found in either output. "
+                               "Passthrough insertion may have failed or blocks were removed during refactoring."
+        }
+        print("\n----- LASSI-Verify Tier 2: SKIP (no passthrough blocks found) -----")
+        return "SKIP", diagnostic
+
+    failures = []
+    blocks_compared = 0
+
+    for label, spec_body in spec_blocks.items():
+        if label not in gen_blocks:
+            # Label present in spec but missing in generated output — treat as failure
+            failures.append({
+                "label":     label,
+                "stat":      "block_missing",
+                "spec":      "(present)",
+                "generated": "(absent)",
+                "rel_err":   float('inf'),
+            })
+            continue
+
+        gen_body = gen_blocks[label]
+        blocks_compared += 1
+
+        spec_stats = parse_stats(spec_body)
+        gen_stats  = parse_stats(gen_body)
+
+        if spec_stats is None or gen_stats is None:
+            # Cannot parse statistics — fall through to LLM fallback for this block
+            # Mark as unparseable so fallback is triggered below
+            failures.append({
+                "label":     label,
+                "stat":      "parse_error",
+                "spec":      spec_body[:200],
+                "generated": gen_body[:200],
+                "rel_err":   float('inf'),
+            })
+            continue
+
+        # Derive atol from the spec block's max statistic so that near-zero statistics
+        # (e.g., converged mean ~1e-12) are compared against the field's actual dynamic
+        # range rather than against zero. atol = |spec_max| * tolerance.
+        spec_max_val = abs(spec_stats.get('max', 0.0))
+        atol = spec_max_val * tolerance
+
+        # Compare each statistic using allclose: |a-b| <= atol + rtol*max(|a|,|b|)
+        for stat_name, spec_val in spec_stats.items():
+            gen_val = gen_stats.get(stat_name)
+            if gen_val is None:
+                failures.append({
+                    "label":     label,
+                    "stat":      stat_name,
+                    "spec":      spec_val,
+                    "generated": "(missing)",
+                    "abs_err":   float('inf'),
+                    "atol":      atol,
+                })
+                continue
+            if not allclose_pass(spec_val, gen_val, tolerance, atol):
+                failures.append({
+                    "label":     label,
+                    "stat":      stat_name,
+                    "spec":      spec_val,
+                    "generated": gen_val,
+                    "abs_err":   abs_err(spec_val, gen_val),
+                    "atol":      atol,
+                })
+
+        # Compare sample values element-wise with the same allclose tolerance
+        spec_samples = parse_samples(spec_body)
+        gen_samples  = parse_samples(gen_body)
+        if spec_samples and gen_samples:
+            for idx, (sv, gv) in enumerate(zip(spec_samples, gen_samples)):
+                if not allclose_pass(sv, gv, tolerance, atol):
+                    failures.append({
+                        "label":     label,
+                        "stat":      f"sample[{idx}]",
+                        "spec":      sv,
+                        "generated": gv,
+                        "abs_err":   abs_err(sv, gv),
+                        "atol":      atol,
+                    })
+
+    # Check for blocks present in generated output but not in spec (informational only, not a failure)
+    extra_labels = set(gen_blocks.keys()) - set(spec_blocks.keys())
+
+    # ------------------------------------------------------------------
+    # Decide verdict from deterministic layer
+    # ------------------------------------------------------------------
+    # Trigger LLM fallback if any parse_error failures exist (structured output was unusable)
+    has_parse_errors = any(f["stat"] in ("parse_error",) for f in failures)
+    numeric_failures = [f for f in failures if f["stat"] not in ("parse_error",)]
+
+    if has_parse_errors and llm_source is not None:
+        # LLM fallback: send raw outputs to LLM for judgment
+        fallback_prompt = prompts.get_codeknowledge("passthrough_compare_fallback")
+        fallback_prompt += (
+            f"\n\n--- PROGRAM A OUTPUT (SOURCE_verify — source-as-specification reference) ---\n"
+            f"{spec_stdout[:8000]}\n\n"
+            f"--- PROGRAM B OUTPUT (generated/refactored code) ---\n"
+            f"{generated_stdout[:8000]}\n"
+        )
+        temp = 0.0
+        if llm_source == "argo":
+            llm_response = argo_llm(model, system_prompt, fallback_prompt, temp, verifyprompt)
+        elif llm_source == "ollama":
+            llm_response = ollama_llm_nostream(model, num_ctx, system_prompt, fallback_prompt, temp, verifyprompt)
+        elif llm_source == "cerebras":
+            llm_response = cerebras_llm(model, num_ctx, system_prompt, fallback_prompt, temp, verifyprompt)
+        else:
+            llm_response = ""
+
+        llm_upper = llm_response.upper()
+        if "FAIL" in llm_upper:
+            llm_verdict = "FAIL (LLM)"
+        elif "PASS" in llm_upper:
+            llm_verdict = "PASS (LLM)"
+        else:
+            llm_verdict = "SKIP"  # LLM gave ambiguous response
+
+        summary = (
+            f"Tier 2 LLM fallback (deterministic parsing failed for {len([f for f in failures if f['stat']=='parse_error'])} block(s)). "
+            f"LLM verdict: {llm_verdict}. LLM rationale: {llm_response[:300]}"
+        )
+        diagnostic = {
+            "verdict":         llm_verdict,
+            "method":          "llm_fallback",
+            "tolerance":       tolerance,
+            "blocks_compared": blocks_compared,
+            "failures":        failures,
+            "summary":         summary,
+        }
+        return llm_verdict, diagnostic
+
+    # Pure deterministic verdict
+    if numeric_failures or any(f["stat"] == "block_missing" for f in failures):
+        fail_summary_parts = []
+        for f in failures:
+            if f["stat"] == "block_missing":
+                fail_summary_parts.append(f"  [block_missing] label='{f['label']}': block absent in generated output")
+            else:
+                fail_summary_parts.append(
+                    f"  [{f['label']}] {f['stat']}: spec={f['spec']}, generated={f['generated']}, "
+                    f"abs_err={f['abs_err']:.3e} (atol={f.get('atol', tolerance):.3e}, rtol={tolerance:.1e})"
+                )
+        summary = (
+            f"FAIL: {len(failures)} discrepancy(ies) found across {blocks_compared} block(s) compared.\n"
+            + "\n".join(fail_summary_parts)
+        )
+        if extra_labels:
+            summary += f"\n  (Note: {len(extra_labels)} label(s) in generated output not present in spec: {extra_labels})"
+        verdict = "FAIL"
+    else:
+        summary = (
+            f"PASS: {blocks_compared} passthrough block(s) matched within allclose tolerance "
+            f"(rtol={tolerance:.1e}, atol=|spec_max|*rtol per block)."
+        )
+        if extra_labels:
+            summary += f" ({len(extra_labels)} extra label(s) in generated output ignored: {extra_labels})"
+        verdict = "PASS"
+
+    diagnostic = {
+        "verdict":         verdict,
+        "method":          "deterministic",
+        "tolerance":       tolerance,
+        "blocks_compared": blocks_compared,
+        "failures":        failures,
+        "summary":         summary,
+    }
+    return verdict, diagnostic

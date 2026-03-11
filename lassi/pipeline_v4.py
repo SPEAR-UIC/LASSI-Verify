@@ -12,6 +12,7 @@ For focus, we will not do the base LLM + self-correction. Just base LLM then LAS
 
 import os
 import csv
+import json
 import re
 import time
 import gc
@@ -82,7 +83,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                                      experiment_data_directory,
                                      experiment_data_file_object,
                                      experiment_data,
-                                     app_name
+                                     app_name,
+                                     run_tier2=False,        # Enable Tier 2 empirical equivalence checking
+                                     tier2_tolerance=1e-6,   # Relative tolerance for passthrough comparison
+                                     run_llm_judge=True      # Enable LLM-as-a-judge functional equivalence check (pre-Tier-1/2 stop-gap; disable for pure three-tier mode)
                                     ):
 
     # -----------------
@@ -111,7 +115,16 @@ def auto_code_llmgeneration_pipeline(prompts,
     duration = 0
     self_correction_max = 10
     self_correction_power_counter_max = 10
+    self_correction_verify_counter = 0    # Global total Tier 2 failures across all generated codes; pipeline-level safety net
+    self_correction_verify_counter_max = 15  # Global limit (increased from 10 to support multiple codes × per-code budget)
+    self_correction_verify_counter_code = 0   # Per-code Tier 2 self-correction attempts; resets on fresh code generation
+    self_correction_verify_counter_code_max = 5  # Per-code limit: if exhausted, mark INVALID and generate a fresh code
+    tier2_exhausted = False   # Set True when per-code Tier 2 budget is exhausted; forces INVALID after judge block
     exe_output_source = ""
+    source_orig_stdout = ""    # stdout from SOURCE_orig execution (Stage 0)
+    source_verify_stdout = ""  # stdout from SOURCE_verify execution (Stage 1)
+    passthrough_spec_output = ""   # Tier 2 source-as-specification reference (= source_verify_stdout)
+    passthrough_outputs = []       # per-code-block stdout list (indexed like code_blocks)
     energy_efficiency_refactor_success = False
     energy_efficiency_iteration = 0
     code_version = 0
@@ -173,7 +186,8 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Collect baseline energy measurements.
     """Initial stage to run the SOURCE CODE and gather metrics."""
     (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
-     energy_history, power_history, runtime_history, valid_code_history) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, source_file_path, build_script, make_script, directory, source_lang, target_lang,
+     energy_history, power_history, runtime_history, valid_code_history,
+     source_orig_stdout) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, source_file_path, build_script, make_script, directory, source_lang, target_lang,
                                                                                             exe_input_parameters, code_compiler, code_compiler_kwds,
                                                                                             yes_execute, power_measure, input_content_llmjudge_dict,
                                                                                             energy_history, power_history, runtime_history, valid_code_history
@@ -272,6 +286,15 @@ def auto_code_llmgeneration_pipeline(prompts,
     else:
         code_analysis = "None"
     verification_log["sourcecode_analysis"] = code_analysis
+    # Tier 2 verification log fields (initialized here; populated during the main loop)
+    verification_log["run_llm_judge"] = run_llm_judge
+    verification_log["tier2_enabled"] = run_tier2
+    verification_log["tier2_tolerance"] = tier2_tolerance
+    verification_log["tier2_spec_output"] = ""          # populated after Stage 1 execution
+    verification_log["tier2_results"] = []              # per-iteration list of {code_version, verdict, diagnostic}
+    verification_log["verified_pass_count"] = 0         # count of iterations where Tier 2 PASS
+    verification_log["judge_discrepancies"] = []        # cases where LLM judge and three-tier verdict disagree
+    # judge_discrepancy entry schema: {code_version, zero_shot, type ("false_positive"|"false_negative"), judge_verdict, tier2_verdict, final_verdict}
     
     
     # -----------------------------------------------------------
@@ -293,9 +316,27 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     input_content_llmjudge_dict["source_code"] = input_code
 
+    # --- Tier 2: Insert passthrough data dump blocks into the already-asserted code ---
+    # code_insert_passthrough() is called on the Tier-1-instrumented code so both assertion
+    # blocks and passthrough blocks appear in SOURCE_verify and are carried through all
+    # subsequent LLM-generated transformations unaltered.
+    # The passthrough prompt explicitly preserves existing LASSI-VERIFY ASSERTIONS blocks.
+    if run_tier2:
+        passthrough_code = lassi.verify.code_insert_passthrough(
+            input_code,  # already has Tier 1 assertions
+            llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=True
+        )
+        if passthrough_code != "":
+            input_code = passthrough_code
+            input_content_llmjudge_dict["source_code"] = input_code
+            print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify -----")
+        else:
+            print(f"\n----- LASSI-Verify Tier 2: passthrough insertion returned empty — Tier 2 will be SKIPPED -----")
+            run_tier2 = False  # Disable Tier 2 for this run if insertion failed
+
     # Write the instrumented source to disk so test_source_code compiles and runs it —
     # not the original .cu file. This gives true SOURCE_verify metrics that include
-    # any overhead from the inserted invariant assertion checks.
+    # any overhead from the inserted invariant assertion checks (and passthrough blocks if Tier 2 enabled).
     source_base, source_ext = os.path.splitext(source_file_path)
     verify_source_file_path = source_base + "_verify" + source_ext
     with open(verify_source_file_path, 'w') as _vf:
@@ -306,12 +347,24 @@ def auto_code_llmgeneration_pipeline(prompts,
     Compiles and executes verify_source_file_path (the assertion-instrumented .cu file),
     so history[1] reflects the true overhead of the invariant assertion instrumentation."""
     (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
-     energy_history, power_history, runtime_history, valid_code_history) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
+     energy_history, power_history, runtime_history, valid_code_history,
+     source_verify_stdout) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
                                                                                             exe_input_parameters, code_compiler, code_compiler_kwds,
                                                                                             yes_execute, power_measure, input_content_llmjudge_dict,
                                                                                             energy_history, power_history, runtime_history, valid_code_history
                                                                                            )
     valid_code_history[-1] = "SOURCE_verify"  # Override "SOURCE" label from test_source_code
+
+    # Tier 2 source-as-specification reference: stdout from SOURCE_verify execution.
+    # Per the source-as-specification premise, SOURCE_verify's observable behavior is the
+    # sole correctness criterion. Any LASSI-generated transformation must preserve this behavior.
+    passthrough_spec_output = source_verify_stdout
+    verification_log["tier2_spec_output"] = passthrough_spec_output
+
+    # Initialize per-code-block stdout list (indexed like code_blocks):
+    #   [0] = SOURCE_orig stdout (no passthrough instrumentation)
+    #   [1] = SOURCE_verify stdout (Tier 2 reference)
+    passthrough_outputs = [source_orig_stdout, source_verify_stdout]
 
     # Append instrumented source code as code_blocks[1] = SOURCE_verify.
     # LASSI pipeline refactors from this baseline; the LASSI judge compares against it.
@@ -325,7 +378,12 @@ def auto_code_llmgeneration_pipeline(prompts,
         (compile_result != "" or stage == "stage1" or stage == "stage2")
         and self_correction_counter <= self_correction_max
         and self_correction_power_counter <= self_correction_power_counter_max
+        and self_correction_verify_counter <= self_correction_verify_counter_max
     ):
+        # Save compile_result at the start of this iteration before compile/execute can modify it.
+        # Used later to detect whether we're entering a Tier 2 self-correction retry vs. a fresh code.
+        compile_result_before_generation = compile_result
+
         # After the initial zero-shot and iteration attempts until no improvement, then
         # Update the prompt strategy with context and self-prompting responses.
         if change_strategy and not zero_shot and compile_result == "energy_efficiency":
@@ -419,7 +477,52 @@ def auto_code_llmgeneration_pipeline(prompts,
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "initial zero-shot attempt: prompt the LLM to generate code." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, code_gen_temp, system_prompt, instructions_prompt, display_response, verifyprompt)
         
-        elif compile_result != "" and compile_result != "energy_efficiency" and not zero_shot:
+        elif compile_result == "tier2_failure" and not zero_shot:
+            """
+            Tier 2 (empirical equivalence) verification failure self-correction.
+            The generated code compiled and executed successfully but its passthrough output
+            did not match the SOURCE_verify source-as-specification reference.
+            This branch uses self_correction_verify_counter (shared with future Tier 3 failures).
+            """
+            print("\n\n----- " + color.BOLD + color.RED + "LASSI-VERIFY Tier 2 SELF-CORRECTION: " + str(self_correction_verify_counter) + color.END + " -----")
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
+
+            # Build the Tier 2 verification error prompt:
+            #   - the generated code that failed
+            #   - the diagnostic summary (which observation points diverged and by how much)
+            #   - raw passthrough output from SOURCE_verify (source-as-specification reference)
+            #   - raw passthrough output from the generated code
+            tier2_diag_summary = tier2_diagnostic.get("summary", "(no diagnostic available)")
+            # Truncate raw outputs to avoid exceeding context window
+            spec_output_excerpt  = passthrough_spec_output[:4000]  if len(passthrough_spec_output)  > 4000  else passthrough_spec_output
+            gen_output_excerpt   = passthrough_outputs[-1][:4000]  if passthrough_outputs and len(passthrough_outputs[-1]) > 4000 else (passthrough_outputs[-1] if passthrough_outputs else "")
+
+            error_correction_prompt_intro = (
+                "\n\nThe above code compiled and executed successfully but FAILED LASSI-Verify "
+                "Tier 2 empirical equivalence checking. Its passthrough observation point output "
+                "does not match the SOURCE_verify source-as-specification reference.\n\n"
+                "=== TIER 2 DIAGNOSTIC ===\n"
+                + tier2_diag_summary +
+                "\n\n=== SOURCE_verify PASSTHROUGH OUTPUT (source-as-specification reference) ===\n"
+                + spec_output_excerpt +
+                "\n\n=== GENERATED CODE PASSTHROUGH OUTPUT ===\n"
+                + gen_output_excerpt +
+                "\n\n=== END TIER 2 DIAGNOSTIC ===\n\n"
+                "Fix the generated code so that its passthrough observation point output matches "
+                "the source-as-specification reference within floating-point tolerance. "
+                "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
+                "The issue likely involves incorrect computation, wrong algorithm, or wrong data transformation."
+            )
+
+            error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
+            error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
+            error_prompt_tokens = lassi.token_analysis.token_count(error_prompt)
+            if verifyprompt:
+                print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 2 verification self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
+            print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to fix code following Tier 2 verification failure." + color.END + "\n\n")
+            code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
+
+        elif compile_result != "" and compile_result != "energy_efficiency" and compile_result != "tier2_failure" and not zero_shot:
             """
             This condition is for handling CODE ERRORS during compilation or execution.
             """
@@ -445,6 +548,12 @@ def auto_code_llmgeneration_pipeline(prompts,
             # error_correction_prompt_outro = " Eliminate this specific error by re-factoring the above code with an appropriate fix."
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
             # TODO: maybe not include context for the code errors? original_context_content_prompt
+            # Guard: code_block should always be set by the generation branch before this point.
+            # If empty (LLM returned no code fences AND no fallback pattern matched), fall back to
+            # code_blocks[-1] so the prompt has something useful for the LLM to work with.
+            if code_block == "":
+                print(color.BOLD + color.RED + "\n[WARNING] code_block is empty at error-correction prompt — LLM generation may have returned no code. Falling back to code_blocks[-1]." + color.END)
+                code_block = code_blocks[-1] if code_blocks else ""
             error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro + "\n\n" + error_message
             error_prompt_tokens = lassi.token_analysis.token_count(error_prompt)
             print("\n\n----- " + color.BOLD + color.RED + "ERROR SELF-CORRECTION" + color.END + " -----")
@@ -792,21 +901,133 @@ def auto_code_llmgeneration_pipeline(prompts,
             # Do not enable feedback iteration in baseline mode
             #self_correction_power_counter = self_correction_power_counter_max + 1
             
-            # Call LLM-as-a-judge to review SOURCE CODE and REFACTORED CODE to evaluate if likely valid
+            # --- TIER 2: Empirical Equivalence Check (fail-fast before judge) ---
+            # Applies only to LASSI-generated codes (not zero_shot). Zero-shot codes refactor from
+            # original_input_code (no passthrough blocks), so compare_passthrough_outputs() would
+            # return SKIP — which is the correct behavior for the zero-shot path.
+            # Reset per-code Tier 2 self-correction counter when processing a fresh code.
+            # A Tier 2 retry enters here with compile_result_before_generation == "tier2_failure";
+            # anything else (initial, win, INVALID/no-improvement) means a fresh code.
+            if compile_result_before_generation != "tier2_failure":
+                self_correction_verify_counter_code = 0
+            tier2_verdict = "SKIP"
+            tier2_diagnostic = {}
+            if run_tier2 and not zero_shot and passthrough_spec_output != "":
+                tier2_verdict, tier2_diagnostic = lassi.verify.compare_passthrough_outputs(
+                    spec_stdout=passthrough_spec_output,
+                    generated_stdout=exe_output_generated,
+                    tolerance=tier2_tolerance,
+                    llm_source=llm_source, model=model, num_ctx=num_ctx,
+                    system_prompt=system_prompt, verifyprompt=verifyprompt
+                )
+                print(f"\n----- LASSI-Verify Tier 2: {tier2_verdict} -----")
+                if tier2_diagnostic.get("failures"):
+                    print(tier2_diagnostic.get("summary", ""))
+                # Record Tier 2 result in verification log
+                if "tier2_results" in verification_log:
+                    verification_log["tier2_results"].append({
+                        "code_version": code_version,
+                        "verdict": tier2_verdict,
+                        "diagnostic": tier2_diagnostic,
+                    })
+
+            passthrough_outputs.append(exe_output_generated)  # record stdout for every generated attempt
+
+            if tier2_verdict.startswith("FAIL"):
+                # Tier 2 failed: increment both global and per-code self-correction counters.
+                self_correction_verify_counter += 1
+                self_correction_verify_counter_code += 1
+                iteration_log["v" + str(code_version)]["self_correction_count"] += 1
+
+                if self_correction_verify_counter_code < self_correction_verify_counter_code_max:
+                    # Still within per-code budget: pop code, self-correct with Tier 2 feedback.
+                    # code_blocks is popped to keep it in sync with runtime_history (not updated on
+                    # Tier 2 failure). Without this pop, tracking_best_version = len(code_blocks)-1
+                    # after a later win would be out of bounds for runtime_history (IndexError).
+                    code_blocks.pop()
+                    compile_result = "tier2_failure"
+                    print(f"\n----- LASSI-Verify Tier 2: FAIL — self-correction {self_correction_verify_counter_code}/{self_correction_verify_counter_code_max} (global total: {self_correction_verify_counter}) -----")
+                    continue  # Skip judge and metrics; return to top of while loop
+                else:
+                    # Per-code Tier 2 budget exhausted: this code's approach is fundamentally wrong.
+                    # Keep code in code_blocks (it ran — it's a real artifact for research records).
+                    # Mark INVALID so it doesn't update tracking_best_version. Set compile_result to
+                    # "energy_efficiency" so next iteration generates a fresh code (not Tier 2 retry).
+                    # Tier 2 self-correction context is cleared automatically: compile_result != "tier2_failure"
+                    # on the next iteration triggers reset of self_correction_verify_counter_code.
+                    print(f"\n----- LASSI-Verify Tier 2: FAIL — per-code budget exhausted ({self_correction_verify_counter_code_max} attempts), marking INVALID, fresh generation next -----")
+                    tier2_exhausted = True
+                    compile_result = "energy_efficiency"  # drive fresh code generation (not Tier 2 retry)
+            # Tier 2 PASS or SKIP: record in verification log and proceed to judge
+            if run_tier2 and not zero_shot and "verified_pass_count" in verification_log and tier2_verdict.startswith("PASS"):
+                verification_log["verified_pass_count"] += 1
+
+            # Call LLM-as-a-judge to review SOURCE CODE and REFACTORED CODE to evaluate if likely valid.
+            # Judge always runs for zero_shot (vanilla LLM has no Tier 1/2 instrumentation — the judge
+            # is its only correctness gate). For LASSI codes, judge is controlled by run_llm_judge:
+            #   run_llm_judge=True:  judge runs; three-tier verdict can override it (see below)
+            #   run_llm_judge=False: pure three-tier mode for LASSI codes; judge skipped; vanilla still judged
             # For the zero-shot (vanilla LLM) pass, judge against the original uninstrumented source code.
             # For the LASSI pipeline (not zero_shot), judge against the assertion-instrumented source code.
             # code_blocks[0]=SOURCE_orig, code_blocks[1]=SOURCE_verify (both always pre-populated before while loop).
-            if zero_shot:
-                judge_dict = dict(input_content_llmjudge_dict)  # shallow copy to avoid mutating the shared dict
-                judge_dict["source_code"] = code_blocks[0]      # compare vanilla LLM against original source
+            if run_llm_judge or zero_shot:
+                if zero_shot:
+                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy to avoid mutating the shared dict
+                    judge_dict["source_code"] = code_blocks[0]      # compare vanilla LLM against original (uninstrumented) source
+                    judge_dict["source_stdout"] = source_orig_stdout  # use uninstrumented stdout; source_verify_stdout has passthrough dump noise
+                else:
+                    judge_dict = input_content_llmjudge_dict         # compare LASSI against instrumented source
+                valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(target_lang, llm_source, model_judge, num_ctx, system_prompt, judge_dict, power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt)
             else:
-                judge_dict = input_content_llmjudge_dict         # compare LASSI against instrumented source
-            valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(target_lang, llm_source, model_judge, num_ctx, system_prompt, judge_dict, power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt)
-            
+                # Pure three-tier mode (LASSI only, never zero_shot): Tier 1 + Tier 2 determine validity.
+                valid_code_flag = "VALID"
+                judge_response_text = "LLM judge disabled (run_llm_judge=False)"
+                code_analysis = "None"
+                print("\n----- LLM judge disabled: LASSI code accepted by Tier 1 + Tier 2 deterministic gates -----")
+
+            # Capture the raw judge verdict immediately after the judge call, before zero-energy guard
+            # or three-tier overrides can modify valid_code_flag. Used for discrepancy logging below.
+            judge_raw_verdict = valid_code_flag
+
             # Handle scenario where we might have a bad power measurement
             # (only applies in EE mode; in runtime mode energy is always 0)
             if power_measure and total_energy_joules_refactor == 0:
                 valid_code_flag = "INVALID"
+
+            # --- THREE-TIER PRIORITY OVERRIDES ---
+            # Three-tier verdict takes priority over the LLM judge for LASSI codes (not zero_shot).
+            # Discrepancies are logged to verification_log["judge_discrepancies"] for research analysis:
+            # they reveal cases where the LLM judge was wrong in either direction.
+
+            # Override 1 (false positive): Tier 2 budget exhausted → INVALID even if judge said VALID.
+            # Tier 2 already ran and failed self_correction_verify_counter_code_max times — code is wrong.
+            if tier2_exhausted and not zero_shot:
+                if judge_raw_verdict == "VALID":
+                    verification_log["judge_discrepancies"].append({
+                        "code_version": code_version, "zero_shot": zero_shot,
+                        "type": "false_positive",
+                        "judge_verdict": judge_raw_verdict, "tier2_verdict": "FAIL_exhausted",
+                        "final_verdict": "INVALID",
+                    })
+                    print(f"\n----- Three-tier override: judge=VALID overridden to INVALID (Tier 2 exhausted — judge false positive) -----")
+                valid_code_flag = "INVALID"
+                judge_response_text = f"Tier 2 self-correction budget exhausted ({self_correction_verify_counter_code_max} attempts): code marked INVALID; fresh generation next."
+                code_analysis = "None"
+                tier2_exhausted = False  # reset for next iteration
+
+            # Override 2 (false negative): Tier 2 PASS → VALID even if judge said INVALID.
+            # Empirical equivalence (Tier 2) is a stronger correctness signal than LLM opinion.
+            # Only applies to LASSI codes (zero_shot has no Tier 2 instrumentation → SKIP, no override).
+            if tier2_verdict == "PASS" and valid_code_flag != "VALID" and not zero_shot:
+                verification_log["judge_discrepancies"].append({
+                    "code_version": code_version, "zero_shot": zero_shot,
+                    "type": "false_negative",
+                    "judge_verdict": judge_raw_verdict, "tier2_verdict": tier2_verdict,
+                    "final_verdict": "VALID",
+                })
+                print(f"\n----- Three-tier override: judge={judge_raw_verdict} overridden to VALID (Tier 2 PASS — judge false negative) -----")
+                valid_code_flag = "VALID"
+
             # valid_code_flag can be: (1) "VALID", (2) "INVALID", or (3) "NONE"
             if not zero_shot:
                 valid_code_history.append(valid_code_flag)
@@ -1193,7 +1414,26 @@ def auto_code_llmgeneration_pipeline(prompts,
         experiment_data["total_selfcorrections"] = self_correction_counter
         experiment_data["total_eeiterations"] = ee_iterations
         experiment_data["pipeline_runtime_min"] = round(end_time/60, 2)
-        
+
+    # --- LASSI-VERIFY SUMMARY: populate experiment_data fields from verification_log ---
+    # Computed outside the yes_power_feedback block so they are always recorded.
+    tier2_results = verification_log.get("tier2_results", [])
+    discrepancies = verification_log.get("judge_discrepancies", [])
+    experiment_data["tier2_pass_count"] = verification_log.get("verified_pass_count", 0)
+    experiment_data["tier2_fail_total"] = sum(1 for r in tier2_results if r.get("verdict", "").startswith("FAIL"))
+    experiment_data["judge_false_positives"] = sum(1 for d in discrepancies if d.get("type") == "false_positive")
+    experiment_data["judge_false_negatives"] = sum(1 for d in discrepancies if d.get("type") == "false_negative")
+
+    # --- LASSI-VERIFY JSON SIDECAR: save full verification_log for detailed inspection ---
+    # tier2_spec_output (large stdout) and sourcecode_analysis (large text) are excluded here;
+    # they are captured in the metadata .txt file. All other fields are saved verbatim.
+    vlog_save = {k: v for k, v in verification_log.items() if k not in ("tier2_spec_output", "sourcecode_analysis")}
+    vlog_filename = os.path.join(experiment_data_directory, "verification_log_" + file_name_save + "_Trial" + str(trial_number) + ".json")
+    with open(vlog_filename, 'w') as vlog_file:
+        json.dump(vlog_save, vlog_file, indent=2, default=str)
+    print(f"\nVerification log saved: {vlog_filename}")
+
+    if yes_power_feedback:
         meta_data_file += "\n\n\n----- ENERGY EFFICIENCY METRICS -----\n"
         meta_data_file += "Best refactored code version: " + str(best_index)
         meta_data_file += "\nLLM Judge Validation Result: " + str(valid_code_history[best_index])

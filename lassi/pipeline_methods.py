@@ -205,7 +205,8 @@ def test_source_code(app_name, experiment_data_directory,
         valid_code_history.append("SOURCE")
 
     return (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power,
-            duration, energy_history, power_history, runtime_history, valid_code_history)
+            duration, energy_history, power_history, runtime_history, valid_code_history,
+            exe_output_source)  # exe_output_source: stdout from execution; used by Tier 2 passthrough comparison
 
 
 def selfprompting_context_builder(generate_context_flag,

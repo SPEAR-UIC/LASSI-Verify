@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import lassi.verify
 import lassi.llm_config
 import lassi.code_manager
+import lassi.llm_methods
 import lassi.pipeline_methods
 from lassi.prompt_dictionary import PromptDictionary
 from lassi.gpu_detector import detect_gpu_vendors
