@@ -201,16 +201,32 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     3. **Surround all assertion blocks with protective comments** — these are CRITICAL:
        they ensure assertions survive through subsequent LLM-driven transformation steps
        without being removed or modified.
+
+       **Required block format** (follow this pattern exactly):
     ```cpp
        // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
        // LASSI_INSTRUMENTATION - [Brief description of invariant being checked]
-       [your assertion code here]
+       {
+           bool _t1_pass = (your_condition_here);
+           printf("LASSI-VERIFY ASSERTIONS [label]: %s\n", _t1_pass ? "PASS" : "FAIL");
+           fflush(stdout);
+       }
        // <<< END LASSI-VERIFY ASSERTIONS <<<
     ```
 
+       **CRITICAL format rules:**
+       - The printf line MUST use exactly this format: `"LASSI-VERIFY ASSERTIONS [label]: %s\n"`
+         where `[label]` is a short identifier matching the LASSI_INSTRUMENTATION comment.
+       - Always call `fflush(stdout)` after printf so output is not lost if the process exits.
+       - Do NOT use C `assert()` — it can be silenced by `-DNDEBUG` compiler flags.
+       - Do NOT call `exit()` — the pipeline collects ALL assertion results before deciding;
+         exiting early hides subsequent failures.
+       - Multiple assertions should each be their own separate block with a unique label.
+
     4. **Use ONLY standard library functions:**
-       - `#include <cassert>` or `#include <assert.h>` for assert()
+       - `#include <cstdio>` for `printf()` and `fflush()`
        - `#include <cmath>` or `#include <math.h>` for isfinite(), isnan(), isinf(), fabs()
+       - Do NOT use `assert()` or include `<cassert>`
        - Do NOT create or reference any custom assertion libraries
 
     5. **Select minimal relevant assertions** from the provided catalog that match the code's
@@ -598,6 +614,68 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
         "summary":         summary,
     }
     return verdict, diagnostic
+
+
+# =============================================================================
+# TIER 1: DETERMINISTIC ASSERTION CHECK
+# =============================================================================
+
+def check_tier1_assertions(stdout):
+    """
+    Tier 1: Deterministic check of invariant assertion results from generated code stdout.
+
+    Parses lines of the form:
+        LASSI-VERIFY ASSERTIONS [label]: PASS
+        LASSI-VERIFY ASSERTIONS [label]: FAIL
+
+    All assertion results are collected before returning — giving the LLM full visibility
+    into every failing invariant, not just the first one.
+
+    Returns:
+        verdict (str): "PASS", "FAIL", or "SKIP"
+        diagnostic (dict): {verdict, failing_labels, passing_labels, pass_count, fail_count, summary}
+    """
+    assertion_pattern = re.compile(
+        r'LASSI-VERIFY ASSERTIONS \[([^\]]+)\]:\s*(PASS|FAIL)'
+    )
+
+    passing_labels = []
+    failing_labels = []
+    for m in assertion_pattern.finditer(stdout):
+        label, result = m.group(1), m.group(2)
+        if result == "FAIL":
+            failing_labels.append(label)
+        else:
+            passing_labels.append(label)
+
+    total = len(passing_labels) + len(failing_labels)
+
+    if total == 0:
+        return "SKIP", {
+            "verdict": "SKIP", "failing_labels": [], "passing_labels": [],
+            "pass_count": 0, "fail_count": 0,
+            "summary": "SKIP: No LASSI-VERIFY ASSERTIONS lines found in stdout.",
+        }
+
+    if failing_labels:
+        summary = (
+            f"FAIL: {len(failing_labels)}/{total} assertion(s) violated: "
+            + ", ".join(f"[{l}]" for l in failing_labels)
+            + (f". Passing: " + ", ".join(f"[{l}]" for l in passing_labels) if passing_labels else "")
+        )
+        verdict = "FAIL"
+    else:
+        summary = f"PASS: All {total} assertion(s) passed."
+        verdict = "PASS"
+
+    return verdict, {
+        "verdict": verdict,
+        "failing_labels": failing_labels,
+        "passing_labels": passing_labels,
+        "pass_count": len(passing_labels),
+        "fail_count": len(failing_labels),
+        "summary": summary,
+    }
 
 
 # =============================================================================

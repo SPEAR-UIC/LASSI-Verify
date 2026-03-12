@@ -130,6 +130,12 @@ def auto_code_llmgeneration_pipeline(prompts,
     tier3_exhausted = False         # Set True when per-code Tier 3 budget exhausted; forces INVALID
     tier3_verdict = "SKIP"          # Most recent Tier 3 verdict for the current code
     tier3_diagnostic = {}           # Most recent Tier 3 first-failure diagnostic
+    # --- Tier 1: Invariant Assertion Check state variables ---
+    self_correction_tier1_counter_code = 0    # Per-code Tier 1 retry count; resets on fresh code
+    self_correction_tier1_counter_code_max = 3  # Per-code limit (matches Tier 3; assertion failures are structural)
+    tier1_exhausted = False         # Set True when per-code Tier 1 budget exhausted; forces INVALID
+    tier1_verdict = "SKIP"          # Most recent Tier 1 verdict for the current code
+    tier1_diagnostic = {}           # Most recent Tier 1 assertion diagnostic
     exe_output_source = ""
     source_orig_stdout = ""    # stdout from SOURCE_orig execution (Stage 0)
     source_verify_stdout = ""  # stdout from SOURCE_verify execution (Stage 1)
@@ -542,6 +548,41 @@ def auto_code_llmgeneration_pipeline(prompts,
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "initial zero-shot attempt: prompt the LLM to generate code." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, code_gen_temp, system_prompt, instructions_prompt, display_response, verifyprompt)
         
+        elif compile_result == "tier1_failure" and not zero_shot:
+            """
+            Tier 1 (invariant assertion) verification failure self-correction.
+            The generated code compiled and executed successfully but one or more invariant
+            assertion blocks printed FAIL to stdout. All failing assertion labels are reported
+            so the LLM has full visibility into every violated invariant.
+            """
+            print("\n\n----- " + color.BOLD + color.RED + "LASSI-VERIFY Tier 1 SELF-CORRECTION: " + str(self_correction_verify_counter) + color.END + " -----")
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
+
+            tier1_diag_summary = tier1_diagnostic.get("summary", "(no diagnostic available)")
+            failing_labels_str = ", ".join(f"[{l}]" for l in tier1_diagnostic.get("failing_labels", []))
+
+            error_correction_prompt_intro = (
+                "\n\nThe above code compiled and executed successfully but FAILED LASSI-Verify "
+                "Tier 1 invariant assertion checking. One or more assertion blocks printed FAIL "
+                "to stdout, indicating a mathematical correctness violation.\n\n"
+                "=== TIER 1 DIAGNOSTIC ===\n"
+                + tier1_diag_summary +
+                "\n\nFailing assertion label(s): " + (failing_labels_str if failing_labels_str else "(see diagnostic above)") +
+                "\n=== END TIER 1 DIAGNOSTIC ===\n\n"
+                "Fix the generated code so that all invariant assertions PASS. "
+                "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
+                "The issue is a mathematical correctness error — the computation violates a "
+                "transformation-invariant property that any correct implementation must satisfy."
+            )
+
+            error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
+            error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
+            error_prompt_tokens = lassi.token_analysis.token_count(error_prompt)
+            if verifyprompt:
+                print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 1 assertion self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
+            print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to fix code following Tier 1 assertion failure." + color.END + "\n\n")
+            code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
+
         elif compile_result == "tier2_failure" and not zero_shot:
             """
             Tier 2 (empirical equivalence) verification failure self-correction.
@@ -620,7 +661,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to fix code following Tier 3 metamorphic test failure." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
 
-        elif compile_result != "" and compile_result != "energy_efficiency" and compile_result != "tier2_failure" and compile_result != "tier3_failure" and not zero_shot:
+        elif compile_result != "" and compile_result != "energy_efficiency" and compile_result != "tier1_failure" and compile_result != "tier2_failure" and compile_result != "tier3_failure" and not zero_shot:
             """
             This condition is for handling CODE ERRORS during compilation or execution.
             """
@@ -999,6 +1040,41 @@ def auto_code_llmgeneration_pipeline(prompts,
             # Do not enable feedback iteration in baseline mode
             #self_correction_power_counter = self_correction_power_counter_max + 1
             
+            # --- TIER 1: Invariant Assertion Check (fail-fast before Tier 2) ---
+            # Parses stdout for LASSI-VERIFY ASSERTIONS [label]: FAIL lines.
+            # All assertions are checked before deciding (code runs to completion), giving the
+            # LLM full visibility into every violated invariant — not just the first one.
+            # Applies only to LASSI-generated codes (zero_shot has no assertion blocks).
+            # Reset per-code counter on fresh code; preserve across tier1_failure retries.
+            if compile_result_before_generation != "tier1_failure":
+                self_correction_tier1_counter_code = 0
+            tier1_verdict = "SKIP"
+            tier1_diagnostic = {}
+            if not zero_shot:
+                tier1_verdict, tier1_diagnostic = lassi.verify.check_tier1_assertions(exe_output_generated)
+                if tier1_verdict == "PASS":
+                    print(f"\n----- LASSI-Verify Tier 1: PASS ({tier1_diagnostic['pass_count']} assertion(s)) -----")
+                elif tier1_verdict == "SKIP":
+                    print(f"\n----- LASSI-Verify Tier 1: SKIP (no assertion blocks found in stdout) -----")
+                elif tier1_verdict == "FAIL":
+                    print(f"\n----- LASSI-Verify Tier 1: FAIL — {tier1_diagnostic['fail_count']} assertion(s) violated -----")
+                    print(tier1_diagnostic["summary"])
+                    self_correction_verify_counter += 1
+                    self_correction_tier1_counter_code += 1
+                    iteration_log["v" + str(code_version)]["self_correction_count"] += 1
+                    if self_correction_tier1_counter_code <= self_correction_tier1_counter_code_max:
+                        code_blocks.pop()
+                        compile_result = "tier1_failure"
+                        print(f"\n----- LASSI-Verify Tier 1: self-correction "
+                              f"{self_correction_tier1_counter_code}/{self_correction_tier1_counter_code_max} "
+                              f"(global: {self_correction_verify_counter}) -----")
+                        continue  # Skip Tier 2, Tier 3, judge; return to top of while loop
+                    else:
+                        print(f"\n----- LASSI-Verify Tier 1: per-code budget exhausted "
+                              f"({self_correction_tier1_counter_code_max} attempts), marking INVALID -----")
+                        tier1_exhausted = True
+                        compile_result = "energy_efficiency"  # drive fresh generation next iteration
+
             # --- TIER 2: Empirical Equivalence Check (fail-fast before judge) ---
             # Applies only to LASSI-generated codes (not zero_shot). Zero-shot codes refactor from
             # original_input_code (no passthrough blocks), so compare_passthrough_outputs() would
@@ -1006,7 +1082,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             # Reset per-code Tier 2 self-correction counter when processing a fresh code.
             # A Tier 2 retry enters here with compile_result_before_generation == "tier2_failure";
             # anything else (initial, win, INVALID/no-improvement) means a fresh code.
-            if compile_result_before_generation != "tier2_failure":
+            if compile_result_before_generation not in ("tier2_failure", "tier1_failure"):
                 self_correction_verify_counter_code = 0
             tier2_verdict = "SKIP"
             tier2_diagnostic = {}
@@ -1173,17 +1249,45 @@ def auto_code_llmgeneration_pipeline(prompts,
                 code_analysis = "None"
                 tier2_exhausted = False  # reset for next iteration
 
-            # Override 2 (false negative): Tier 2 PASS → VALID even if judge said INVALID.
-            # Empirical equivalence (Tier 2) is a stronger correctness signal than LLM opinion.
-            # Only applies to LASSI codes (zero_shot has no Tier 2 instrumentation → SKIP, no override).
-            if tier2_verdict == "PASS" and valid_code_flag != "VALID" and not zero_shot:
+            # Override 1b (false positive): Tier 1 budget exhausted → INVALID regardless of judge.
+            # Tier 1 already ran and failed self_correction_tier1_counter_code_max times — code has a
+            # persistent invariant violation that self-correction cannot fix.
+            if tier1_exhausted and not zero_shot:
+                if valid_code_flag == "VALID":
+                    verification_log["judge_discrepancies"].append({
+                        "code_version": code_version, "zero_shot": zero_shot,
+                        "type": "false_positive",
+                        "judge_verdict": judge_raw_verdict, "tier1_verdict": "FAIL_exhausted",
+                        "final_verdict": "INVALID",
+                    })
+                    print(f"\n----- Three-tier override: judge=VALID overridden to INVALID (Tier 1 exhausted — judge false positive) -----")
+                valid_code_flag = "INVALID"
+                judge_response_text = (f"Tier 1 invariant assertion budget exhausted "
+                                       f"({self_correction_tier1_counter_code_max} attempts): code marked INVALID.")
+                code_analysis = "None"
+                tier1_exhausted = False  # reset for next iteration
+
+            # Override 2 (false negative): Tier 1 PASS/SKIP + Tier 2 PASS + Tier 3 PASS/SKIP → VALID even if judge said INVALID.
+            # All active tiers must be satisfied: Tier 2 PASS alone is insufficient if Tier 1 or Tier 3 is active.
+            # tier1_verdict == "SKIP" is acceptable (Tier 1 inactive/disabled or no assertions found in output).
+            # tier3_verdict == "SKIP" is acceptable (Tier 3 inactive/disabled/no active relations).
+            # FAIL with exhausted budget is handled by Override 1b / Override 3 (INVALID, last word).
+            # Only applies to LASSI codes (zero_shot has no instrumentation → SKIP, no override).
+            if (tier1_verdict in ("PASS", "SKIP") and tier2_verdict == "PASS"
+                    and tier3_verdict in ("PASS", "SKIP")
+                    and valid_code_flag != "VALID" and not zero_shot):
+                _t1_label = (f"Tier 1 {tier1_verdict}" if not zero_shot else "Tier 1 inactive")
+                _t3_label = (f"Tier 3 {tier3_verdict}" if (run_tier3 and tier3_active_relations)
+                             else "Tier 3 inactive")
                 verification_log["judge_discrepancies"].append({
                     "code_version": code_version, "zero_shot": zero_shot,
                     "type": "false_negative",
-                    "judge_verdict": judge_raw_verdict, "tier2_verdict": tier2_verdict,
+                    "judge_verdict": judge_raw_verdict, "tier1_verdict": tier1_verdict,
+                    "tier2_verdict": tier2_verdict, "tier3_verdict": tier3_verdict,
                     "final_verdict": "VALID",
                 })
-                print(f"\n----- Three-tier override: judge={judge_raw_verdict} overridden to VALID (Tier 2 PASS — judge false negative) -----")
+                print(f"\n----- Three-tier override: judge={judge_raw_verdict} overridden to VALID "
+                      f"({_t1_label} + Tier 2 PASS + {_t3_label} — judge false negative) -----")
                 valid_code_flag = "VALID"
 
             # Override 3 (false positive): Tier 3 budget exhausted → INVALID regardless of judge or Tier 2.
