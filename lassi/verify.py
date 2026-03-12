@@ -727,7 +727,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
 
     # --- METAMORPHIC block format guidance (relation-type specific) ---
     first_label = obs_points[0] if obs_points else "output"
-    if relation_type in ("SCALING", "SYMMETRY", "PERMUTATIVE", "ROTATION"):
+    if relation_type in ("SCALING", "SYMMETRY"):
         block_format = (
             f"**METAMORPHIC output block format** "
             f"(insert AFTER the final D→H transfer and cudaDeviceSynchronize, "
@@ -746,6 +746,29 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"the corresponding PASSTHROUGH block label for the same observation point "
             f"(e.g., if the PASSTHROUGH label is `[final_solution]`, the METAMORPHIC label "
             f"must also be `[final_solution]`).\n"
+        )
+    elif relation_type in ("PERMUTATIVE", "ROTATION"):
+        block_format = (
+            f"**METAMORPHIC output block format** "
+            f"(insert AFTER the final D→H transfer and cudaDeviceSynchronize, "
+            f"BEFORE any cudaFree / free calls):\n\n"
+            f"```\n"
+            f"=== BEGIN LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
+            f"Relation: {relation_name}\n"
+            f"Permutation: swap\n"
+            f"Swap_idx1: <integer index of first swapped element, must be in [1,9]>\n"
+            f"Swap_idx2: <integer index of second swapped element, must be in [1,9] and != Swap_idx1>\n"
+            f"Buffer: <buffer_name>\n"
+            f"Elements: <N>\n"
+            f"Statistics: min=%.17g, max=%.17g, mean=%.17g\n"
+            f"Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)\n"
+            f"=== END LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
+            f"```\n\n"
+            f"Print this block using printf with %.17g format. "
+            f"Swap_idx1 and Swap_idx2 are the LITERAL integer indices used for the swap "
+            f"(e.g., 'Swap_idx1: 2' and 'Swap_idx2: 5'). "
+            f"Both MUST be in [1,9] so they are captured in Sample_first10 for equivariance checking. "
+            f"The label MUST exactly match the corresponding PASSTHROUGH block label.\n"
         )
     elif relation_type == "CONSERVATION":
         block_format = (
@@ -796,11 +819,18 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         )
     elif relation_type == "PERMUTATIVE" and input_vars:
         transform_instruction = (
-            f"**Step 1 — Apply a deterministic permutation to the input:**\n"
-            f"Insert the permutation AFTER host array initialization but BEFORE the first H→D copy.\n"
-            f"Use a fixed swap of two non-boundary interior indices to permute ({', '.join(input_vars)}).\n\n"
+            f"**Step 1 — Apply a deterministic swap to the input:**\n"
+            f"Insert the swap AFTER host array initialization but BEFORE the first H→D copy.\n"
+            f"Choose two fixed interior indices idx1 and idx2 both in [1, 9] (NOT index 0, which "
+            f"is often a boundary element). Swap those elements in each input array listed in "
+            f"'Input variables to transform': ({', '.join(input_vars)}).\n\n"
+            f"    const int swap_idx1 = 2;  // choose any value in [1,9]\n"
+            f"    const int swap_idx2 = 5;  // choose any value in [1,9], != swap_idx1\n"
+            f"    std::swap({input_vars[0]}[swap_idx1], {input_vars[0]}[swap_idx2]);\n"
+            f"    // (repeat for each input array)\n\n"
             f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
             f"After the final D→H transfer, insert METAMORPHIC blocks at the observation points above.\n"
+            f"Print 'Swap_idx1: <value>' and 'Swap_idx2: <value>' as literal integers in each block.\n"
         )
     elif relation_type == "CONSERVATION":
         transform_instruction = (
@@ -1228,18 +1258,154 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
         }
 
     # ==========================================================================
-    # Other relation types: SKIP in Phase 1.
-    # PERMUTATIVE and ROTATION require element-level array comparison
-    # (checking Z[perm(i)] ≈ Y[i]) which needs the full output array, not just
-    # aggregate statistics. Deferred to Phase 3.
+    # PERMUTATIVE / ROTATION:
+    # Step A — Aggregate invariance: under any relabeling/permutation, aggregate
+    #   stats (min, max, mean) of the output are invariant (factor = 1.0).
+    # Step B — Element equivariance: if Swap_idx1 and Swap_idx2 are present in
+    #   the METAMORPHIC block, check Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1]
+    #   using Sample_first10 (both indices must be in [0, 9]).
+    # ==========================================================================
+    elif relation_type in ("PERMUTATIVE", "ROTATION"):
+        # Shared parsers already defined above; add swap-index patterns here
+        swap_idx1_patt = re.compile(r'Swap_idx1:\s*(\d+)')
+        swap_idx2_patt = re.compile(r'Swap_idx2:\s*(\d+)')
+
+        meta_blocks = extract_meta_blocks(variant_stdout)
+        pass_blocks = extract_pass_blocks(original_passthrough_stdout)
+
+        if not meta_blocks and not pass_blocks:
+            return "SKIP", {
+                "verdict": "SKIP", "relation_name": relation_name, "factor": 1.0,
+                "blocks_compared": 0, "failures": [],
+                "summary": "SKIP: No METAMORPHIC or PASSTHROUGH blocks found in outputs.",
+            }
+
+        failures = []
+        blocks_compared = 0
+        # Factor is always 1.0 for PERMUTATIVE/ROTATION (invariance)
+        perm_factor = 1.0
+
+        labels_to_check = obs_points if obs_points else list(meta_blocks.keys())
+        for label in labels_to_check:
+            if label not in meta_blocks:
+                failures.append({"label": label, "stat": "metamorphic_block_missing",
+                                  "detail": "METAMORPHIC block absent in variant output"})
+                continue
+            if label not in pass_blocks:
+                failures.append({"label": label, "stat": "passthrough_block_missing",
+                                  "detail": "PASSTHROUGH block absent in original output"})
+                continue
+
+            orig_stats = parse_stats(pass_blocks[label])
+            var_stats  = parse_stats(meta_blocks[label])
+            blocks_compared += 1
+
+            if orig_stats is None or var_stats is None:
+                failures.append({"label": label, "stat": "parse_error",
+                                  "detail": "Could not parse Statistics line in one or both blocks"})
+                continue
+
+            # NaN/Inf guard
+            if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
+                continue
+
+            # Step A: invariance check — each aggregate stat of Z ≈ Y (factor=1.0)
+            orig_max_val = abs(orig_stats.get('max', 0.0))
+            atol = orig_max_val * rtol
+            for stat_name, orig_val in orig_stats.items():
+                var_val = var_stats.get(stat_name)
+                if var_val is None:
+                    failures.append({"label": label, "stat": stat_name,
+                                      "orig": orig_val, "variant": "(missing)"})
+                    continue
+                if not both_finite(var_val, orig_val):
+                    continue
+                if not allclose(var_val, orig_val, rtol, atol):
+                    failures.append({
+                        "label": label, "stat": stat_name,
+                        "orig": orig_val, "expected_variant": orig_val,
+                        "actual_variant": var_val,
+                        "abs_err": abs(var_val - orig_val),
+                        "atol": atol, "rtol": rtol,
+                    })
+
+            # Step B: element equivariance — if Swap_idx1/Swap_idx2 present and in [0,9]
+            meta_body = meta_blocks[label]
+            m1 = swap_idx1_patt.search(meta_body)
+            m2 = swap_idx2_patt.search(meta_body)
+            if m1 and m2:
+                try:
+                    idx1 = int(m1.group(1))
+                    idx2 = int(m2.group(1))
+                except ValueError:
+                    idx1, idx2 = -1, -1
+
+                orig_samples = parse_samples(pass_blocks[label])
+                var_samples  = parse_samples(meta_body)
+
+                if (0 <= idx1 <= 9 and 0 <= idx2 <= 9 and
+                        idx1 < len(orig_samples) and idx2 < len(orig_samples) and
+                        idx1 < len(var_samples)  and idx2 < len(var_samples)):
+                    # Z[idx1] should ≈ Y[idx2]
+                    z1, y2 = var_samples[idx1], orig_samples[idx2]
+                    if both_finite(z1, y2) and not allclose(z1, y2, rtol, atol):
+                        failures.append({
+                            "label": label, "stat": f"equivariance[Z[{idx1}]≈Y[{idx2}]]",
+                            "orig": y2, "expected_variant": y2, "actual_variant": z1,
+                            "abs_err": abs(z1 - y2), "atol": atol, "rtol": rtol,
+                        })
+                    # Z[idx2] should ≈ Y[idx1]
+                    z2, y1 = var_samples[idx2], orig_samples[idx1]
+                    if both_finite(z2, y1) and not allclose(z2, y1, rtol, atol):
+                        failures.append({
+                            "label": label, "stat": f"equivariance[Z[{idx2}]≈Y[{idx1}]]",
+                            "orig": y1, "expected_variant": y1, "actual_variant": z2,
+                            "abs_err": abs(z2 - y1), "atol": atol, "rtol": rtol,
+                        })
+
+        equivariance_ran = m1 is not None and m2 is not None if labels_to_check else False
+
+        if failures:
+            lines = []
+            for f in failures:
+                if "detail" in f:
+                    lines.append(f"  [{f['label']}] {f['stat']}: {f['detail']}")
+                else:
+                    lines.append(
+                        f"  [{f['label']}] {f['stat']}: "
+                        f"orig={f.get('orig')}, expected_variant={f.get('expected_variant')}, "
+                        f"actual_variant={f.get('actual_variant')}, "
+                        f"abs_err={f.get('abs_err', '?'):.3e}"
+                    )
+            check_desc = "invariance + equivariance" if equivariance_ran else "invariance only"
+            summary = (
+                f"FAIL: {len(failures)} discrepancy(ies) across {blocks_compared} block(s). "
+                f"Relation: {relation_name} ({check_desc}, rtol={rtol:.1e})\n"
+                + "\n".join(lines)
+            )
+            verdict = "FAIL"
+        else:
+            check_desc = "invariance + equivariance" if equivariance_ran else "invariance only"
+            summary = (
+                f"PASS: {blocks_compared} block(s) satisfied {relation_type} relation "
+                f"({check_desc}, rtol={rtol:.1e}, atol=|orig_max|*rtol per block)."
+            )
+            verdict = "PASS"
+
+        return verdict, {
+            "verdict": verdict, "relation_name": relation_name, "factor": perm_factor,
+            "blocks_compared": blocks_compared, "failures": failures, "summary": summary,
+        }
+
+    # ==========================================================================
+    # Other relation types: SKIP (not yet implemented).
     # ==========================================================================
     else:
         return "SKIP", {
             "verdict": "SKIP", "relation_name": relation_name, "factor": factor,
             "blocks_compared": 0, "failures": [],
             "summary": (
-                f"SKIP: Relation type '{relation_type}' not yet implemented "
-                f"(PERMUTATIVE and ROTATION require element-level array access — Phase 3)."
+                f"SKIP: Relation type '{relation_type}' not yet implemented."
             ),
         }
 
@@ -1425,3 +1591,23 @@ def run_metamorphic_variants(source_code, active_relations, contract,
         overall_verdict = "SKIP"  # All relations skipped
 
     return overall_verdict, results, first_failure_diagnostic
+
+
+def strip_verify_blocks(source_code):
+    """
+    Remove all LASSI-VERIFY ASSERTIONS and LASSI-VERIFY PASSTHROUGH blocks from a
+    C++ source string. Returns uninstrumented code for clean performance measurement.
+
+    Block delimiter format (from Tier 1 / Tier 2 instrumentation):
+      Opening: // >>> BEGIN LASSI-VERIFY ASSERTIONS ...   >>>
+               // >>> BEGIN LASSI-VERIFY PASSTHROUGH ... >>>
+      Closing: // <<< END LASSI-VERIFY ASSERTIONS <<<
+               // <<< END LASSI-VERIFY PASSTHROUGH <<<
+    """
+    pattern = re.compile(
+        r'// >>> BEGIN LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH)[^\n]*\n'
+        r'.*?'
+        r'// <<< END LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH) <<<[^\n]*\n?',
+        re.DOTALL
+    )
+    return pattern.sub('', source_code)

@@ -26,3 +26,6 @@ test_codes/**/*-cuda_main_verify
 
 # Tier 3 metamorphic testing variant files (compiled/run at runtime, not tracked)
 *_mt_*.cu
+
+# Best clean run — uninstrumented best LASSI code (generated at pipeline end, not tracked)
+*_best_clean.cu

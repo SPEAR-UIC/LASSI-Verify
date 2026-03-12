@@ -652,6 +652,30 @@ Segura 2016 (ML feature permutation); Segura 2020 (ML attribute ordering invaria
 - Operations where ordering is semantically meaningful (time series, upwinding)
 - Non-commutative operations
 
+#### METAMORPHIC Output Block Format for PERMUTATIVE
+
+The METAMORPHIC block for PERMUTATIVE includes `Swap_idx1` and `Swap_idx2` fields so the checker
+can perform **element equivariance checks** (Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1]) using
+`Sample_first10`:
+
+```
+=== BEGIN LASSI-VERIFY METAMORPHIC [label] ===
+Relation: <relation_name>
+Permutation: swap
+Swap_idx1: <integer index of first swapped element, must be in [1,9]>
+Swap_idx2: <integer index of second swapped element, must be in [1,9] and != Swap_idx1>
+Buffer: <buffer_name>
+Elements: <N>
+Statistics: min=%.17g, max=%.17g, mean=%.17g
+Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)
+=== END LASSI-VERIFY METAMORPHIC [label] ===
+```
+
+**Implementation note:** Both swap indices MUST be in [1, 9] so they are captured by
+`Sample_first10` for equivariance checking. Do NOT use index 0 (often a boundary element).
+If Swap_idx1/Swap_idx2 are absent or out of range, only aggregate invariance is checked
+(fallback to SCALING-style stats comparison with factor=1.0).
+
 #### 4.1 Row Interchange (Matrix Equivariance)
 
 `input_relation`: swap rows i and j of matrix A AND corresponding entries of RHS vector b
@@ -661,12 +685,14 @@ Segura 2016 (ML feature permutation); Segura 2020 (ML attribute ordering invaria
 **Based on:** Chen 1998 Gaussian elimination: swap rows i and j in A and b → x is identical.
 
 ```cpp
-int row_i = 1, row_j = N/2;   // choose interior rows (avoid boundary rows)
-for (int k = 0; k < N; k++) std::swap(h_A[row_i*N + k], h_A[row_j*N + k]);
-std::swap(h_b[row_i], h_b[row_j]);
+// Use indices in [1,9] so Sample_first10 covers both for equivariance checking
+int swap_idx1 = 1, swap_idx2 = 3;   // interior indices (NOT 0 — often a boundary element)
+for (int k = 0; k < N; k++) std::swap(h_A[swap_idx1*N + k], h_A[swap_idx2*N + k]);
+std::swap(h_b[swap_idx1], h_b[swap_idx2]);
 ```
 
-**Check:** `|Z[i] − Y[i]| ≤ atol + rtol × max(|Z[i]|, |Y[i]|)` for all i.
+**Check:** Aggregate invariance (min/max/mean of Z ≈ Y) + element equivariance
+`Z[swap_idx1] ≈ Y[swap_idx2]` and `Z[swap_idx2] ≈ Y[swap_idx1]`.
 
 **Note for Jacobi:** Choose interior rows only (avoid boundary rows that encode Dirichlet BCs).
 Swapping a boundary row with an interior row changes the problem — SOURCE_verify will catch this.
@@ -678,15 +704,15 @@ Swapping a boundary row with an interior row changes the problem — SOURCE_veri
 `applicable_when`: elements are independent particles/points with no spatial-ordering semantics
 
 ```cpp
-// Simple parity-swap: reverse first and second halves
-for (int i = 0; i < N/2; i++) {
-    std::swap(h_pos[i], h_pos[N/2 + i]);
-    std::swap(h_vel[i], h_vel[N/2 + i]);
-    // swap all associated arrays by the same permutation
-}
+// Simple two-element swap at indices in [1,9]
+const int swap_idx1 = 2, swap_idx2 = 5;
+std::swap(h_pos[swap_idx1], h_pos[swap_idx2]);
+std::swap(h_vel[swap_idx1], h_vel[swap_idx2]);
+// swap all associated arrays by the same permutation
 ```
 
-**Check:** Compare Z[i] to Y[perm_inverse(i)] using the same permutation applied to the original.
+**Check:** Aggregate invariance (min/max/mean of Z ≈ Y) + element equivariance
+`Z[swap_idx1] ≈ Y[swap_idx2]` and `Z[swap_idx2] ≈ Y[swap_idx1]`.
 
 #### 4.3 Reduction Invariance (Commutative Order)
 

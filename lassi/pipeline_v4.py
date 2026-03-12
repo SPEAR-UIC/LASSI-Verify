@@ -1476,6 +1476,75 @@ def auto_code_llmgeneration_pipeline(prompts,
             print(" Best ave power over Base LLM in refactored code, version: " + str(smallest_index) + "\n" )
 
 
+    # ============================================================
+    # POST-LOOP: Best Clean Run
+    # Strip Tier 1+2 instrumentation from the best LASSI-generated code, recompile,
+    # and execute to capture uninstrumented performance metrics for fair comparison.
+    # If compile/execute fails: report gracefully and fall back to instrumented metrics.
+    # This run does NOT affect rankings, history, or Tier verification; it is purely
+    # for reporting a clean uninstrumented runtime/energy baseline for the paper.
+    # ============================================================
+    lassiee_clean_status = "skipped"
+    lassiee_clean_runtime_s = "NA"
+    lassiee_clean_energy_J = "NA"
+    lassiee_clean_runtime_diff = "NA"
+    lassiee_clean_energy_diff = "NA"
+    best_clean_code = None  # uninstrumented code for final LLM analysis
+
+    if tracking_best_version > 1:
+        best_code_raw = code_blocks[tracking_best_version]
+        best_clean_code = lassi.verify.strip_verify_blocks(best_code_raw)
+
+        best_clean_path = os.path.join(directory, file_name + "_best_clean.cu")
+        with open(best_clean_path, 'w') as _bcf:
+            _bcf.write(best_clean_code)
+
+        print("\n----- [Best Clean Run] Compiling uninstrumented best code ... -----")
+        compile_err_clean, best_clean_exe = lassi.code_manager.compile_code(
+            best_clean_path, target_lang, code_compiler, code_compiler_kwds
+        )
+
+        if compile_err_clean:
+            print(f"[Best Clean Run] COMPILE ERROR — using instrumented metrics for final report.\n{str(compile_err_clean)[:300]}")
+            lassiee_clean_status = "compile_error"
+        else:
+            print("[Best Clean Run] Executing ...")
+            try:
+                _clean_result, _clean_stdout, _clean_energy_J, _clean_avg_power, _clean_std_power, _clean_duration, _clean_metrics = lassi.code_manager.execute_code_selectvendor(
+                    experiment_data_directory,
+                    tracking_best_version,  # code_version label
+                    False,                  # zero_shot=False (it's a LASSI code)
+                    trial_number,
+                    directory,
+                    best_clean_exe,
+                    exe_input_parameters,
+                    power_measure,
+                    "best_clean",           # code_source label
+                    target_lang,
+                    build_script,
+                    make_script,
+                    gpu_vendor="auto",
+                    wait=3                  # shorter settle time — no power thread for non-power runs
+                )
+                if _clean_result != "0":
+                    print("[Best Clean Run] EXECUTE ERROR — using instrumented metrics for final report.")
+                    lassiee_clean_status = "execute_error"
+                else:
+                    lassiee_clean_status = "success"
+                    lassiee_clean_runtime_s = round(_clean_duration, 4)
+                    if power_measure and _clean_energy_J > 0:
+                        lassiee_clean_energy_J = round(_clean_energy_J, 4)
+                        if sourcecode_total_energy_joules and sourcecode_total_energy_joules > 0:
+                            lassiee_clean_energy_diff = round(100.0 * (_clean_energy_J - sourcecode_total_energy_joules) / sourcecode_total_energy_joules, 2)
+                    if duration and duration > 0:
+                        lassiee_clean_runtime_diff = round(100.0 * (_clean_duration - duration) / duration, 2)
+                    print(f"[Best Clean Run] Runtime: {lassiee_clean_runtime_s:.4f}s  ({lassiee_clean_runtime_diff}% vs source)")
+                    if power_measure:
+                        print(f"[Best Clean Run] Energy: {lassiee_clean_energy_J} J  ({lassiee_clean_energy_diff}% vs source)")
+            except Exception as _clean_ex:
+                print(f"[Best Clean Run] EXECUTE EXCEPTION — using instrumented metrics for final report.\n{_clean_ex}")
+                lassiee_clean_status = "execute_error"
+
     # Prompt the LLM to compare the codes between SOURCE and the "BEST" refactored version.
     # Only run if a generated code exists (tracking_best_version > 1; indices 0-1 are source versions).
     if (tracking_best_version > 1):
@@ -1495,10 +1564,17 @@ def auto_code_llmgeneration_pipeline(prompts,
         compare_code = compare_code + "\nTotal Energy Consumed: " + str(round(sourcecode_total_energy_joules,2)) + " J" + "\nAverage Power: " + str(round(sourcecode_ave_power,2)) + " W"
         compare_code = compare_code + "\n\n[/END SOURCE CODE AND RESULTS]"
         
-        compare_code = compare_code + "\n\n" + "[BEGIN REFACTORED CODE AND RESULTS]\n\n" + code_blocks[tracking_best_version]
+        # Use uninstrumented best_clean_code if available; fall back to instrumented version
+        _compare_best_code = best_clean_code if best_clean_code is not None else code_blocks[tracking_best_version]
+        # Use clean runtime/energy for comparison if the clean run succeeded
+        _compare_runtime = lassiee_clean_runtime_s if lassiee_clean_status == "success" and lassiee_clean_runtime_s != "NA" else runtime_history[tracking_best_version]
+        _compare_energy = lassiee_clean_energy_J if lassiee_clean_status == "success" and lassiee_clean_energy_J != "NA" else energy_history[tracking_best_version]
+        _compare_note = " (uninstrumented clean run)" if lassiee_clean_status == "success" else " (instrumented — clean run unavailable)"
+
+        compare_code = compare_code + "\n\n" + "[BEGIN REFACTORED CODE AND RESULTS]\n\n" + _compare_best_code
         compare_code = compare_code + "\n\nOUTPUT: \n\n" + best_refactored_code_dict["refactored_stdout"]
-        compare_code = compare_code + "\n\nCode execution duration: " + str(round(runtime_history[tracking_best_version], 2)) + " s"
-        compare_code = compare_code + "\nTotal Energy Consumed: " + str(round(energy_history[tracking_best_version],2)) + " J" + "\nAverage Power: " + str(round(power_history[tracking_best_version],2)) + " W"
+        compare_code = compare_code + "\n\nCode execution duration: " + str(round(_compare_runtime, 2)) + " s" + _compare_note
+        compare_code = compare_code + "\nTotal Energy Consumed: " + str(round(_compare_energy if isinstance(_compare_energy, (int, float)) else energy_history[tracking_best_version],2)) + " J" + "\nAverage Power: " + str(round(power_history[tracking_best_version],2)) + " W"
         compare_code = compare_code + "\n\n[/END REFACTORED CODE AND RESULTS]"
 
         compare_code_prompt_tokens = lassi.token_analysis.token_count(compare_code)
@@ -1604,6 +1680,14 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["tier3_pass_count"] = verification_log.get("tier3_pass_count", 0)
     experiment_data["tier3_fail_total"] = sum(1 for r in tier3_results if r.get("verdict", "").startswith("FAIL"))
     experiment_data["tier3_active_relations"] = ",".join(verification_log.get("tier3_active_relations", []))
+
+    # --- BEST CLEAN RUN: uninstrumented performance of best LASSI code ---
+    # lassiee_clean_* variables set in the post-loop block above.
+    experiment_data["lassiee_clean_status"] = lassiee_clean_status
+    experiment_data["lassiee_clean_runtime_s"] = lassiee_clean_runtime_s
+    experiment_data["lassiee_clean_runtime_diff"] = lassiee_clean_runtime_diff
+    experiment_data["lassiee_clean_energy_J"] = lassiee_clean_energy_J
+    experiment_data["lassiee_clean_energy_diff"] = lassiee_clean_energy_diff
 
     # --- LASSI-VERIFY JSON SIDECAR: save full verification_log for detailed inspection ---
     # tier2_spec_output (large stdout) and sourcecode_analysis (large text) are excluded here;
