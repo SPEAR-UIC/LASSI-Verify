@@ -133,7 +133,6 @@ def auto_code_llmgeneration_pipeline(prompts,
     # --- Tier 1: Invariant Assertion Check state variables ---
     self_correction_tier1_counter_code = 0    # Per-code Tier 1 retry count; resets on fresh code
     self_correction_tier1_counter_code_max = 3  # Per-code limit (matches Tier 3; assertion failures are structural)
-    tier1_exhausted = False         # Set True when per-code Tier 1 budget exhausted; forces INVALID
     tier1_verdict = "SKIP"          # Most recent Tier 1 verdict for the current code
     tier1_diagnostic = {}           # Most recent Tier 1 assertion diagnostic
     exe_output_source = ""
@@ -1072,8 +1071,11 @@ def auto_code_llmgeneration_pipeline(prompts,
                     else:
                         print(f"\n----- LASSI-Verify Tier 1: per-code budget exhausted "
                               f"({self_correction_tier1_counter_code_max} attempts), marking INVALID -----")
-                        tier1_exhausted = True
+                        # Force INVALID immediately; skip Tier 2, Tier 3, and judge to avoid unnecessary overhead.
+                        # (Mirrors the non-exhausted Tier 1 path which also uses continue to skip subsequent tiers.)
+                        valid_code_flag = "INVALID"
                         compile_result = "energy_efficiency"  # drive fresh generation next iteration
+                        continue
 
             # --- TIER 2: Empirical Equivalence Check (fail-fast before judge) ---
             # Applies only to LASSI-generated codes (not zero_shot). Zero-shot codes refactor from
@@ -1249,29 +1251,11 @@ def auto_code_llmgeneration_pipeline(prompts,
                 code_analysis = "None"
                 tier2_exhausted = False  # reset for next iteration
 
-            # Override 1b (false positive): Tier 1 budget exhausted → INVALID regardless of judge.
-            # Tier 1 already ran and failed self_correction_tier1_counter_code_max times — code has a
-            # persistent invariant violation that self-correction cannot fix.
-            if tier1_exhausted and not zero_shot:
-                if valid_code_flag == "VALID":
-                    verification_log["judge_discrepancies"].append({
-                        "code_version": code_version, "zero_shot": zero_shot,
-                        "type": "false_positive",
-                        "judge_verdict": judge_raw_verdict, "tier1_verdict": "FAIL_exhausted",
-                        "final_verdict": "INVALID",
-                    })
-                    print(f"\n----- Three-tier override: judge=VALID overridden to INVALID (Tier 1 exhausted — judge false positive) -----")
-                valid_code_flag = "INVALID"
-                judge_response_text = (f"Tier 1 invariant assertion budget exhausted "
-                                       f"({self_correction_tier1_counter_code_max} attempts): code marked INVALID.")
-                code_analysis = "None"
-                tier1_exhausted = False  # reset for next iteration
-
             # Override 2 (false negative): Tier 1 PASS/SKIP + Tier 2 PASS + Tier 3 PASS/SKIP → VALID even if judge said INVALID.
             # All active tiers must be satisfied: Tier 2 PASS alone is insufficient if Tier 1 or Tier 3 is active.
             # tier1_verdict == "SKIP" is acceptable (Tier 1 inactive/disabled or no assertions found in output).
             # tier3_verdict == "SKIP" is acceptable (Tier 3 inactive/disabled/no active relations).
-            # FAIL with exhausted budget is handled by Override 1b / Override 3 (INVALID, last word).
+            # Tier 1 exhausted is handled inline (continue before judge); Tier 3 exhausted by Override 3.
             # Only applies to LASSI codes (zero_shot has no instrumentation → SKIP, no override).
             if (tier1_verdict in ("PASS", "SKIP") and tier2_verdict == "PASS"
                     and tier3_verdict in ("PASS", "SKIP")
