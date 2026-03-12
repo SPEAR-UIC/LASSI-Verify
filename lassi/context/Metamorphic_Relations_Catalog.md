@@ -170,8 +170,8 @@ add more simply because they appear in the catalog.
 
 Order selected relations **cheapest-first and most-discriminating-first** within the same cost tier:
 
-1. CONSERVATION — very cheap (may use existing passthrough data, zero extra runs)
-2. SYMMETRY — very cheap (may use existing passthrough data, zero extra runs)
+1. CONSERVATION — cheap (1 extra compile + run; no input transformation needed)
+2. SYMMETRY — cheap (1 extra compile + run; negation of input, no structural change)
 3. SCALING — cheap (1 extra compile + run; **highest discriminating power**)
 4. PERMUTATIVE — cheap (1 extra compile + run)
 5. ROTATION — cheap (1 extra compile + run)
@@ -339,7 +339,7 @@ Return a single JSON block with this structure:
   scaled output to original
 - `expected_relationship`: human-readable description of the output check
 - `tolerance`: relative tolerance for the comparison (default 1e-5; use 1e-8 for conservation)
-- `cost`: `"very_cheap"` (no extra run needed) or `"cheap"` (1 extra compile + run)
+- `cost`: `"cheap"` (all current relation types require 1 extra compile + run)
 
 ---
 
@@ -654,27 +654,40 @@ Segura 2016 (ML feature permutation); Segura 2020 (ML attribute ordering invaria
 
 #### METAMORPHIC Output Block Format for PERMUTATIVE
 
-The METAMORPHIC block for PERMUTATIVE includes `Swap_idx1` and `Swap_idx2` fields so the checker
-can perform **element equivariance checks** (Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1]) using
-`Sample_first10`:
+The METAMORPHIC block for PERMUTATIVE includes `Swap_idx1`, `Swap_idx2`, `Sample_at_idx1`, and
+`Sample_at_idx2` fields so the checker can perform **element equivariance checks**
+(Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1]):
 
 ```
 === BEGIN LASSI-VERIFY METAMORPHIC [label] ===
 Relation: <relation_name>
 Permutation: swap
-Swap_idx1: <integer index of first swapped element, must be in [1,9]>
-Swap_idx2: <integer index of second swapped element, must be in [1,9] and != Swap_idx1>
+Swap_idx1: <integer index of first swapped element>
+Swap_idx2: <integer index of second swapped element, != Swap_idx1>
 Buffer: <buffer_name>
 Elements: <N>
 Statistics: min=%.17g, max=%.17g, mean=%.17g
 Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)
+Sample_at_idx1: %.17g
+Sample_at_idx2: %.17g
 === END LASSI-VERIFY METAMORPHIC [label] ===
 ```
 
-**Implementation note:** Both swap indices MUST be in [1, 9] so they are captured by
-`Sample_first10` for equivariance checking. Do NOT use index 0 (often a boundary element).
-If Swap_idx1/Swap_idx2 are absent or out of range, only aggregate invariance is checked
-(fallback to SCALING-style stats comparison with factor=1.0).
+**`Sample_at_idx1`** = output buffer value at Swap_idx1 (i.e., `lv_host_buf[swap_idx1]`).
+**`Sample_at_idx2`** = output buffer value at Swap_idx2 (i.e., `lv_host_buf[swap_idx2]`).
+
+These give the checker the Z values at the exact swapped positions. Y values (for comparison) come
+from the passthrough `Sample_first10` (indices 0–9) and `Sample_last10` (indices N-10 to N-1).
+**For equivariance to fire**, at least one swap index must fall in the first-10 OR last-10 range.
+If both indices are in the interior (outside both captured ranges), only aggregate invariance is
+checked. Do NOT use index 0 or N-1 (often fixed boundary elements).
+
+**Recommended index strategy:**
+- `idx1` from [2, 5] (first10 range — near-boundary start)
+- `idx2` from [N-5, N-2] (last10 range — near-boundary end)
+- For small arrays (N ≤ 20): both indices from [1, 9]
+
+If Swap_idx1/Swap_idx2 are absent from the block, only aggregate invariance is checked (fallback).
 
 #### 4.1 Row Interchange (Matrix Equivariance)
 
@@ -685,10 +698,14 @@ If Swap_idx1/Swap_idx2 are absent or out of range, only aggregate invariance is 
 **Based on:** Chen 1998 Gaussian elimination: swap rows i and j in A and b → x is identical.
 
 ```cpp
-// Use indices in [1,9] so Sample_first10 covers both for equivariance checking
-int swap_idx1 = 1, swap_idx2 = 3;   // interior indices (NOT 0 — often a boundary element)
+// idx1 from first10 range, idx2 from last10 range — tests across interior
+const int swap_idx1 = 3;           // first10 range, not 0 (boundary)
+const int swap_idx2 = (int)N - 4;  // last10 range, not N-1 (boundary)
 for (int k = 0; k < N; k++) std::swap(h_A[swap_idx1*N + k], h_A[swap_idx2*N + k]);
 std::swap(h_b[swap_idx1], h_b[swap_idx2]);
+// After D→H, also print in METAMORPHIC block:
+//   printf("Sample_at_idx1: %.17g\n", (double)h_x[swap_idx1]);
+//   printf("Sample_at_idx2: %.17g\n", (double)h_x[swap_idx2]);
 ```
 
 **Check:** Aggregate invariance (min/max/mean of Z ≈ Y) + element equivariance
@@ -704,11 +721,15 @@ Swapping a boundary row with an interior row changes the problem — SOURCE_veri
 `applicable_when`: elements are independent particles/points with no spatial-ordering semantics
 
 ```cpp
-// Simple two-element swap at indices in [1,9]
-const int swap_idx1 = 2, swap_idx2 = 5;
+// idx1 from first10 range, idx2 from last10 range
+const int swap_idx1 = 2;
+const int swap_idx2 = (int)N - 3;
 std::swap(h_pos[swap_idx1], h_pos[swap_idx2]);
 std::swap(h_vel[swap_idx1], h_vel[swap_idx2]);
 // swap all associated arrays by the same permutation
+// After D→H, print in METAMORPHIC block:
+//   printf("Sample_at_idx1: %.17g\n", (double)h_force[swap_idx1]);
+//   printf("Sample_at_idx2: %.17g\n", (double)h_force[swap_idx2]);
 ```
 
 **Check:** Aggregate invariance (min/max/mean of Z ≈ Y) + element equivariance

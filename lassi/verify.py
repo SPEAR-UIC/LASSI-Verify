@@ -834,18 +834,23 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"=== BEGIN LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
             f"Relation: {relation_name}\n"
             f"Permutation: swap\n"
-            f"Swap_idx1: <integer index of first swapped element, must be in [1,9]>\n"
-            f"Swap_idx2: <integer index of second swapped element, must be in [1,9] and != Swap_idx1>\n"
+            f"Swap_idx1: <integer index of first swapped element>\n"
+            f"Swap_idx2: <integer index of second swapped element, != Swap_idx1>\n"
             f"Buffer: <buffer_name>\n"
             f"Elements: <N>\n"
             f"Statistics: min=%.17g, max=%.17g, mean=%.17g\n"
             f"Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)\n"
+            f"Sample_at_idx1: %.17g\n"
+            f"Sample_at_idx2: %.17g\n"
             f"=== END LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
             f"```\n\n"
             f"Print this block using printf with %.17g format. "
             f"Swap_idx1 and Swap_idx2 are the LITERAL integer indices used for the swap "
-            f"(e.g., 'Swap_idx1: 2' and 'Swap_idx2: 5'). "
-            f"Both MUST be in [1,9] so they are captured in Sample_first10 for equivariance checking. "
+            f"(e.g., 'Swap_idx1: 3' and 'Swap_idx2: N-4'). "
+            f"Sample_at_idx1 is the output buffer value at Swap_idx1 (i.e., lv_host_buf[swap_idx1]); "
+            f"Sample_at_idx2 is the output buffer value at Swap_idx2 (i.e., lv_host_buf[swap_idx2]). "
+            f"For equivariance checking to fire, choose indices from the first-10 range [1,9] OR "
+            f"the last-10 range [N-9, N-2] so the checker can find the reference Y values. "
             f"The label MUST exactly match the corresponding PASSTHROUGH block label.\n"
         )
     elif relation_type == "CONSERVATION":
@@ -899,16 +904,21 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         transform_instruction = (
             f"**Step 1 — Apply a deterministic swap to the input:**\n"
             f"Insert the swap AFTER host array initialization but BEFORE the first H→D copy.\n"
-            f"Choose two fixed interior indices idx1 and idx2 both in [1, 9] (NOT index 0, which "
-            f"is often a boundary element). Swap those elements in each input array listed in "
-            f"'Input variables to transform': ({', '.join(input_vars)}).\n\n"
-            f"    const int swap_idx1 = 2;  // choose any value in [1,9]\n"
-            f"    const int swap_idx2 = 5;  // choose any value in [1,9], != swap_idx1\n"
+            f"Choose two fixed indices. For best equivariance coverage, pick one from each boundary:\n"
+            f"  idx1 from [2, 5] (captured in Sample_first10)\n"
+            f"  idx2 from [N-5, N-2] (captured in Sample_last10, where N is the array length)\n"
+            f"Avoid index 0 and index N-1 (often fixed boundary elements). "
+            f"If the array is small (N ≤ 20), both indices may come from [1, 9].\n\n"
+            f"    const int swap_idx1 = 3;                // from first10 range\n"
+            f"    const int swap_idx2 = (int)N - 4;       // from last10 range\n"
             f"    std::swap({input_vars[0]}[swap_idx1], {input_vars[0]}[swap_idx2]);\n"
-            f"    // (repeat for each input array)\n\n"
+            f"    // (repeat for each input array listed in 'Input variables to transform')\n\n"
             f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
             f"After the final D→H transfer, insert METAMORPHIC blocks at the observation points above.\n"
-            f"Print 'Swap_idx1: <value>' and 'Swap_idx2: <value>' as literal integers in each block.\n"
+            f"Print Swap_idx1/Swap_idx2 as literal integers. Also print Sample_at_idx1 and\n"
+            f"Sample_at_idx2 as the output buffer values at those positions:\n"
+            f"    printf(\"Sample_at_idx1: %.17g\\n\", (double)lv_host_buf[swap_idx1]);\n"
+            f"    printf(\"Sample_at_idx2: %.17g\\n\", (double)lv_host_buf[swap_idx2]);\n"
         )
     elif relation_type == "CONSERVATION":
         transform_instruction = (
@@ -1339,14 +1349,43 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
     # PERMUTATIVE / ROTATION:
     # Step A — Aggregate invariance: under any relabeling/permutation, aggregate
     #   stats (min, max, mean) of the output are invariant (factor = 1.0).
-    # Step B — Element equivariance: if Swap_idx1 and Swap_idx2 are present in
-    #   the METAMORPHIC block, check Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1]
-    #   using Sample_first10 (both indices must be in [0, 9]).
+    # Step B — Element equivariance: if Swap_idx1/Swap_idx2 and Sample_at_idx1/
+    #   Sample_at_idx2 are present in the METAMORPHIC block, check
+    #   Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1].
+    #   Z values come from Sample_at_idx1/idx2 (printed by variant at swap positions).
+    #   Y values come from passthrough Sample_first10/last10, using Elements field
+    #   to map last10 indices. Equivariance is skipped for indices outside both
+    #   captured ranges (no failure reported — just not checkable).
     # ==========================================================================
     elif relation_type in ("PERMUTATIVE", "ROTATION"):
-        # Shared parsers already defined above; add swap-index patterns here
-        swap_idx1_patt = re.compile(r'Swap_idx1:\s*(\d+)')
-        swap_idx2_patt = re.compile(r'Swap_idx2:\s*(\d+)')
+        # Shared parsers already defined above; add swap-index and targeted-sample patterns
+        swap_idx1_patt    = re.compile(r'Swap_idx1:\s*(\d+)')
+        swap_idx2_patt    = re.compile(r'Swap_idx2:\s*(\d+)')
+        sample_at1_patt   = re.compile(r'Sample_at_idx1:\s*(\S+)')
+        sample_at2_patt   = re.compile(r'Sample_at_idx2:\s*(\S+)')
+        elements_patt_perm= re.compile(r'Elements:\s*(\d+)')
+
+        def lookup_y_value(pass_body, target_idx, n_elements):
+            """Return Y[target_idx] from passthrough Sample_first10/last10, or None if not captured."""
+            first10_vals, last10_vals = [], []
+            for m in re.finditer(r'Sample_first10:(.*)', pass_body):
+                try:
+                    first10_vals = [float(v) for v in m.group(1).split()]
+                except ValueError:
+                    pass
+            for m in re.finditer(r'Sample_last10:(.*)', pass_body):
+                try:
+                    last10_vals = [float(v) for v in m.group(1).split()]
+                except ValueError:
+                    pass
+            if target_idx < len(first10_vals):
+                return first10_vals[target_idx]
+            if n_elements > 0 and last10_vals:
+                last10_start = n_elements - len(last10_vals)
+                offset = target_idx - last10_start
+                if 0 <= offset < len(last10_vals):
+                    return last10_vals[offset]
+            return None
 
         meta_blocks = extract_meta_blocks(variant_stdout)
         pass_blocks = extract_pass_blocks(original_passthrough_stdout)
@@ -1407,10 +1446,13 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                         "atol": atol, "rtol": rtol,
                     })
 
-            # Step B: element equivariance — if Swap_idx1/Swap_idx2 present and in [0,9]
+            # Step B: element equivariance — use Sample_at_idx1/idx2 from METAMORPHIC block
+            # for Z values; look up Y values from passthrough first10/last10 using Elements field.
             meta_body = meta_blocks[label]
             m1 = swap_idx1_patt.search(meta_body)
             m2 = swap_idx2_patt.search(meta_body)
+            mat1 = sample_at1_patt.search(meta_body)
+            mat2 = sample_at2_patt.search(meta_body)
             if m1 and m2:
                 try:
                     idx1 = int(m1.group(1))
@@ -1418,14 +1460,37 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                 except ValueError:
                     idx1, idx2 = -1, -1
 
-                orig_samples = parse_samples(pass_blocks[label])
-                var_samples  = parse_samples(meta_body)
+                # Determine N for last10 offset computation
+                n_elem = 0
+                me = elements_patt_perm.search(meta_body)
+                if me:
+                    try:
+                        n_elem = int(me.group(1))
+                    except ValueError:
+                        pass
 
-                if (0 <= idx1 <= 9 and 0 <= idx2 <= 9 and
-                        idx1 < len(orig_samples) and idx2 < len(orig_samples) and
-                        idx1 < len(var_samples)  and idx2 < len(var_samples)):
+                # Get Z[idx1] and Z[idx2]: prefer Sample_at_idx fields; fall back to Sample_first10
+                z1, z2 = None, None
+                if mat1 and mat2:
+                    try:
+                        z1 = float(mat1.group(1))
+                        z2 = float(mat2.group(1))
+                    except ValueError:
+                        pass
+                if z1 is None or z2 is None:
+                    # Legacy fallback: read Z from concatenated first10/last10 samples
+                    var_samples = parse_samples(meta_body)
+                    if 0 <= idx1 < len(var_samples):
+                        z1 = var_samples[idx1]
+                    if 0 <= idx2 < len(var_samples):
+                        z2 = var_samples[idx2]
+
+                # Get Y[idx1] and Y[idx2] from passthrough (first10 or last10)
+                y1 = lookup_y_value(pass_blocks[label], idx1, n_elem)
+                y2 = lookup_y_value(pass_blocks[label], idx2, n_elem)
+
+                if z1 is not None and z2 is not None and y1 is not None and y2 is not None:
                     # Z[idx1] should ≈ Y[idx2]
-                    z1, y2 = var_samples[idx1], orig_samples[idx2]
                     if both_finite(z1, y2) and not allclose(z1, y2, rtol, atol):
                         failures.append({
                             "label": label, "stat": f"equivariance[Z[{idx1}]≈Y[{idx2}]]",
@@ -1433,13 +1498,14 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                             "abs_err": abs(z1 - y2), "atol": atol, "rtol": rtol,
                         })
                     # Z[idx2] should ≈ Y[idx1]
-                    z2, y1 = var_samples[idx2], orig_samples[idx1]
                     if both_finite(z2, y1) and not allclose(z2, y1, rtol, atol):
                         failures.append({
                             "label": label, "stat": f"equivariance[Z[{idx2}]≈Y[{idx1}]]",
                             "orig": y1, "expected_variant": y1, "actual_variant": z2,
                             "abs_err": abs(z2 - y1), "atol": atol, "rtol": rtol,
                         })
+                # If y1/y2 not found in passthrough: equivariance silently skipped for this label
+                # (indices outside captured first10/last10 range — invariance still checked above)
 
         equivariance_ran = m1 is not None and m2 is not None if labels_to_check else False
 

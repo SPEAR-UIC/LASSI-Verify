@@ -60,7 +60,7 @@ Apply only when the specific problem structure clearly requires it:
 
 ### Host vs Device Code
 - **Host code assertions:** Place assertions in host functions before kernel launches and after device-to-host transfers
-- **Device code assertions:** Use `assert()` in device code sparingly - device assertions have performance cost
+- **LASSI-VERIFY assertion blocks are HOST-SIDE ONLY.** Place them in host functions only. Transfer device data to host first (D→H) for validation.
 - **Preferred approach:** Validate invariants on **host side** after transferring results from device
 
 ### Memory Transfer Points (Critical)
@@ -72,11 +72,17 @@ Insert assertions at these strategic locations:
 
 ### Example GPU Code Instrumentation Pattern:
 ```cpp
-// LASSI_INSTRUMENTATION - Input validation before GPU transfer
-assert(h_input != nullptr && N > 0);
-for (int i = 0; i < N; i++) {
-    assert(isfinite(h_input[i]));
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Input finite check before GPU transfer
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!isfinite(h_input[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [input_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 
 cudaMemcpy(d_input, h_input, N * sizeof(double), cudaMemcpyHostToDevice);
 
@@ -85,10 +91,79 @@ cudaDeviceSynchronize();
 
 cudaMemcpy(h_output, d_output, N * sizeof(double), cudaMemcpyDeviceToHost);
 
-// LASSI_INSTRUMENTATION - Output validation after GPU transfer
-for (int i = 0; i < N; i++) {
-    assert(isfinite(h_output[i]));
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Output finite check after GPU transfer
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!isfinite(h_output[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+---
+
+## Required Block Format
+
+Every assertion you insert **must** follow one of the three patterns below exactly. The pipeline parses `LASSI-VERIFY ASSERTIONS [label]: PASS` or `FAIL` lines from stdout. Any other format (including bare `assert()` calls) will be silently ignored by `check_tier1_assertions()`.
+
+### Rules
+- Label MUST be unique within the file (e.g., `input_ptrs_valid`, `array_dims_valid`, `input_finite`, `output_finite`, `matrix_sym`, `conservation_check`)
+- `#include <cstdio>` — not `<assert.h>`
+- Each block prints exactly ONE `LASSI-VERIFY ASSERTIONS [label]:` line
+- LASSI-VERIFY assertion blocks are HOST-SIDE ONLY — never in `__global__` kernel functions
+- Code runs to completion — never use `assert()`, `exit()`, or `abort()`
+
+### Pattern 1: Single-condition check
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - [Brief description of what is being checked]
+{
+    bool _t1_pass = (your_condition_here);
+    printf("LASSI-VERIFY ASSERTIONS [unique_label]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+### Pattern 2: Loop/array check (accumulate pattern)
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - [Brief description]
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!(per_element_condition_on_i)) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [unique_label]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+### Pattern 3: Before/after conservation check
+Declare capture variable at function scope OUTSIDE any block, before computation:
+```cpp
+// Declare capture variable at function scope, before computation:
+double _t1_initial_sum = 0.0;
+for (int i = 0; i < N; i++) _t1_initial_sum += array[i];
+
+// ... kernel execution (no LASSI-VERIFY block here) ...
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Verify conservation after computation
+{
+    double _t1_final_sum = 0.0;
+    for (int i = 0; i < N; i++) _t1_final_sum += array[i];
+    double _t1_denom = (fabs(_t1_initial_sum) > 1e-300) ? fabs(_t1_initial_sum) : 1.0;
+    bool _t1_pass = (fabs(_t1_final_sum - _t1_initial_sum) / _t1_denom < 1e-6);
+    printf("LASSI-VERIFY ASSERTIONS [conservation_check]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -165,7 +240,7 @@ __global__ void bad_kernel(double* matrix, int N) {
 // BAD - Checks implementation-specific intermediate state
 for (int iter = 0; iter < max_iter; iter++) {
     jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
-    
+
     // WRONG: Monotonicity assumption won't hold for all parallel strategies
     cudaMemcpy(h_x_new, d_x_new, N*sizeof(double), cudaMemcpyDeviceToHost);
     double new_error = compute_error(h_x_new, N);
@@ -193,10 +268,10 @@ assert(duration.count() < 100); // IMPLEMENTATION-SPECIFIC
 __global__ void bad_kernel(double* data, int N) {
     __shared__ double shared_data[256];
     int tid = threadIdx.x;
-    
+
     shared_data[tid] = data[tid];
     __syncthreads();
-    
+
     // WRONG: Assumes specific shared memory layout
     assert(shared_data[0] == data[0]); // IMPLEMENTATION-SPECIFIC
 }
@@ -208,18 +283,34 @@ __global__ void bad_kernel(double* data, int N) {
 ```cpp
 // GOOD - Check invariant property after kernel completes
 cudaMemcpy(h_data, d_data, N*sizeof(double), cudaMemcpyDeviceToHost);
-for (int i = 0; i < N-1; i++) {
-    assert(h_data[i] <= h_data[i+1]); // Sorted property is invariant
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Verify sorted (non-decreasing) order after kernel
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N-1; i++) {
+        if (!(h_data[i] <= h_data[i+1])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [sorted_order]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 **Case 2 (Expensive):** Validate on host
 ```cpp
 // GOOD - Single O(N²) check on host
 cudaMemcpy(h_matrix, d_matrix, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-for (int i = 0; i < N*N; i++) {
-    assert(isfinite(h_matrix[i]));
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Verify matrix values are finite after transfer
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N*N; i++) {
+        if (!isfinite(h_matrix[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [matrix_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 **Case 3 (Intermediate):** Check final convergence only
@@ -227,7 +318,14 @@ for (int i = 0; i < N*N; i++) {
 // GOOD - Check final result satisfies convergence
 cudaMemcpy(h_x, d_x, N*sizeof(double), cudaMemcpyDeviceToHost);
 double residual = compute_residual(h_A, h_b, h_x, N);
-assert(residual < tol);
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Verify final residual satisfies convergence tolerance
+{
+    bool _t1_pass = (residual < tol);
+    printf("LASSI-VERIFY ASSERTIONS [convergence_residual]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -238,59 +336,96 @@ assert(residual < tol);
 
 ### 1.1 Pointer Validity
 **Use when:** Functions accept pointer arguments
-```c
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - Validate input pointers
-assert(ptr != NULL && "Input pointer must not be NULL");
+{
+    bool _t1_pass = (ptr != NULL);
+    printf("LASSI-VERIFY ASSERTIONS [input_ptrs_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 1.2 Array Size Constraints
 **Use when:** Functions accept array dimensions
-```c
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - Validate array dimensions
-assert(N > 0 && M > 0 && "Array dimensions must be positive");
-assert(N * M > 0 && "Array dimensions must not overflow");
+{
+    bool _t1_pass = (N > 0 && M > 0);
+    printf("LASSI-VERIFY ASSERTIONS [array_dims_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 1.3 Value Range Constraints
 **Use when:** Inputs have valid ranges (probabilities, angles, indices)
-```c
-// LASSI_INSTRUMENTATION - Validate input ranges
-assert(probability >= 0.0 && probability <= 1.0 && "Probability must be in [0,1]");
-assert(index >= 0 && index < array_size && "Index must be within array bounds");
-assert(angle >= 0.0 && angle < 2.0 * M_PI && "Angle must be in [0, 2π)");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Validate input value ranges
+{
+    bool _t1_pass = (probability >= 0.0 && probability <= 1.0);
+    printf("LASSI-VERIFY ASSERTIONS [input_range_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 1.4 Numerical Validity (Initialization)
 **Use when:** Checking input data for NaN/Inf
-```c
-// LASSI_INSTRUMENTATION - Validate numerical inputs
-for (int i = 0; i < N; i++) {
-    assert(!isnan(array[i]) && !isinf(array[i]) && "Input contains NaN or Inf");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Validate numerical inputs (no NaN or Inf)
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!isfinite(array[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [input_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 1.5 Buffer Size Adequacy
 **Use when:** Output buffers must be large enough
-```c
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - Validate buffer sizes
-assert(output_size >= required_size && "Output buffer too small");
+{
+    bool _t1_pass = (output_size >= required_size);
+    printf("LASSI-VERIFY ASSERTIONS [buffer_size_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 1.6 Configuration Validity
 **Use when:** Function behavior depends on configuration parameters
-```c
-// LASSI_INSTRUMENTATION - Validate configuration
-assert(num_threads > 0 && num_threads <= MAX_THREADS && "Invalid thread count");
-assert(tolerance > 0.0 && tolerance < 1.0 && "Tolerance must be in (0,1)");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Validate configuration parameters
+{
+    bool _t1_pass = (num_threads > 0 && num_threads <= MAX_THREADS && tolerance > 0.0 && tolerance < 1.0);
+    printf("LASSI-VERIFY ASSERTIONS [config_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 1.7 Data Structure Integrity
 **Use when:** Complex data structures are passed as input
-```c
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - Validate structure integrity
-assert(matrix->rows == matrix->cols && "Matrix must be square");
-assert(graph->num_edges <= graph->num_nodes * (graph->num_nodes - 1) / 2 
-       && "Invalid graph structure");
+{
+    bool _t1_pass = (matrix->rows == matrix->cols);
+    printf("LASSI-VERIFY ASSERTIONS [struct_integrity]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -299,58 +434,101 @@ assert(graph->num_edges <= graph->num_nodes * (graph->num_nodes - 1) / 2
 
 ### 2.1 Mass/Energy Conservation
 **Use when:** Physical quantities should be conserved
-```c
-// LASSI_INSTRUMENTATION - Conservation check
-double initial_total = compute_total(array, N);
+```cpp
+// Declare capture variable at function scope, before computation:
+double _t1_initial_total = compute_total(array, N);
+
 // ... computation ...
-double final_total = compute_total(array, N);
-double relative_error = fabs(final_total - initial_total) / fabs(initial_total);
-assert(relative_error < 1e-6 && "Mass/energy not conserved");
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Mass/energy conservation check
+{
+    double _t1_final_total = compute_total(array, N);
+    double _t1_denom = (fabs(_t1_initial_total) > 1e-300) ? fabs(_t1_initial_total) : 1.0;
+    bool _t1_pass = (fabs(_t1_final_total - _t1_initial_total) / _t1_denom < 1e-6);
+    printf("LASSI-VERIFY ASSERTIONS [mass_energy_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 2.2 Element Count Conservation
 **Use when:** Number of elements should not change (transforms, permutations)
-```c
-// LASSI_INSTRUMENTATION - Element count conservation
-int initial_count = count_elements(input, N);
+```cpp
+// Declare capture variable at function scope, before computation:
+int _t1_initial_count = count_elements(input, N);
+
 // ... computation ...
-int final_count = count_elements(output, M);
-assert(initial_count == final_count && "Element count not preserved");
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Element count conservation check
+{
+    int _t1_final_count = count_elements(output, M);
+    bool _t1_pass = (_t1_initial_count == _t1_final_count);
+    printf("LASSI-VERIFY ASSERTIONS [element_count_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 2.3 Sum Conservation
 **Use when:** Total sum should remain constant
-```c
-// LASSI_INSTRUMENTATION - Sum conservation
-double initial_sum = 0.0;
-for (int i = 0; i < N; i++) initial_sum += array[i];
+```cpp
+// Declare capture variable at function scope, before computation:
+double _t1_initial_sum = 0.0;
+for (int i = 0; i < N; i++) _t1_initial_sum += array[i];
+
 // ... computation ...
-double final_sum = 0.0;
-for (int i = 0; i < N; i++) final_sum += array[i];
-assert(fabs(final_sum - initial_sum) < 1e-6 * fabs(initial_sum) 
-       && "Sum not conserved");
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Sum conservation check
+{
+    double _t1_final_sum = 0.0;
+    for (int i = 0; i < N; i++) _t1_final_sum += array[i];
+    double _t1_denom = (fabs(_t1_initial_sum) > 1e-300) ? fabs(_t1_initial_sum) : 1.0;
+    bool _t1_pass = (fabs(_t1_final_sum - _t1_initial_sum) / _t1_denom < 1e-6);
+    printf("LASSI-VERIFY ASSERTIONS [sum_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 2.4 Norm Conservation
 **Use when:** Vector/matrix norms should be preserved (unitary transforms)
-```c
-// LASSI_INSTRUMENTATION - Norm conservation
-double initial_norm = compute_l2_norm(vector, N);
+```cpp
+// Declare capture variable at function scope, before computation:
+double _t1_initial_norm = compute_l2_norm(vector, N);
+
 // ... computation ...
-double final_norm = compute_l2_norm(vector, N);
-assert(fabs(final_norm - initial_norm) < 1e-6 && "L2 norm not preserved");
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - L2 norm conservation check
+{
+    double _t1_final_norm = compute_l2_norm(vector, N);
+    bool _t1_pass = (fabs(_t1_final_norm - _t1_initial_norm) < 1e-6);
+    printf("LASSI-VERIFY ASSERTIONS [norm_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 2.5 Probability Distribution Conservation
 **Use when:** Working with probability distributions
-```c
-// LASSI_INSTRUMENTATION - Probability conservation
-double sum = 0.0;
-for (int i = 0; i < N; i++) {
-    assert(probs[i] >= 0.0 && "Probabilities must be non-negative");
-    sum += probs[i];
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Probability distribution conservation check
+{
+    bool _t1_pass = true;
+    double _t1_sum = 0.0;
+    for (int i = 0; i < N; i++) {
+        if (probs[i] < 0.0) { _t1_pass = false; break; }
+        _t1_sum += probs[i];
+    }
+    if (_t1_pass) _t1_pass = (fabs(_t1_sum - 1.0) < 1e-6);
+    printf("LASSI-VERIFY ASSERTIONS [prob_distribution_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
-assert(fabs(sum - 1.0) < 1e-6 && "Probabilities must sum to 1");
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -359,44 +537,66 @@ assert(fabs(sum - 1.0) < 1e-6 && "Probabilities must sum to 1");
 
 ### 3.1 Matrix Symmetry
 **Use when:** Operations should preserve symmetric matrices
-```c
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - Matrix symmetry check
-for (int i = 0; i < N; i++) {
-    for (int j = i + 1; j < N; j++) {
-        double diff = fabs(matrix[i*N + j] - matrix[j*N + i]);
-        assert(diff < 1e-10 && "Matrix symmetry violated");
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N && _t1_pass; i++) {
+        for (int j = i + 1; j < N; j++) {
+            if (fabs(matrix[i*N + j] - matrix[j*N + i]) >= 1e-10) { _t1_pass = false; break; }
+        }
     }
+    printf("LASSI-VERIFY ASSERTIONS [matrix_sym]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 3.2 Permutation Symmetry
 **Use when:** Result should be invariant under permutation of symmetric inputs
-```c
-// LASSI_INSTRUMENTATION - Permutation invariance
-// For commutative operations like addition or multiplication
-assert(result_AB == result_BA && "Operation should be commutative");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Commutativity / permutation invariance check
+{
+    // For commutative operations like addition or multiplication
+    bool _t1_pass = (result_AB == result_BA);
+    printf("LASSI-VERIFY ASSERTIONS [perm_sym]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 3.3 Reflection Symmetry
 **Use when:** Physical system has reflection symmetry
-```c
-// LASSI_INSTRUMENTATION - Reflection symmetry
-for (int i = 0; i < N/2; i++) {
-    double diff = fabs(field[i] - field[N-1-i]);
-    assert(diff < tolerance && "Reflection symmetry violated");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Reflection symmetry check
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N/2; i++) {
+        if (fabs(field[i] - field[N-1-i]) >= tolerance) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [reflection_sym]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 3.4 Rotational Symmetry
 **Use when:** System has rotational invariance
-```c
-// LASSI_INSTRUMENTATION - Rotational invariance
-// For 2D field with rotational symmetry
-double center_value = field[N/2][N/2];
-for (int r = 1; r < N/2; r++) {
-    // Check points at same radius have similar values
-    // (simplified example - actual implementation depends on coordinate system)
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Rotational invariance check (simplified)
+{
+    // For 2D field with rotational symmetry
+    // (actual implementation depends on coordinate system)
+    double center_value = field[N/2][N/2];
+    bool _t1_pass = true; // fill with radial checks as needed
+    printf("LASSI-VERIFY ASSERTIONS [rotational_sym]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -405,38 +605,65 @@ for (int r = 1; r < N/2; r++) {
 
 ### 4.1 Non-Decreasing Sequence
 **Use when:** Output should be sorted or monotonically increasing
-```c
-// LASSI_INSTRUMENTATION - Monotonicity check (non-decreasing)
-for (int i = 0; i < N - 1; i++) {
-    assert(array[i] <= array[i+1] && "Array should be non-decreasing");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Non-decreasing (sorted) sequence check
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N - 1; i++) {
+        if (!(array[i] <= array[i+1])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [nondecreasing_seq]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 4.2 Non-Increasing Sequence
 **Use when:** Values should decrease (e.g., residuals, errors)
-```c
-// LASSI_INSTRUMENTATION - Monotonicity check (non-increasing)
-for (int i = 0; i < N - 1; i++) {
-    assert(array[i] >= array[i+1] && "Array should be non-increasing");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Non-increasing sequence check
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N - 1; i++) {
+        if (!(array[i] >= array[i+1])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [nonincreasing_seq]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 4.3 Strictly Decreasing Energy/Error
 **Use when:** Iterative algorithms should reduce error or energy
-```c
-// LASSI_INSTRUMENTATION - Convergence monotonicity
-assert(current_error < previous_error * (1.0 + 1e-10) 
-       && "Error should decrease monotonically");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Convergence monotonicity check
+{
+    bool _t1_pass = (current_error < previous_error * (1.0 + 1e-10));
+    printf("LASSI-VERIFY ASSERTIONS [error_decreasing]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 4.4 Bounded Monotonicity
 **Use when:** Values increase/decrease but within bounds
-```c
-// LASSI_INSTRUMENTATION - Bounded monotonic increase
-for (int i = 0; i < N - 1; i++) {
-    assert(array[i] <= array[i+1] && "Should be non-decreasing");
-    assert(array[i+1] - array[i] <= max_increment && "Increment too large");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Bounded monotonic increase check
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N - 1; i++) {
+        if (!(array[i] <= array[i+1]) || !(array[i+1] - array[i] <= max_increment)) {
+            _t1_pass = false; break;
+        }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [bounded_monotone]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -445,62 +672,100 @@ for (int i = 0; i < N - 1; i++) {
 
 ### 5.1 Positivity
 **Use when:** Physical quantities must be positive (temperature, density, energy)
-```c
-// LASSI_INSTRUMENTATION - Physical positivity constraint
-for (int i = 0; i < N; i++) {
-    assert(temperature[i] > 0.0 && "Temperature must be positive");
-    assert(density[i] > 0.0 && "Density must be positive");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Physical positivity constraint check
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!(temperature[i] > 0.0) || !(density[i] > 0.0)) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [positivity]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 5.2 Non-Negativity
 **Use when:** Quantities cannot be negative (counts, concentrations, probabilities)
-```c
-// LASSI_INSTRUMENTATION - Non-negativity constraint
-for (int i = 0; i < N; i++) {
-    assert(count[i] >= 0 && "Count cannot be negative");
-    assert(concentration[i] >= 0.0 && "Concentration cannot be negative");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Non-negativity constraint check
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!(count[i] >= 0) || !(concentration[i] >= 0.0)) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [non_negativity]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 5.3 Upper Bounds
 **Use when:** Physical quantities have maximum values
-```c
-// LASSI_INSTRUMENTATION - Upper bound constraint
-for (int i = 0; i < N; i++) {
-    assert(occupancy[i] <= 1.0 && "Occupancy cannot exceed 1");
-    assert(efficiency[i] <= 1.0 && "Efficiency cannot exceed 100%");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Upper bound constraint check
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!(occupancy[i] <= 1.0) || !(efficiency[i] <= 1.0)) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [upper_bounds]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 5.4 Speed of Light Constraint
 **Use when:** Velocities in relativistic simulations
-```c
-// LASSI_INSTRUMENTATION - Relativistic constraint
-const double C = 299792458.0; // Speed of light in m/s
-for (int i = 0; i < N; i++) {
-    double speed = sqrt(vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
-    assert(speed <= C && "Velocity cannot exceed speed of light");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Relativistic speed constraint check
+{
+    const double C = 299792458.0; // Speed of light in m/s
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        double speed = sqrt(vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
+        if (!(speed <= C)) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [speed_of_light]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 5.5 Thermodynamic Constraints
 **Use when:** Working with thermodynamic quantities
-```c
-// LASSI_INSTRUMENTATION - Thermodynamic constraints
-assert(temperature > 0.0 && "Temperature must be positive (Kelvin scale)");
-assert(entropy_change >= 0.0 && "Entropy cannot decrease in isolated system");
-assert(pressure > 0.0 && "Pressure must be positive");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Thermodynamic constraints check
+{
+    bool _t1_pass = (temperature > 0.0 && entropy_change >= 0.0 && pressure > 0.0);
+    printf("LASSI-VERIFY ASSERTIONS [thermodynamic]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 5.6 Charge Conservation
 **Use when:** Electromagnetic simulations
-```c
-// LASSI_INSTRUMENTATION - Charge conservation
-double initial_charge = compute_total_charge(particles, N);
+```cpp
+// Declare capture variable at function scope, before computation:
+double _t1_initial_charge = compute_total_charge(particles, N);
+
 // ... computation ...
-double final_charge = compute_total_charge(particles, N);
-assert(fabs(final_charge - initial_charge) < 1e-10 && "Charge not conserved");
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Charge conservation check
+{
+    double _t1_final_charge = compute_total_charge(particles, N);
+    bool _t1_pass = (fabs(_t1_final_charge - _t1_initial_charge) < 1e-10);
+    printf("LASSI-VERIFY ASSERTIONS [charge_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -509,45 +774,78 @@ assert(fabs(final_charge - initial_charge) < 1e-10 && "Charge not conserved");
 
 ### 6.1 NaN Detection (Output)
 **Use when:** Validating output for numerical errors
-```c
-// LASSI_INSTRUMENTATION - NaN detection
-for (int i = 0; i < N; i++) {
-    assert(!isnan(result[i]) && "Result contains NaN");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - NaN detection in output
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (isnan(result[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_no_nan]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 6.2 Infinity Detection
 **Use when:** Checking for overflow/divergence
-```c
-// LASSI_INSTRUMENTATION - Infinity detection
-for (int i = 0; i < N; i++) {
-    assert(!isinf(result[i]) && "Result contains Infinity");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Infinity detection in output
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (isinf(result[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_no_inf]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 6.3 Finite Value Check (Combined)
 **Use when:** Ensuring all output values are finite
-```c
-// LASSI_INSTRUMENTATION - Finite value check
-for (int i = 0; i < N; i++) {
-    assert(isfinite(result[i]) && "Result must be finite");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Finite value check on output
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!isfinite(result[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 6.4 Condition Number Bounds
 **Use when:** Matrix operations sensitive to conditioning
-```c
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - Conditioning check
-double condition_number = estimate_condition_number(matrix, N);
-assert(condition_number < 1e12 && "Matrix is ill-conditioned");
+{
+    double condition_number = estimate_condition_number(matrix, N);
+    bool _t1_pass = (condition_number < 1e12);
+    printf("LASSI-VERIFY ASSERTIONS [condition_number]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 6.5 Relative Error Bounds
 **Use when:** Comparing computed result to known or expected value
-```c
-// LASSI_INSTRUMENTATION - Relative error bound
-double relative_error = fabs(computed - expected) / fabs(expected);
-assert(relative_error < tolerance && "Relative error exceeds tolerance");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Relative error bound check
+{
+    double _t1_rel_err = fabs(computed - expected) / fabs(expected);
+    bool _t1_pass = (_t1_rel_err < tolerance);
+    printf("LASSI-VERIFY ASSERTIONS [rel_error_bound]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -556,52 +854,78 @@ assert(relative_error < tolerance && "Relative error exceeds tolerance");
 
 ### 7.1 Sparsity Pattern Preservation
 **Use when:** Sparse matrix operations should preserve zero structure
-```c
-// LASSI_INSTRUMENTATION - Sparsity preservation
-for (int i = 0; i < N; i++) {
-    for (int j = 0; j < N; j++) {
-        if (original_matrix[i*N + j] == 0.0) {
-            assert(fabs(result_matrix[i*N + j]) < 1e-15 
-                   && "Sparsity pattern violated");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Sparsity pattern preservation check
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N && _t1_pass; i++) {
+        for (int j = 0; j < N; j++) {
+            if (original_matrix[i*N + j] == 0.0 && fabs(result_matrix[i*N + j]) >= 1e-15) {
+                _t1_pass = false; break;
+            }
         }
     }
+    printf("LASSI-VERIFY ASSERTIONS [sparsity_preserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 7.2 Diagonal Dominance
 **Use when:** Certain numerical methods require diagonally dominant matrices
-```c
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - Diagonal dominance check
-for (int i = 0; i < N; i++) {
-    double diag = fabs(matrix[i*N + i]);
-    double row_sum = 0.0;
-    for (int j = 0; j < N; j++) {
-        if (i != j) row_sum += fabs(matrix[i*N + j]);
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        double diag = fabs(matrix[i*N + i]);
+        double row_sum = 0.0;
+        for (int j = 0; j < N; j++) {
+            if (i != j) row_sum += fabs(matrix[i*N + j]);
+        }
+        if (!(diag >= row_sum)) { _t1_pass = false; break; }
     }
-    assert(diag >= row_sum && "Matrix not diagonally dominant");
+    printf("LASSI-VERIFY ASSERTIONS [diag_dominant]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 7.3 Positive Definiteness
 **Use when:** Matrix should remain positive definite (covariance, Gram matrices)
-```c
-// LASSI_INSTRUMENTATION - Positive definiteness check
-// Check all diagonal elements are positive (necessary condition)
-for (int i = 0; i < N; i++) {
-    assert(matrix[i*N + i] > 0.0 && "Diagonal must be positive");
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Positive definiteness check (necessary condition: positive diagonal)
+{
+    // Check all diagonal elements are positive (necessary condition)
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!(matrix[i*N + i] > 0.0)) { _t1_pass = false; break; }
+    }
+    // For full check, would need eigenvalue computation (expensive)
+    printf("LASSI-VERIFY ASSERTIONS [pos_definite_diag]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
-// For full check, would need eigenvalue computation (expensive)
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### 7.4 Orthogonality
 **Use when:** Vectors or matrices should be orthogonal
-```c
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - Orthogonality check
-double dot_product = 0.0;
-for (int i = 0; i < N; i++) {
-    dot_product += vector1[i] * vector2[i];
+{
+    double _t1_dot = 0.0;
+    for (int i = 0; i < N; i++) {
+        _t1_dot += vector1[i] * vector2[i];
+    }
+    bool _t1_pass = (fabs(_t1_dot) < 1e-10);
+    printf("LASSI-VERIFY ASSERTIONS [orthogonality]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
 }
-assert(fabs(dot_product) < 1e-10 && "Vectors should be orthogonal");
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ---
@@ -635,21 +959,46 @@ assert(fabs(dot_product) < 1e-10 && "Vectors should be orthogonal");
 **Memory Transfer Validation:**
 ```cpp
 // ALWAYS validate before H→D transfer
-assert(h_data != nullptr);
-for (int i = 0; i < N; i++) assert(isfinite(h_data[i]));
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Validate input data before host-to-device transfer
+{
+    bool _t1_pass = (h_data != nullptr);
+    if (_t1_pass) {
+        for (int i = 0; i < N; i++) {
+            if (!isfinite(h_data[i])) { _t1_pass = false; break; }
+        }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [htod_input_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 cudaMemcpy(d_data, h_data, N*sizeof(double), cudaMemcpyHostToDevice);
 
-// ALWAYS validate after D→H transfer  
+// ALWAYS validate after D→H transfer
 cudaMemcpy(h_result, d_result, N*sizeof(double), cudaMemcpyDeviceToHost);
-for (int i = 0; i < N; i++) assert(isfinite(h_result[i]));
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Validate output data after device-to-host transfer
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!isfinite(h_result[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [dtoh_output_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 **Kernel Parameter Validation:**
 ```cpp
-// LASSI_INSTRUMENTATION - Validate kernel parameters
-assert(threads > 0 && threads <= 1024 && "Invalid thread count");
-assert(blocks > 0 && "Invalid block count");
-assert(N == blocks * threads || N < blocks * threads && "Grid size mismatch");
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Validate kernel launch parameters
+{
+    bool _t1_pass = (threads > 0 && threads <= 1024 && blocks > 0);
+    printf("LASSI-VERIFY ASSERTIONS [kernel_params_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
 ### Cost Considerations:
@@ -725,27 +1074,27 @@ __global__ void jacobi_kernel(double* A, double* b, double* x, double* x_new, in
 
 void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double tol) {
     double *d_A, *d_b, *d_x, *d_x_new;
-    
+
     cudaMalloc(&d_A, N*N*sizeof(double));
     cudaMalloc(&d_b, N*sizeof(double));
     cudaMalloc(&d_x, N*sizeof(double));
     cudaMalloc(&d_x_new, N*sizeof(double));
-    
+
     cudaMemcpy(d_A, A, N*N*sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, b, N*sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, x, N*sizeof(double), cudaMemcpyHostToDevice);
-    
+
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
-    
+
     for (int iter = 0; iter < max_iter; iter++) {
         jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
         cudaDeviceSynchronize();
         std::swap(d_x, d_x_new);
     }
-    
+
     cudaMemcpy(x, d_x, N*sizeof(double), cudaMemcpyDeviceToHost);
-    
+
     cudaFree(d_A); cudaFree(d_b); cudaFree(d_x); cudaFree(d_x_new);
 }
 ```
@@ -764,72 +1113,123 @@ __global__ void jacobi_kernel(double* A, double* b, double* x, double* x_new, in
 }
 
 void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double tol) {
-    // LASSI_INSTRUMENTATION - Input validation (host-side)
-    assert(A != nullptr && b != nullptr && x != nullptr && "Input pointers must be valid");
-    assert(N > 0 && "Matrix dimension must be positive");
-    assert(max_iter > 0 && "Max iterations must be positive");
-    assert(tol > 0.0 && tol < 1.0 && "Tolerance must be in (0,1)");
-    
-    // LASSI_INSTRUMENTATION - Input numerical validity
-    for (int i = 0; i < N*N; i++) {
-        assert(isfinite(A[i]) && "Matrix A contains non-finite values");
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+    // LASSI_INSTRUMENTATION - Input pointer validity and parameter bounds
+    {
+        bool _t1_pass = (A != nullptr && b != nullptr && x != nullptr
+                         && N > 0 && max_iter > 0 && tol > 0.0 && tol < 1.0);
+        printf("LASSI-VERIFY ASSERTIONS [input_ptrs_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+        fflush(stdout);
     }
-    for (int i = 0; i < N; i++) {
-        assert(isfinite(b[i]) && "Vector b contains non-finite values");
-        assert(isfinite(x[i]) && "Initial guess x contains non-finite values");
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
+
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+    // LASSI_INSTRUMENTATION - Matrix A finite check
+    {
+        bool _t1_pass = true;
+        for (int i = 0; i < N*N; i++) {
+            if (!isfinite(A[i])) { _t1_pass = false; break; }
+        }
+        printf("LASSI-VERIFY ASSERTIONS [matrix_A_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+        fflush(stdout);
     }
-    
-    // LASSI_INSTRUMENTATION - Diagonal dominance check (Jacobi requirement)
-    for (int i = 0; i < N; i++) {
-        assert(fabs(A[i*N + i]) > 1e-14 && "Diagonal element too small");
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
+
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+    // LASSI_INSTRUMENTATION - Vector b finite check
+    {
+        bool _t1_pass = true;
+        for (int i = 0; i < N; i++) {
+            if (!isfinite(b[i])) { _t1_pass = false; break; }
+        }
+        printf("LASSI-VERIFY ASSERTIONS [vector_b_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+        fflush(stdout);
     }
-    
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
+
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+    // LASSI_INSTRUMENTATION - Initial guess x finite check
+    {
+        bool _t1_pass = true;
+        for (int i = 0; i < N; i++) {
+            if (!isfinite(x[i])) { _t1_pass = false; break; }
+        }
+        printf("LASSI-VERIFY ASSERTIONS [init_guess_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+        fflush(stdout);
+    }
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
+
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+    // LASSI_INSTRUMENTATION - Diagonal dominance check (Jacobi convergence requirement)
+    {
+        bool _t1_pass = true;
+        for (int i = 0; i < N; i++) {
+            if (!(fabs(A[i*N + i]) > 1e-14)) { _t1_pass = false; break; }
+        }
+        printf("LASSI-VERIFY ASSERTIONS [diag_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+        fflush(stdout);
+    }
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
+
     // NOTE: Matrix symmetry is NOT inserted here.
     // Jacobi iteration does not require a symmetric matrix — many valid Jacobi problems
     // use non-symmetric diagonally-dominant systems. Inserting a symmetry check would be
     // a Type B (implementation-specific) assertion for this code. Only add symmetry
     // checks if the source code itself explicitly requires or documents symmetry.
-    
+
     double *d_A, *d_b, *d_x, *d_x_new;
-    
+
     cudaMalloc(&d_A, N*N*sizeof(double));
     cudaMalloc(&d_b, N*sizeof(double));
     cudaMalloc(&d_x, N*sizeof(double));
     cudaMalloc(&d_x_new, N*sizeof(double));
-    
+
     cudaMemcpy(d_A, A, N*N*sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, b, N*sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, x, N*sizeof(double), cudaMemcpyHostToDevice);
-    
+
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
-    
+
     for (int iter = 0; iter < max_iter; iter++) {
         jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
         cudaDeviceSynchronize();
         std::swap(d_x, d_x_new);
     }
-    
+
     cudaMemcpy(x, d_x, N*sizeof(double), cudaMemcpyDeviceToHost);
-    
-    // LASSI_INSTRUMENTATION - Output validation (host-side after device-to-host transfer)
-    for (int i = 0; i < N; i++) {
-        assert(isfinite(x[i]) && "Solution x contains non-finite values");
-    }
-    
-    // LASSI_INSTRUMENTATION - Residual check (validates solution quality)
-    double residual_norm = 0.0;
-    for (int i = 0; i < N; i++) {
-        double ax_i = 0.0;
-        for (int j = 0; j < N; j++) {
-            ax_i += A[i*N + j] * x[j];
+
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+    // LASSI_INSTRUMENTATION - Output x finite check (host-side after device-to-host transfer)
+    {
+        bool _t1_pass = true;
+        for (int i = 0; i < N; i++) {
+            if (!isfinite(x[i])) { _t1_pass = false; break; }
         }
-        double r_i = b[i] - ax_i;
-        residual_norm += r_i * r_i;
+        printf("LASSI-VERIFY ASSERTIONS [output_x_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
+        fflush(stdout);
     }
-    residual_norm = sqrt(residual_norm);
-    assert(residual_norm < tol * 10.0 && "Solution does not satisfy convergence criterion");
-    
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
+
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+    // LASSI_INSTRUMENTATION - Residual check (validates solution satisfies convergence criterion)
+    {
+        double _t1_residual_norm = 0.0;
+        for (int i = 0; i < N; i++) {
+            double ax_i = 0.0;
+            for (int j = 0; j < N; j++) {
+                ax_i += A[i*N + j] * x[j];
+            }
+            double r_i = b[i] - ax_i;
+            _t1_residual_norm += r_i * r_i;
+        }
+        _t1_residual_norm = sqrt(_t1_residual_norm);
+        bool _t1_pass = (_t1_residual_norm < tol * 10.0);
+        printf("LASSI-VERIFY ASSERTIONS [residual_check]: %s\n", _t1_pass ? "PASS" : "FAIL");
+        fflush(stdout);
+    }
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
+
     cudaFree(d_A); cudaFree(d_b); cudaFree(d_x); cudaFree(d_x_new);
 }
 ```
@@ -838,7 +1238,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
 1. ✅ Assertions placed on **host side** (not in kernel)
 2. ✅ Validation **before** host-to-device transfer
 3. ✅ Validation **after** device-to-host transfer
-4. ✅ All assertions use standard library (`assert.h`, `math.h`)
+4. ✅ All assertions use `<cstdio>` for printf() and fflush(); code runs to completion — no assert(), exit(), or abort()
 5. ✅ Assertions check **transformation-invariant properties** only
 6. ✅ Original kernel code **unchanged**
 7. ✅ Clear `// LASSI_INSTRUMENTATION` markers
@@ -849,9 +1249,10 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
 ## Notes on Implementation
 
 1. **All assertions use standard library functions only:**
-   - `<assert.h>` for assert()
+   - `<cstdio>` for printf() and fflush()
    - `<math.h>` for isnan(), isinf(), isfinite(), fabs(), sqrt()
    - No custom LASSI library required
+   - Code runs to completion — never use assert(), exit(), or abort(). The pipeline checks all assertions after execution and provides the LLM with a complete list of failures.
 
 2. **Assertions marked with `// LASSI_INSTRUMENTATION`:**
    - This marker tells the code generation LLM to preserve these sections

@@ -131,7 +131,15 @@ Source file (.cu)
          │  └──────────────┬──────────────────────────┘  │
          │                 │                              │
          │  ┌──────────────▼──────────────────────────┐  │
-         │  │ TIER 2 CHECK                            │  │
+         │  │ TIER 1 CHECK (LASSI codes only)         │  │
+         │  │  Parse stdout for ASSERTIONS PASS/FAIL. │  │
+         │  │  FAIL → self-correction (up to 3x/code).│  │
+         │  │  Exhausted → INVALID + continue         │  │
+         │  │  (skips Tier 2, Tier 3, judge entirely).│  │
+         │  └──────────────┬──────────────────────────┘  │
+         │                 │                              │
+         │  ┌──────────────▼──────────────────────────┐  │
+         │  │ TIER 2 CHECK (LASSI codes only)         │  │
          │  │  Parse PASSTHROUGH blocks from stdout.  │  │
          │  │  Compare labeled blocks to spec         │  │
          │  │  (tier2_spec_output from SOURCE_verify).│  │
@@ -202,9 +210,13 @@ Source file (.cu)
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
-**Catalog:** `Invariant_Assertions_Catalog.md` — provides a 3-layer framework (universal, domain, problem-specific) with examples for GPU kernels.
+**Catalog:** `Invariant_Assertions_Catalog.md` — provides a 3-layer framework (universal, domain, problem-specific) with examples for GPU kernels. All examples use the printf PASS/FAIL pattern (not `assert()`), matching what `check_tier1_assertions()` parses from stdout.
 
-**When it runs:** Applied once to SOURCE_verify (the instrumented source) and carried through all generated codes (because generated codes are built from SOURCE_verify).
+**When it runs (instrumentation):** Applied once at pipeline start to produce SOURCE_verify. All LASSI-generated codes inherit the assertion blocks because they are generated from SOURCE_verify.
+
+**When it runs (per-iteration checking — Option B):** Inside the main while loop, after each generated code executes, the pipeline parses its stdout for all `LASSI-VERIFY ASSERTIONS [label]: PASS/FAIL` lines via `check_tier1_assertions()`. This gives full visibility into every violated assertion before deciding to retry.
+
+**Self-correction:** On FAIL, the failing assertion labels and summary are fed back to the LLM with the instruction to fix the code without removing any LASSI-VERIFY blocks. Up to 3 retries per code (per-code counter resets on fresh generation). When the per-code budget exhausts, the code is immediately marked INVALID and the pipeline `continue`s — skipping Tier 2, Tier 3, and the judge entirely. This fail-fast behavior avoids unnecessary overhead when Tier 1 has already determined the code is incorrect.
 
 ---
 
@@ -260,7 +272,7 @@ On FAIL: self-correction (up to 3 retries per code, sharing global counter).
 |------|-------|--------------|
 | **SCALING** | Z_stat ≈ factor × Y_stat; Z_sample[i] ≈ factor × Y_sample[i] | Factor, Statistics, Sample_first10 |
 | **SYMMETRY** | Same as SCALING with factor=−1 (min/max swap) | Factor, Statistics, Sample_first10 |
-| **PERMUTATIVE** | Step A: Z_stat ≈ Y_stat (invariance, factor=1.0); Step B: Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1] (equivariance) | Swap_idx1, Swap_idx2, Statistics, Sample_first10 |
+| **PERMUTATIVE** | Step A: Z_stat ≈ Y_stat (invariance, factor=1.0); Step B: Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1] (equivariance, fires when indices in first10/last10 range) | Swap_idx1, Swap_idx2, Sample_at_idx1, Sample_at_idx2, Statistics, Sample_first10 |
 | **CONSERVATION** | \|sum_after − sum_before\| / \|sum_before\| < rtol | Sum (before + after blocks) |
 | **MONOTONICITY** | residual[k] ≥ residual[k+1] − rtol×\|residual[k]\| | Iteration, Residual (per-iter blocks) |
 
@@ -268,35 +280,43 @@ On FAIL: self-correction (up to 3 retries per code, sharing global counter).
 
 **Default tolerance:** `tier3_tolerance = 1e-5` (slightly looser than Tier 2).
 
+**Relation cost:** All currently implemented relation types (CONSERVATION, SYMMETRY, SCALING, PERMUTATIVE, ROTATION, MONOTONICITY) require 1 extra compile + run (labeled `"cheap"` in the catalog). The theoretical zero-extra-run optimization for CONSERVATION/SYMMETRY is not yet implemented.
+
 ---
 
 ## LLM Judge + Three-Tier Override System
 
-The LLM judge reads both codes and their stdout outputs and returns a functional equivalence verdict (VALID/INVALID/SKIP). For LASSI-generated codes, Tier 2 and Tier 3 results take priority over the judge:
+The LLM judge reads both codes and their stdout outputs and returns a functional equivalence verdict (VALID/INVALID/SKIP). For LASSI-generated codes, deterministic tier results take priority over the judge via four override rules applied in order:
 
-| Tier 2 result | Judge verdict | Final verdict | Logged as |
-|--------------|---------------|---------------|-----------|
-| PASS | INVALID | **VALID** (override) | `false_negative` |
-| exhausted | VALID | **INVALID** (override) | `false_positive` |
-| SKIP | any | Judge verdict stands | — |
+| Override | Condition | Final verdict | Logged as |
+|----------|-----------|---------------|-----------|
+| **Tier 1 exhausted** (inline) | Per-code Tier 1 budget exhausted | **INVALID** + `continue` (skips judge entirely) | — |
+| **Override 1** | Tier 2 budget exhausted | **INVALID** (overrides judge) | `false_positive` |
+| **Override 2** | Tier 1 PASS/SKIP + Tier 2 PASS + Tier 3 PASS/SKIP | **VALID** (overrides judge) | `false_negative` |
+| **Override 3** (last word) | Tier 3 budget exhausted | **INVALID** (overrides Override 2) | `false_positive` |
 
-The zero-shot (vanilla LLM) code always goes through the judge — it has no Tier 1/2 instrumentation, so the judge is its only correctness gate.
+Override 3 runs after Override 2 and has final authority: a code that exhausts Tier 3 retries is INVALID regardless of any prior verdict.
+
+The zero-shot (vanilla LLM) code always goes through the judge — it has no Tier 1/2/3 instrumentation, so the judge is its only correctness gate. No overrides apply to zero-shot.
 
 Discrepancies are logged in `verification_log["judge_discrepancies"]` and CSV columns `judge_false_positives` / `judge_false_negatives`.
 
-**Known limitation:** Tier 2 `sample_first10` is a weak interior check for convergence-sensitive solvers (e.g., Jacobi). Boundary elements (first indices) may look correct even when interior values diverge. This is precisely what Tier 3 is designed to catch.
+**Tier 2 coverage note:** `sample_first10` AND `sample_last10` are both captured and compared, so both boundary regions are covered. The weakness is specifically the **interior** (elements 10 through N-11 for large N). For convergence-sensitive solvers (e.g., Jacobi), interior divergence can be masked if boundary elements happen to look correct. This is precisely what Tier 3 PERMUTATIVE testing is designed to catch.
 
 ---
 
 ## Self-Correction Architecture
 
-| Counter | Scope | Max | Trigger |
-|---------|-------|-----|---------|
-| `self_correction_verify_counter_code` | Per generated code (resets on fresh generation) | 5 | Tier 2 FAIL |
-| `self_correction_counter` | Global, whole pipeline run | 15 | Compile error, execute error, Tier 2 FAIL, Tier 3 FAIL |
-| Per-code Tier 3 counter | Per generated code | 3 | Tier 3 FAIL |
+| Counter | Scope | Max | Trigger | Exhaustion behavior |
+|---------|-------|-----|---------|---------------------|
+| `self_correction_tier1_counter_code` | Per generated code (resets on fresh generation) | 3 | Tier 1 FAIL | Inline: `valid_code_flag=INVALID` + `continue` (skips Tier 2/3/judge) |
+| `self_correction_verify_counter_code` | Per generated code (resets on fresh generation) | 5 | Tier 2 FAIL | Override 1: code marked INVALID; fresh generation next |
+| Per-code Tier 3 counter | Per generated code | 3 | Tier 3 FAIL | Override 3: code marked INVALID (last word) |
+| `self_correction_verify_counter` | Global, whole pipeline run | 15 | Tier 1 FAIL + Tier 2 FAIL + Tier 3 FAIL | Pipeline safety net; halts verification loop |
 
-When per-code Tier 2 budget exhausts: code is marked INVALID; `code_blocks.pop()` keeps history arrays in sync; pipeline requests fresh generation.
+**Tier 1 exhaustion note:** When the per-code Tier 1 budget exhausts, the pipeline `continue`s immediately — Tier 2 and Tier 3 are never run for that code. This avoids overhead when Tier 1 has already determined the code is incorrect. The exhausted code stays in `code_blocks` as an artifact (no `pop()`).
+
+**Tier 2 exhaustion note:** Code stays in `code_blocks` as an artifact. `compile_result = "energy_efficiency"` drives fresh generation on the next iteration.
 
 ---
 
