@@ -86,7 +86,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                                      app_name,
                                      run_tier2=False,        # Enable Tier 2 empirical equivalence checking
                                      tier2_tolerance=1e-6,   # Relative tolerance for passthrough comparison
-                                     run_llm_judge=True      # Enable LLM-as-a-judge functional equivalence check (pre-Tier-1/2 stop-gap; disable for pure three-tier mode)
+                                     run_llm_judge=True,     # Enable LLM-as-a-judge functional equivalence check (pre-Tier-1/2 stop-gap; disable for pure three-tier mode)
+                                     run_tier3=False,        # Enable Tier 3 metamorphic testing
+                                     tier3_tolerance=1e-5    # Default relative tolerance for metamorphic relation checks (slightly looser than Tier 2 to account for two independently-accumulated FP runs)
                                     ):
 
     # -----------------
@@ -120,6 +122,14 @@ def auto_code_llmgeneration_pipeline(prompts,
     self_correction_verify_counter_code = 0   # Per-code Tier 2 self-correction attempts; resets on fresh code generation
     self_correction_verify_counter_code_max = 5  # Per-code limit: if exhausted, mark INVALID and generate a fresh code
     tier2_exhausted = False   # Set True when per-code Tier 2 budget is exhausted; forces INVALID after judge block
+    # --- Tier 3: Metamorphic Testing state variables ---
+    tier3_contract = {}             # Metamorphic contract from Stage 0 LLM call
+    tier3_active_relations = []     # Relations that passed the SOURCE_verify filter
+    self_correction_tier3_counter_code = 0    # Per-code Tier 3 retry count (separate from Tier 2 counter)
+    self_correction_tier3_counter_code_max = 3  # Tier 3 gets fewer retries than Tier 2 (structural math violations are harder to fix)
+    tier3_exhausted = False         # Set True when per-code Tier 3 budget exhausted; forces INVALID
+    tier3_verdict = "SKIP"          # Most recent Tier 3 verdict for the current code
+    tier3_diagnostic = {}           # Most recent Tier 3 first-failure diagnostic
     exe_output_source = ""
     source_orig_stdout = ""    # stdout from SOURCE_orig execution (Stage 0)
     source_verify_stdout = ""  # stdout from SOURCE_verify execution (Stage 1)
@@ -295,8 +305,15 @@ def auto_code_llmgeneration_pipeline(prompts,
     verification_log["verified_pass_count"] = 0         # count of iterations where Tier 2 PASS
     verification_log["judge_discrepancies"] = []        # cases where LLM judge and three-tier verdict disagree
     # judge_discrepancy entry schema: {code_version, zero_shot, type ("false_positive"|"false_negative"), judge_verdict, tier2_verdict, final_verdict}
-    
-    
+    # Tier 3 verification log fields (initialized here; populated after Stage 0 contract generation)
+    verification_log["tier3_enabled"] = run_tier3
+    verification_log["tier3_tolerance"] = tier3_tolerance
+    verification_log["tier3_contract"] = {}          # populated after Stage 0 contract generation
+    verification_log["tier3_active_relations"] = []  # populated after Stage 0 source variant filter
+    verification_log["tier3_results"] = []           # per-iteration list of {code_version, verdict, results}
+    verification_log["tier3_pass_count"] = 0
+
+
     # -----------------------------------------------------------
     # ----- STAGE 1: INSERT VERIFY INSTRUMENTATION -----
     # -----------------------------------------------------------
@@ -365,6 +382,54 @@ def auto_code_llmgeneration_pipeline(prompts,
     #   [0] = SOURCE_orig stdout (no passthrough instrumentation)
     #   [1] = SOURCE_verify stdout (Tier 2 reference)
     passthrough_outputs = [source_orig_stdout, source_verify_stdout]
+
+    # --- Tier 3: Generate metamorphic contract and filter active relations (Stage 0) ---
+    # run_metamorphic_variants is called here with SOURCE_verify to determine which
+    # relations are applicable to this computation. Relations that fail for SOURCE_verify
+    # are marked inactive and silently skipped for all generated codes in the main loop.
+    # This achieves zero false positives from inapplicable MRs (mechanizes the manual
+    # MR validation step identified as future work in Li et al. 2025, Directions 2-3).
+    if run_tier3 and run_tier2:  # Tier 3 requires Tier 2 passthrough baseline
+        print(f"\n----- LASSI-Verify Tier 3: generating metamorphic contract -----")
+        tier3_contract = lassi.verify.generate_metamorphic_contract(
+            input_code,  # SOURCE_verify (Tier 1 + Tier 2 instrumented)
+            llm_source, model, num_ctx, system_prompt, display_response,
+            verifyprompt=True
+        )
+        if tier3_contract and tier3_contract.get("relations"):
+            print(f"\n----- LASSI-Verify Tier 3: running SOURCE_verify metamorphic variants (filter) -----")
+            _, filter_results, _ = lassi.verify.run_metamorphic_variants(
+                input_code,                 # SOURCE_verify code
+                tier3_contract["relations"],
+                tier3_contract,
+                passthrough_spec_output,    # SOURCE_verify's own Tier 2 passthrough output (Tier 3 baseline)
+                llm_source, model, num_ctx, system_prompt,
+                display_response,
+                directory, file_name, code_compiler, code_compiler_kwds,
+                build_script, make_script, code_build_script,
+                exe_input_parameters,
+                experiment_data_directory=experiment_data_directory,
+                verifyprompt=True
+            )
+            # Mark relations active/inactive based on source filter results.
+            # "PASS" → relation is applicable; "FAIL" or "SKIP" → filter inactive.
+            tier3_active_relations = [
+                r for r in tier3_contract["relations"]
+                if r.get("source_status") == "PASS"
+            ]
+            n_total  = len(tier3_contract["relations"])
+            n_active = len(tier3_active_relations)
+            print(f"\n----- LASSI-Verify Tier 3: {n_active}/{n_total} relations active after source filter -----")
+            if n_active == 0:
+                print(f"      (All relations failed or skipped for SOURCE_verify — Tier 3 will be SKIP for all generated codes)")
+        else:
+            print(f"\n----- LASSI-Verify Tier 3: contract generation failed — Tier 3 disabled -----")
+            run_tier3 = False  # Disable Tier 3 for this run
+        verification_log["tier3_contract"] = tier3_contract
+        verification_log["tier3_active_relations"] = [r["name"] for r in tier3_active_relations]
+    elif run_tier3 and not run_tier2:
+        print(f"\n----- LASSI-Verify Tier 3: Tier 2 is disabled — Tier 3 requires Tier 2 passthrough baseline; Tier 3 disabled -----")
+        run_tier3 = False
 
     # Append instrumented source code as code_blocks[1] = SOURCE_verify.
     # LASSI pipeline refactors from this baseline; the LASSI judge compares against it.
@@ -522,7 +587,40 @@ def auto_code_llmgeneration_pipeline(prompts,
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to fix code following Tier 2 verification failure." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
 
-        elif compile_result != "" and compile_result != "energy_efficiency" and compile_result != "tier2_failure" and not zero_shot:
+        elif compile_result == "tier3_failure" and not zero_shot:
+            """
+            Tier 3 (metamorphic testing) self-correction.
+            The generated code passed Tier 2 but failed a metamorphic relation check.
+            Provide the failing relation's diagnostic as self-correction context.
+            This branch uses self_correction_verify_counter (shared with Tier 2 failures).
+            """
+            print("\n\n----- " + color.BOLD + color.RED + "LASSI-VERIFY Tier 3 SELF-CORRECTION: " + str(self_correction_verify_counter) + color.END + " -----")
+            print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
+
+            tier3_diag_summary  = tier3_diagnostic.get("summary", "(no diagnostic available)")
+            tier3_relation_name = tier3_diagnostic.get("relation_name", "(unknown)")
+
+            error_correction_prompt_intro = (
+                "\n\nThe above code passed Tier 2 empirical equivalence checking but FAILED "
+                "LASSI-Verify Tier 3 metamorphic testing.\n\n"
+                "The metamorphic relation that failed: " + tier3_relation_name + "\n\n"
+                "=== TIER 3 DIAGNOSTIC ===\n"
+                + tier3_diag_summary +
+                "\n=== END TIER 3 DIAGNOSTIC ===\n\n"
+                "Fix the generated code so that it satisfies this mathematical property. "
+                "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
+                "The issue is a structural property of the computation, not a single output value difference."
+            )
+
+            error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
+            error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
+            error_prompt_tokens = lassi.token_analysis.token_count(error_prompt)
+            if verifyprompt:
+                print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 3 metamorphic self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
+            print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to fix code following Tier 3 metamorphic test failure." + color.END + "\n\n")
+            code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
+
+        elif compile_result != "" and compile_result != "energy_efficiency" and compile_result != "tier2_failure" and compile_result != "tier3_failure" and not zero_shot:
             """
             This condition is for handling CODE ERRORS during compilation or execution.
             """
@@ -962,6 +1060,66 @@ def auto_code_llmgeneration_pipeline(prompts,
             if run_tier2 and not zero_shot and "verified_pass_count" in verification_log and tier2_verdict.startswith("PASS"):
                 verification_log["verified_pass_count"] += 1
 
+            # --- TIER 3: Metamorphic Testing (after Tier 2 PASS/SKIP, before judge) ---
+            # Applies only to LASSI-generated codes with active relations.
+            # Zero-shot codes skip entirely (no Tier 2 passthrough baseline exists for them).
+            # Reset per-code Tier 3 counter on fresh code (mirrors Tier 2 counter reset logic).
+            if compile_result_before_generation != "tier3_failure":
+                self_correction_tier3_counter_code = 0
+            tier3_verdict = "SKIP"
+            tier3_diagnostic = {}
+            if run_tier3 and not zero_shot and tier3_active_relations and not tier2_verdict.startswith("FAIL"):
+                # Tier 3 baseline: the generated code's own Tier 2 passthrough stdout.
+                # passthrough_outputs[-1] is the stdout just appended above (this iteration's run).
+                generated_passthrough_stdout = passthrough_outputs[-1] if passthrough_outputs else ""
+                tier3_verdict, tier3_results_this_iter, tier3_diagnostic = lassi.verify.run_metamorphic_variants(
+                    code_blocks[-1],             # generated code source
+                    tier3_active_relations,
+                    tier3_contract,
+                    generated_passthrough_stdout,  # generated code's own output as Tier 3 baseline (Y)
+                    llm_source, model, num_ctx, system_prompt,
+                    display_response,
+                    directory, file_name, code_compiler, code_compiler_kwds,
+                    build_script, make_script, code_build_script,
+                    exe_input_parameters,
+                    experiment_data_directory=experiment_data_directory,
+                    code_version=code_version,
+                    verifyprompt=verifyprompt
+                )
+                print(f"\n----- LASSI-Verify Tier 3: {tier3_verdict} -----")
+                if tier3_diagnostic.get("failures"):
+                    print(tier3_diagnostic.get("summary", ""))
+                if "tier3_results" in verification_log:
+                    verification_log["tier3_results"].append({
+                        "code_version": code_version,
+                        "verdict": tier3_verdict,
+                        "results": tier3_results_this_iter,
+                    })
+
+            if tier3_verdict.startswith("FAIL"):
+                # Increment shared global counter and per-code Tier 3 counter.
+                self_correction_verify_counter += 1
+                self_correction_tier3_counter_code += 1
+                iteration_log["v" + str(code_version)]["self_correction_count"] += 1
+                if self_correction_tier3_counter_code <= self_correction_tier3_counter_code_max:
+                    # Still within per-code budget: pop code_blocks to keep in sync with history,
+                    # then self-correct with Tier 3 diagnostic feedback.
+                    code_blocks.pop()
+                    compile_result = "tier3_failure"
+                    print(f"\n----- LASSI-Verify Tier 3: FAIL — self-correction "
+                          f"{self_correction_tier3_counter_code}/{self_correction_tier3_counter_code_max} "
+                          f"(global: {self_correction_verify_counter}) -----")
+                    continue  # Skip judge and metrics; return to top of while loop
+                else:
+                    # Per-code Tier 3 budget exhausted: flag for Override 3 (below) to force INVALID.
+                    print(f"\n----- LASSI-Verify Tier 3: FAIL — per-code budget exhausted "
+                          f"({self_correction_tier3_counter_code_max} attempts), marking INVALID -----")
+                    tier3_exhausted = True
+                    compile_result = "energy_efficiency"  # drive fresh generation next iteration
+
+            if run_tier3 and not zero_shot and "tier3_pass_count" in verification_log and tier3_verdict == "PASS":
+                verification_log["tier3_pass_count"] += 1
+
             # Call LLM-as-a-judge to review SOURCE CODE and REFACTORED CODE to evaluate if likely valid.
             # Judge always runs for zero_shot (vanilla LLM has no Tier 1/2 instrumentation — the judge
             # is its only correctness gate). For LASSI codes, judge is controlled by run_llm_judge:
@@ -1027,6 +1185,25 @@ def auto_code_llmgeneration_pipeline(prompts,
                 })
                 print(f"\n----- Three-tier override: judge={judge_raw_verdict} overridden to VALID (Tier 2 PASS — judge false negative) -----")
                 valid_code_flag = "VALID"
+
+            # Override 3 (false positive): Tier 3 budget exhausted → INVALID regardless of judge or Tier 2.
+            # Tier 3 is the final authority: a code that cannot satisfy a metamorphic relation after
+            # self_correction_tier3_counter_code_max attempts has a structural mathematical flaw.
+            # This override runs AFTER Override 2 so it has the last word.
+            if tier3_exhausted and not zero_shot:
+                if valid_code_flag == "VALID":
+                    verification_log["judge_discrepancies"].append({
+                        "code_version": code_version, "zero_shot": zero_shot,
+                        "type": "false_positive",
+                        "judge_verdict": judge_raw_verdict, "tier3_verdict": "FAIL_exhausted",
+                        "final_verdict": "INVALID",
+                    })
+                    print(f"\n----- Three-tier override: verdict=VALID overridden to INVALID (Tier 3 exhausted — false positive) -----")
+                valid_code_flag = "INVALID"
+                judge_response_text = (f"Tier 3 metamorphic testing budget exhausted "
+                                       f"({self_correction_tier3_counter_code_max} attempts): code marked INVALID.")
+                code_analysis = "None"
+                tier3_exhausted = False  # reset for next iteration
 
             # valid_code_flag can be: (1) "VALID", (2) "INVALID", or (3) "NONE"
             if not zero_shot:
@@ -1423,6 +1600,10 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["tier2_fail_total"] = sum(1 for r in tier2_results if r.get("verdict", "").startswith("FAIL"))
     experiment_data["judge_false_positives"] = sum(1 for d in discrepancies if d.get("type") == "false_positive")
     experiment_data["judge_false_negatives"] = sum(1 for d in discrepancies if d.get("type") == "false_negative")
+    tier3_results = verification_log.get("tier3_results", [])
+    experiment_data["tier3_pass_count"] = verification_log.get("tier3_pass_count", 0)
+    experiment_data["tier3_fail_total"] = sum(1 for r in tier3_results if r.get("verdict", "").startswith("FAIL"))
+    experiment_data["tier3_active_relations"] = ",".join(verification_log.get("tier3_active_relations", []))
 
     # --- LASSI-VERIFY JSON SIDECAR: save full verification_log for detailed inspection ---
     # tier2_spec_output (large stdout) and sourcecode_analysis (large text) are excluded here;

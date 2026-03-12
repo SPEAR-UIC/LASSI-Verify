@@ -1,5 +1,9 @@
 from IPython.display import display, Markdown
 import re
+import os
+import json
+import math
+import subprocess
 from lassi.format_colors import color
 from lassi.prompt_dictionary import PromptDictionary
 from lassi.llm_config import argo_llm, cerebras_llm, ollama_llm, ollama_llm_nostream
@@ -594,3 +598,830 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
         "summary":         summary,
     }
     return verdict, diagnostic
+
+
+# =============================================================================
+# TIER 3: METAMORPHIC TESTING
+# =============================================================================
+
+def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, system_prompt,
+                                   display_response, verifyprompt=False):
+    """
+    Tier 3: Generate a metamorphic contract for the given source code.
+
+    Calls the LLM with the metamorphic catalog to select 2-4 applicable relations.
+    Returns a contract dict with a 'relations' key, or {} on failure.
+
+    Called once in Stage 0 after SOURCE_verify is constructed (after Tier 1 + Tier 2
+    insertion). The contract drives all subsequent Tier 3 work.
+
+    Maps to: Benton's Relational Hoare Logic (relational reasoning over two executions
+    under related inputs). The LLM selects validation MRs from mathematical/physical
+    semantics, not implementation details.
+    """
+    content_prompt = (
+        "You are preparing GPU-accelerated scientific code for Tier 3 metamorphic testing "
+        "as part of the LASSI-Verify verification framework.\n\n"
+        "Your task is to analyze the source code and select 2-4 applicable metamorphic "
+        "relations from the catalog below. Return your selection as a single JSON block.\n\n"
+        "----\n\n"
+    )
+    content_prompt += prompts.get_codeknowledge("metamorphic_catalog")
+    content_prompt += "\n\n----\n\n"
+    content_prompt += "[BEGIN SOURCE CODE]\n" + source_code + "\n[END SOURCE CODE]\n\n"
+    content_prompt += (
+        "Following the Instructions section in the catalog above, analyze the source code "
+        "and return a JSON contract. Return ONLY the JSON block — no explanatory text "
+        "before or after it.\n\n"
+        "```json\n"
+        "{ \"relations\": [ ... ] }\n"
+        "```"
+    )
+
+    print("\n----- " + color.BOLD + color.PURPLE +
+          "STARTING Tier 3: Generating Metamorphic Contract" + color.END + " -----\n")
+
+    temp = 0.2
+    if llm_source == "argo":
+        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "ollama":
+        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "cerebras":
+        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
+    else:
+        print("Invalid LLM source for generate_metamorphic_contract")
+        return {}
+
+    if display_response:
+        display(Markdown(response_text))
+
+    # Extract JSON from response: try ```json ... ``` first, then bare { ... }
+    contract = {}
+    json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+    if json_match:
+        json_str = json_match.group(1)
+    else:
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        json_str = json_match.group(0) if json_match else ""
+
+    if json_str:
+        try:
+            contract = json.loads(json_str)
+            # Initialize source_status for each relation (populated in Stage 0 filter run)
+            for rel in contract.get("relations", []):
+                rel["source_status"] = None
+            n = len(contract.get("relations", []))
+            print(f"\n----- Tier 3 contract generated: {n} relation(s) selected -----")
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"\n----- Tier 3 contract JSON parse failed: {e} — Tier 3 disabled -----")
+            contract = {}
+    else:
+        print("\n----- Tier 3 contract: no JSON found in LLM response — Tier 3 disabled -----")
+
+    return contract
+
+
+def code_insert_metamorphic_variant(source_code, relation, llm_source, model, num_ctx,
+                                     system_prompt, display_response,
+                                     template_code=None, verifyprompt=False):
+    """
+    Tier 3: Produce a metamorphic variant of source_code for one relation.
+
+    Calls the LLM to insert the input transformation and METAMORPHIC output blocks at the
+    designated observation points. Preserves all existing LASSI-VERIFY ASSERTIONS and
+    PASSTHROUGH blocks without modification.
+
+    Returns extracted code string (same pattern as code_insert_asserts / code_insert_passthrough).
+    Returns "" on failure (causes that relation to be marked SKIP in run_metamorphic_variants).
+
+    Called once per relation per code being tested:
+      - Once for SOURCE_verify in Stage 0 (source filter)
+      - Once per active relation per generated code in the main loop
+    """
+    relation_name = relation.get("name", "unknown")
+    relation_type = relation.get("type", "UNKNOWN")
+    factor        = relation.get("factor")
+    input_vars    = relation.get("input_variables", [])
+    obs_points    = relation.get("observation_points", [])
+    description   = relation.get("description", "")
+    expected_rel  = relation.get("expected_relationship", "")
+    tolerance     = relation.get("tolerance", 1e-5)
+
+    # --- Relation specification block (human-readable, for the LLM) ---
+    rel_spec = (
+        f"Relation name: {relation_name}\n"
+        f"Relation type: {relation_type}\n"
+        f"Description: {description}\n"
+    )
+    if factor is not None:
+        rel_spec += f"Factor (alpha): {factor}\n"
+    if input_vars:
+        rel_spec += f"Input variables to transform: {', '.join(input_vars)}\n"
+    if obs_points:
+        rel_spec += (
+            f"Observation point labels (must match existing PASSTHROUGH block labels): "
+            f"{', '.join(obs_points)}\n"
+        )
+    rel_spec += f"Expected relationship: {expected_rel}\n"
+    rel_spec += f"Tolerance: {tolerance}\n"
+
+    # --- METAMORPHIC block format guidance (relation-type specific) ---
+    first_label = obs_points[0] if obs_points else "output"
+    if relation_type in ("SCALING", "SYMMETRY", "PERMUTATIVE", "ROTATION"):
+        block_format = (
+            f"**METAMORPHIC output block format** "
+            f"(insert AFTER the final D→H transfer and cudaDeviceSynchronize, "
+            f"BEFORE any cudaFree / free calls):\n\n"
+            f"```\n"
+            f"=== BEGIN LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
+            f"Relation: {relation_name}\n"
+            f"Factor: {factor if factor is not None else 'N/A'}\n"
+            f"Buffer: <buffer_name>\n"
+            f"Elements: <N>\n"
+            f"Statistics: min=%.17g, max=%.17g, mean=%.17g\n"
+            f"Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)\n"
+            f"=== END LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
+            f"```\n\n"
+            f"Print this block using printf with %.17g format. The label MUST exactly match "
+            f"the corresponding PASSTHROUGH block label for the same observation point "
+            f"(e.g., if the PASSTHROUGH label is `[final_solution]`, the METAMORPHIC label "
+            f"must also be `[final_solution]`).\n"
+        )
+    elif relation_type == "CONSERVATION":
+        block_format = (
+            "**METAMORPHIC output block format** (print BEFORE and AFTER the kernel, "
+            "using 'Sum:' field):\n\n"
+            "```\n"
+            f"=== BEGIN LASSI-VERIFY METAMORPHIC [{obs_points[0] if len(obs_points) > 0 else 'before'}] ===\n"
+            "Relation: conservation\nBuffer: <buffer_name>\nElements: <N>\nSum: %.17g\n"
+            f"=== END LASSI-VERIFY METAMORPHIC [{obs_points[0] if len(obs_points) > 0 else 'before'}] ===\n"
+            "... kernel execution ...\n"
+            f"=== BEGIN LASSI-VERIFY METAMORPHIC [{obs_points[1] if len(obs_points) > 1 else 'after'}] ===\n"
+            "Relation: conservation\nBuffer: <buffer_name>\nElements: <N>\nSum: %.17g\n"
+            f"=== END LASSI-VERIFY METAMORPHIC [{obs_points[1] if len(obs_points) > 1 else 'after'}] ===\n"
+            "```\n"
+        )
+    elif relation_type == "MONOTONICITY":
+        block_format = (
+            "**METAMORPHIC output block format** (print per-iteration inside the solver loop, "
+            "using 'Residual:' field):\n\n"
+            "```\n"
+            "=== BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_<k>] ===\n"
+            "Relation: monotonicity\nIteration: <k>\nResidual: %.17g\n"
+            "=== END LASSI-VERIFY METAMORPHIC [residual_iter_<k>] ===\n"
+            "```\n"
+        )
+    else:
+        block_format = (
+            "**METAMORPHIC output block format**: Use labeled blocks with "
+            "'=== BEGIN LASSI-VERIFY METAMORPHIC [label] ===' and "
+            "'=== END LASSI-VERIFY METAMORPHIC [label] ===' delimiters.\n"
+        )
+
+    # --- Transformation instruction (relation-type specific) ---
+    if relation_type in ("SCALING", "SYMMETRY") and input_vars:
+        transform_instruction = (
+            f"**Step 1 — Apply the input transformation:**\n"
+            f"Insert the transformation code AFTER host array initialization but BEFORE "
+            f"the first host-to-device memory copy (cudaMemcpy H→D or hipMemcpy H→D).\n\n"
+            f"For {relation_type} with factor={factor}: multiply the values of "
+            f"({', '.join(input_vars)}) by {factor}.\n"
+            f"Example:\n"
+            f"    const double alpha = {factor};\n"
+            f"    for (int i = 0; i < N; i++) {input_vars[0]}[i] *= alpha;\n"
+            f"Scale ALL input arrays listed in 'Input variables to transform'.\n\n"
+            f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
+            f"After the final device-to-host transfer, insert METAMORPHIC blocks capturing "
+            f"the transformed output at the observation point labels listed above.\n"
+        )
+    elif relation_type == "PERMUTATIVE" and input_vars:
+        transform_instruction = (
+            f"**Step 1 — Apply a deterministic permutation to the input:**\n"
+            f"Insert the permutation AFTER host array initialization but BEFORE the first H→D copy.\n"
+            f"Use a fixed swap of two non-boundary interior indices to permute ({', '.join(input_vars)}).\n\n"
+            f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
+            f"After the final D→H transfer, insert METAMORPHIC blocks at the observation points above.\n"
+        )
+    elif relation_type == "CONSERVATION":
+        transform_instruction = (
+            "**Step 1 — Insert a before-kernel METAMORPHIC block** to capture the conserved quantity.\n"
+            "**Step 2 — Insert an after-kernel METAMORPHIC block** to capture the conserved quantity "
+            "after the final D→H transfer.\n"
+            "No input transformation is needed — the relation checks that the computation preserves "
+            "a quantity across execution.\n"
+        )
+    elif relation_type == "MONOTONICITY":
+        transform_instruction = (
+            "**Step 1 — Add per-iteration residual output** inside the solver iteration loop.\n"
+            "After each convergence update, compute the current residual and print a METAMORPHIC block.\n"
+            "No input transformation is needed.\n"
+        )
+    else:
+        transform_instruction = (
+            f"**Step 1 — Apply the transformation** appropriate for {relation_type}.\n"
+            f"**Step 2 — Insert METAMORPHIC output blocks** at the observation points above.\n"
+        )
+
+    content_prompt = (
+        "You are preparing a metamorphic variant of a GPU-accelerated source code for "
+        "Tier 3 empirical verification as part of the LASSI-Verify framework.\n\n"
+        "Your task: modify the source code below to produce a variant that tests the "
+        "following metamorphic relation.\n\n"
+        "=== METAMORPHIC RELATION ===\n"
+        + rel_spec +
+        "===========================\n\n"
+        "**CRITICAL PRESERVATION REQUIREMENT:**\n"
+        "The source code already contains LASSI-VERIFY ASSERTIONS and LASSI-VERIFY "
+        "PASSTHROUGH blocks. You MUST preserve ALL existing blocks marked with:\n"
+        "    // >>> BEGIN LASSI-VERIFY ASSERTIONS ... >>>\n"
+        "    // <<< END LASSI-VERIFY ASSERTIONS <<<\n"
+        "and ALL existing blocks marked with:\n"
+        "    // >>> BEGIN LASSI-VERIFY PASSTHROUGH ... >>>\n"
+        "    // <<< END LASSI-VERIFY PASSTHROUGH <<<\n"
+        "Do NOT modify, remove, or restructure any of these blocks.\n\n"
+        "**MODIFICATION INSTRUCTIONS:**\n"
+        + transform_instruction + "\n"
+        + block_format + "\n"
+        "**OUTPUT INSTRUCTIONS:**\n"
+        "- Output ONLY the complete, modified source code ready to compile.\n"
+        "- Do NOT include explanatory text or commentary outside of a single code fence.\n"
+        "- The output must compile with nvcc or hipcc.\n\n"
+        + (
+            "[REFERENCE TEMPLATE — how this metamorphic relation was inserted into the SOURCE_verify version]\n"
+            "The following shows the validated strategy used to insert this same relation into the "
+            "reference (SOURCE_verify) version of this code. Use it as a guide for WHERE and HOW "
+            "to apply the input transformation and insert the METAMORPHIC output block. "
+            "Do NOT copy it verbatim — the source code below may be structured differently. "
+            "Replicate the strategy, not the exact lines.\n\n"
+            + template_code +
+            "\n[END REFERENCE TEMPLATE]\n\n"
+            if template_code else ""
+        )
+        + "[BEGIN SOURCE CODE]\n" + source_code + "\n[END SOURCE CODE]\n"
+    )
+
+    print("\n----- " + color.BOLD + color.PURPLE +
+          f"STARTING Tier 3: Inserting metamorphic variant ({relation_name})" +
+          color.END + " -----\n")
+
+    temp = 0.2
+    if llm_source == "argo":
+        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "ollama":
+        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "cerebras":
+        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
+    else:
+        print("Invalid LLM source for code_insert_metamorphic_variant")
+        return ""
+
+    if display_response:
+        display(Markdown(response_text))
+
+    # Extract code block (same pattern as code_insert_asserts / code_insert_passthrough)
+    pattern = r"```(.*?)```"
+    match = re.search(pattern, response_text, re.DOTALL)
+    if match:
+        extracted_code = match.group(1)
+        extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
+    else:
+        extracted_code = ""
+
+    return extracted_code
+
+
+def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, relation,
+                                tolerance=None):
+    """
+    Tier 3: Deterministic check of a metamorphic relation between variant and original outputs.
+
+    Parses METAMORPHIC blocks from variant_stdout and PASSTHROUGH blocks from
+    original_passthrough_stdout (the generated code's own Tier 2 passthrough output),
+    then verifies the expected mathematical relationship.
+
+    Phase 1 implements: SCALING, SYMMETRY, CONSERVATION, MONOTONICITY.
+    PERMUTATIVE and ROTATION require element-level array access and are deferred to Phase 3.
+
+    Uses allclose-style tolerance throughout:
+        |a - b| <= atol + rtol * max(|a|, |b|)
+        atol = |expected_value| * rtol   (anchors tolerance to the field's dynamic range)
+
+    NaN/Inf guard: if either the original or variant value is non-finite, SKIP that check
+    (per catalog Design Principle 6 — NaN/Inf guard is mandatory).
+
+    Returns:
+        verdict (str): "PASS", "FAIL", or "SKIP"
+        diagnostic (dict): {verdict, relation_name, factor, blocks_compared, failures, summary}
+    """
+    relation_name = relation.get("name", "unknown")
+    relation_type = relation.get("type", "UNKNOWN")
+    factor        = relation.get("factor", 1.0) if relation.get("factor") is not None else 1.0
+    obs_points    = relation.get("observation_points", [])
+    rtol          = tolerance if tolerance is not None else relation.get("tolerance", 1e-5)
+
+    # --- Shared parsers (same patterns as compare_passthrough_outputs) ---
+    meta_block_pattern = re.compile(
+        r'=== BEGIN LASSI-VERIFY METAMORPHIC \[([^\]]+)\] ===\n(.*?)\n=== END LASSI-VERIFY METAMORPHIC \[[^\]]+\] ===',
+        re.DOTALL
+    )
+    pass_block_pattern = re.compile(
+        r'=== BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\] ===\n(.*?)\n=== END LASSI-VERIFY PASSTHROUGH \[[^\]]+\] ===',
+        re.DOTALL
+    )
+    stats_pattern  = re.compile(r'Statistics:\s*min=([^,\s]+),\s*max=([^,\s]+),\s*mean=([^,\s]+)')
+    sample_pattern = re.compile(r'Sample_(first10|last10):(.*)')
+    sum_pattern    = re.compile(r'Sum:\s*([^\s]+)')
+    residual_patt  = re.compile(r'Residual:\s*([^\s]+)')
+    iter_patt      = re.compile(r'Iteration:\s*(\d+)')
+
+    def extract_meta_blocks(text):
+        return {m.group(1): m.group(2) for m in meta_block_pattern.finditer(text)}
+
+    def extract_pass_blocks(text):
+        return {m.group(1): m.group(2) for m in pass_block_pattern.finditer(text)}
+
+    def parse_stats(body):
+        m = stats_pattern.search(body)
+        if not m:
+            return None
+        try:
+            return {'min': float(m.group(1)), 'max': float(m.group(2)), 'mean': float(m.group(3))}
+        except ValueError:
+            return None
+
+    def parse_samples(body):
+        vals = []
+        for m in sample_pattern.finditer(body):
+            try:
+                vals.extend(float(v) for v in m.group(2).split())
+            except ValueError:
+                pass
+        return vals
+
+    def allclose(a, b, rtol, atol):
+        """numpy.allclose-style: |a-b| <= atol + rtol*max(|a|,|b|)"""
+        return abs(a - b) <= atol + rtol * max(abs(a), abs(b))
+
+    def both_finite(a, b):
+        return math.isfinite(a) and math.isfinite(b)
+
+    # ==========================================================================
+    # SCALING / SYMMETRY: check Z_stat ≈ factor * Y_stat
+    # Both types share the same quantitative ratio check; SYMMETRY uses factor=-1.
+    # ==========================================================================
+    if relation_type in ("SCALING", "SYMMETRY"):
+        meta_blocks = extract_meta_blocks(variant_stdout)
+        pass_blocks = extract_pass_blocks(original_passthrough_stdout)
+
+        if not meta_blocks and not pass_blocks:
+            return "SKIP", {
+                "verdict": "SKIP", "relation_name": relation_name, "factor": factor,
+                "blocks_compared": 0, "failures": [],
+                "summary": "SKIP: No METAMORPHIC or PASSTHROUGH blocks found in outputs.",
+            }
+
+        failures = []
+        blocks_compared = 0
+
+        # Iterate over designated observation points; fall back to all METAMORPHIC labels
+        labels_to_check = obs_points if obs_points else list(meta_blocks.keys())
+        for label in labels_to_check:
+            if label not in meta_blocks:
+                failures.append({"label": label, "stat": "metamorphic_block_missing",
+                                  "detail": "METAMORPHIC block absent in variant output"})
+                continue
+            if label not in pass_blocks:
+                failures.append({"label": label, "stat": "passthrough_block_missing",
+                                  "detail": "PASSTHROUGH block absent in original output"})
+                continue
+
+            orig_stats = parse_stats(pass_blocks[label])
+            var_stats  = parse_stats(meta_blocks[label])
+            blocks_compared += 1
+
+            if orig_stats is None or var_stats is None:
+                failures.append({"label": label, "stat": "parse_error",
+                                  "detail": "Could not parse Statistics line in one or both blocks"})
+                continue
+
+            # NaN/Inf guard: skip block if any statistic is non-finite
+            if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
+                continue
+
+            # atol anchored to |factor * orig_max| * rtol so near-zero fields
+            # are judged against the field's actual dynamic range.
+            orig_max_val = abs(orig_stats.get('max', 0.0))
+            atol = abs(factor) * orig_max_val * rtol
+
+            for stat_name, orig_val in orig_stats.items():
+                var_val = var_stats.get(stat_name)
+                if var_val is None:
+                    failures.append({"label": label, "stat": stat_name,
+                                      "orig": orig_val, "variant": "(missing)"})
+                    continue
+                # When factor < 0, min and max of the field swap under the transformation:
+                # the minimum of the scaled field is factor * orig_max (not factor * orig_min).
+                # Mean is always linear regardless of factor sign.
+                if factor < 0 and stat_name == 'min':
+                    expected_var = factor * orig_stats.get('max', orig_val)
+                elif factor < 0 and stat_name == 'max':
+                    expected_var = factor * orig_stats.get('min', orig_val)
+                else:
+                    expected_var = factor * orig_val
+                if not both_finite(var_val, expected_var):
+                    continue  # NaN/Inf guard
+                if not allclose(var_val, expected_var, rtol, atol):
+                    failures.append({
+                        "label": label, "stat": stat_name,
+                        "orig": orig_val, "expected_variant": expected_var,
+                        "actual_variant": var_val,
+                        "abs_err": abs(var_val - expected_var),
+                        "atol": atol, "rtol": rtol,
+                    })
+
+            # Element-wise sample comparison
+            orig_samples = parse_samples(pass_blocks[label])
+            var_samples  = parse_samples(meta_blocks[label])
+            for idx, (ov, vv) in enumerate(zip(orig_samples, var_samples)):
+                if not both_finite(ov, vv):
+                    continue
+                expected_vv = factor * ov
+                if not both_finite(vv, expected_vv):
+                    continue
+                if not allclose(vv, expected_vv, rtol, atol):
+                    failures.append({
+                        "label": label, "stat": f"sample[{idx}]",
+                        "orig": ov, "expected_variant": expected_vv,
+                        "actual_variant": vv,
+                        "abs_err": abs(vv - expected_vv),
+                        "atol": atol, "rtol": rtol,
+                    })
+
+        if failures:
+            lines = []
+            for f in failures:
+                if "detail" in f:
+                    lines.append(f"  [{f['label']}] {f['stat']}: {f['detail']}")
+                else:
+                    lines.append(
+                        f"  [{f['label']}] {f['stat']}: "
+                        f"orig={f.get('orig')}, expected_variant={f.get('expected_variant')}, "
+                        f"actual_variant={f.get('actual_variant')}, "
+                        f"abs_err={f.get('abs_err', '?'):.3e}"
+                    )
+            summary = (
+                f"FAIL: {len(failures)} discrepancy(ies) across {blocks_compared} block(s). "
+                f"Relation: {relation_name} (factor={factor}, rtol={rtol:.1e})\n"
+                + "\n".join(lines)
+            )
+            verdict = "FAIL"
+        else:
+            summary = (
+                f"PASS: {blocks_compared} block(s) satisfied {relation_type} relation "
+                f"(factor={factor}, rtol={rtol:.1e}, atol=|factor*orig_max|*rtol per block)."
+            )
+            verdict = "PASS"
+
+        return verdict, {
+            "verdict": verdict, "relation_name": relation_name, "factor": factor,
+            "blocks_compared": blocks_compared, "failures": failures, "summary": summary,
+        }
+
+    # ==========================================================================
+    # CONSERVATION: check |sum_after - sum_before| / |sum_before| < rtol
+    # The variant binary prints before/after Sum values in paired METAMORPHIC blocks.
+    # ==========================================================================
+    elif relation_type == "CONSERVATION":
+        meta_blocks = extract_meta_blocks(variant_stdout)
+
+        before_blocks = {k: v for k, v in meta_blocks.items() if 'before' in k.lower()}
+        after_blocks  = {k: v for k, v in meta_blocks.items() if 'after' in k.lower()}
+
+        if not before_blocks or not after_blocks:
+            return "SKIP", {
+                "verdict": "SKIP", "relation_name": relation_name, "factor": None,
+                "blocks_compared": 0, "failures": [],
+                "summary": "SKIP: Could not find before/after METAMORPHIC blocks for conservation check.",
+            }
+
+        failures = []
+        blocks_compared = 0
+
+        for bk, bv in before_blocks.items():
+            # Match to corresponding after block (replace 'before'→'after' in label)
+            ak = bk.lower().replace('before', 'after')
+            # Try exact match first, then any after block
+            matched_after_body = after_blocks.get(ak)
+            if matched_after_body is None and after_blocks:
+                matched_after_body = next(iter(after_blocks.values()))
+            if matched_after_body is None:
+                continue
+
+            bm = sum_pattern.search(bv)
+            am = sum_pattern.search(matched_after_body)
+            if not bm or not am:
+                continue
+
+            try:
+                s_before = float(bm.group(1))
+                s_after  = float(am.group(1))
+            except ValueError:
+                continue
+
+            if not (math.isfinite(s_before) and math.isfinite(s_after)):
+                continue  # NaN/Inf guard
+
+            blocks_compared += 1
+            if abs(s_before) < 1e-300:
+                # Near-zero baseline: absolute check
+                if abs(s_after - s_before) > rtol:
+                    failures.append({"label": f"{bk}/{ak}", "stat": "sum",
+                                      "before": s_before, "after": s_after,
+                                      "abs_err": abs(s_after - s_before)})
+            else:
+                rel_err = abs(s_after - s_before) / abs(s_before)
+                if rel_err > rtol:
+                    failures.append({"label": f"{bk}/{ak}", "stat": "sum_relative_change",
+                                      "before": s_before, "after": s_after,
+                                      "rel_err": rel_err, "rtol": rtol})
+
+        if failures:
+            summary = (
+                f"FAIL: Conservation violated for {len(failures)} block pair(s). "
+                f"Relation: {relation_name} (rtol={rtol:.1e})\n"
+                + "\n".join(
+                    f"  [{f['label']}]: before={f['before']:.6g}, after={f['after']:.6g}, "
+                    f"err={f.get('rel_err', f.get('abs_err', '?')):.3e}"
+                    for f in failures
+                )
+            )
+            verdict = "FAIL"
+        else:
+            summary = f"PASS: Conservation satisfied across {blocks_compared} block pair(s) (rtol={rtol:.1e})."
+            verdict = "PASS"
+
+        return verdict, {
+            "verdict": verdict, "relation_name": relation_name, "factor": None,
+            "blocks_compared": blocks_compared, "failures": failures, "summary": summary,
+        }
+
+    # ==========================================================================
+    # MONOTONICITY: check residual[k] >= residual[k+1] - rtol*|residual[k]|
+    # The variant binary prints per-iteration residuals in METAMORPHIC blocks.
+    # NOTE: Only applies to iterative solvers with monotone convergence guarantees.
+    # CG and non-monotone methods should NOT use this relation (catalog Section 6).
+    # ==========================================================================
+    elif relation_type == "MONOTONICITY":
+        meta_blocks = extract_meta_blocks(variant_stdout)
+
+        residuals = []
+        for label, body in meta_blocks.items():
+            im = iter_patt.search(body)
+            rm = residual_patt.search(body)
+            if im and rm:
+                try:
+                    residuals.append((int(im.group(1)), float(rm.group(1))))
+                except ValueError:
+                    pass
+
+        if len(residuals) < 2:
+            return "SKIP", {
+                "verdict": "SKIP", "relation_name": relation_name, "factor": None,
+                "blocks_compared": 0, "failures": [],
+                "summary": "SKIP: Fewer than 2 residual values found for monotonicity check.",
+            }
+
+        residuals.sort(key=lambda x: x[0])
+        failures = []
+        for i in range(len(residuals) - 1):
+            it_curr, r_curr = residuals[i]
+            it_next, r_next = residuals[i + 1]
+            if not (math.isfinite(r_curr) and math.isfinite(r_next)):
+                continue  # NaN/Inf guard
+            # Allow small numerical noise: r[k] >= r[k+1] - rtol * |r[k]|
+            if r_curr < r_next - rtol * abs(r_curr):
+                failures.append({"label": f"iter_{it_curr}_to_{it_next}",
+                                  "residual_k": r_curr, "residual_k1": r_next,
+                                  "increase": r_next - r_curr})
+
+        if failures:
+            summary = (
+                f"FAIL: Non-monotone residual at {len(failures)} transition(s). "
+                f"Relation: {relation_name} (rtol={rtol:.1e})\n"
+                + "\n".join(
+                    f"  iter {f['label']}: r[k]={f['residual_k']:.6g}, "
+                    f"r[k+1]={f['residual_k1']:.6g} (increase={f['increase']:.3e})"
+                    for f in failures
+                )
+            )
+            verdict = "FAIL"
+        else:
+            summary = (
+                f"PASS: Residual monotone non-increasing across {len(residuals)} "
+                f"iteration(s) (rtol={rtol:.1e})."
+            )
+            verdict = "PASS"
+
+        return verdict, {
+            "verdict": verdict, "relation_name": relation_name, "factor": None,
+            "blocks_compared": len(residuals), "failures": failures, "summary": summary,
+        }
+
+    # ==========================================================================
+    # Other relation types: SKIP in Phase 1.
+    # PERMUTATIVE and ROTATION require element-level array comparison
+    # (checking Z[perm(i)] ≈ Y[i]) which needs the full output array, not just
+    # aggregate statistics. Deferred to Phase 3.
+    # ==========================================================================
+    else:
+        return "SKIP", {
+            "verdict": "SKIP", "relation_name": relation_name, "factor": factor,
+            "blocks_compared": 0, "failures": [],
+            "summary": (
+                f"SKIP: Relation type '{relation_type}' not yet implemented "
+                f"(PERMUTATIVE and ROTATION require element-level array access — Phase 3)."
+            ),
+        }
+
+
+def run_metamorphic_variants(source_code, active_relations, contract,
+                              original_passthrough_stdout,
+                              llm_source, model, num_ctx, system_prompt,
+                              display_response,
+                              directory, file_name, code_compiler, code_compiler_kwds,
+                              build_script, make_script, code_build_script,
+                              exe_input_parameters,
+                              experiment_data_directory="generated_codes",
+                              code_version=None,
+                              verifyprompt=False):
+    """
+    Tier 3: Orchestrate metamorphic testing for one code (fail-fast variant loop).
+
+    For each active relation (ordered cheapest-first, as arranged by the LLM contract):
+      1. Generate a metamorphic variant (code_insert_metamorphic_variant)
+      2. Write variant to disk as generated_codes/{file_name}_mt_{relation_name}.cu
+      3. Compile with lassi.code_manager.compile_code
+      4. Execute with subprocess (no power measurement — Tier 3 must not contaminate timing)
+      5. Check with check_metamorphic_relation
+      6. Stop at first FAIL (fail-fast)
+
+    Updates relation["source_status"] in-place on each relation dict so Stage 0 can
+    filter active relations:
+        "PASS"  → relation is active (applicable to this computation)
+        "FAIL"  → relation is inactive (filtered out — source fails it, so it's inapplicable)
+        "SKIP"  → inactive (variant insertion, compile, or execute failed)
+
+    Called from Stage 0 (source filter, active_relations = all contract relations) and
+    from the main loop (active_relations = already-filtered tier3_active_relations).
+
+    Variant execution is lightweight (subprocess.run, no power monitoring, no wait time)
+    since Tier 3 uses separate binaries outside the timed performance runs.
+
+    Returns:
+        overall_verdict (str): "PASS" | "FAIL" | "SKIP"
+        results_list (list): per-relation result dicts
+        first_failure_diagnostic (dict): diagnostic from first FAIL, or {}
+    """
+    import lassi.code_manager  # local import to avoid circular dependencies
+
+    # Infer target language from code_compiler
+    target_lang = "HIP" if "hipcc" in code_compiler.lower() else "CUDA"
+
+    # Variant source files are written to experiment_data_directory (same folder as
+    # generated codes for this run, e.g. generated_codes/experiment/<custom_folder>/).
+    variant_dir = experiment_data_directory
+    os.makedirs(variant_dir, exist_ok=True)
+
+    results = []
+    first_failure_diagnostic = {}
+    any_ran = False  # True if at least one variant reached the execute+check step
+
+    for relation in active_relations:
+        relation_name = relation.get("name", "unknown")
+        relation_type = relation.get("type", "UNKNOWN")
+        print(f"\n----- Tier 3: testing relation '{relation_name}' ({relation_type}) -----")
+
+        # Skip null-factor SCALING/SYMMETRY (spatial reflection etc. require element-wise
+        # comparison across the full array — deferred to Phase 3).
+        if relation.get("factor") is None and relation_type in ("SCALING", "SYMMETRY"):
+            print(f"  [Tier 3] '{relation_name}' has null factor — spatial {relation_type} "
+                  f"requires Phase 3 element-wise comparison; SKIP")
+            relation["source_status"] = "SKIP"
+            results.append({"name": relation_name, "verdict": "SKIP",
+                             "reason": "null factor: spatial SYMMETRY/SCALING deferred to Phase 3"})
+            continue
+
+        # --- Determine variant file paths ---
+        # Stage 0 (code_version=None): write as _source — the validated SOURCE_verify reference.
+        # Main loop (code_version=N): write as _vN — versioned per generated code.
+        source_variant_path = f"{variant_dir}/{file_name}_mt_{relation_name}_source.cu"
+        if code_version is None:
+            variant_path = source_variant_path
+        else:
+            variant_path = f"{variant_dir}/{file_name}_mt_{relation_name}_v{code_version}.cu"
+
+        # --- Step 1: Generate metamorphic variant code ---
+        # Template: always read from the _source file (Stage 0 validated reference).
+        # During Stage 0 the _source file doesn't exist yet → template_code=None (LLM figures it out).
+        # In the main loop the _source file is already on disk → LLM replicates the same strategy.
+        template_code = None
+        if os.path.exists(source_variant_path):
+            try:
+                with open(source_variant_path, 'r') as _tf:
+                    template_code = _tf.read()
+            except OSError:
+                template_code = None
+
+        variant_code = code_insert_metamorphic_variant(
+            source_code, relation,
+            llm_source, model, num_ctx, system_prompt,
+            display_response,
+            template_code=template_code,
+            verifyprompt=verifyprompt
+        )
+        if not variant_code:
+            print(f"  [Tier 3] Variant insertion FAILED for '{relation_name}' — SKIP")
+            relation["source_status"] = "SKIP"
+            results.append({"name": relation_name, "verdict": "SKIP",
+                             "reason": "variant insertion failed"})
+            continue
+
+        # --- Step 2: Write variant to disk ---
+        with open(variant_path, 'w') as vf:
+            vf.write(variant_code)
+        print(f"  [Tier 3] Variant written to {variant_path}")
+
+        # --- Step 3: Compile ---
+        compile_err, variant_exe = lassi.code_manager.compile_code(
+            variant_path, target_lang, code_compiler, code_compiler_kwds
+        )
+        if compile_err:
+            print(f"  [Tier 3] Compile FAILED for '{relation_name}' — SKIP")
+            relation["source_status"] = "SKIP"
+            results.append({"name": relation_name, "verdict": "SKIP",
+                             "reason": "compile failed",
+                             "compile_error": compile_err[:300]})
+            continue
+
+        # --- Step 4: Execute (lightweight — no power measurement, no wait time) ---
+        # Variants run from the binary's directory to match execute_code behavior.
+        any_ran = True
+        try:
+            exe_abs = os.path.abspath(variant_exe)
+            exe_dir = os.path.dirname(exe_abs)
+            exe_base = os.path.basename(exe_abs)
+            result = subprocess.run(
+                ["./" + exe_base] + list(exe_input_parameters),
+                cwd=exe_dir,
+                capture_output=True, text=True, timeout=120
+            )
+            variant_stdout = result.stdout
+            print(f"\n----- < BEGIN: STANDARD OUTPUT FROM Tier 3 VARIANT EXECUTION > -----\n")
+            print(variant_stdout)
+            print(f"----- < END: Tier 3 Variant Output > -----\n")
+            if result.returncode != 0:
+                print(f"  [Tier 3] Execution warning: return code {result.returncode}")
+                if result.stderr:
+                    print(f"  stderr: {result.stderr[:400]}")
+        except subprocess.TimeoutExpired:
+            print(f"  [Tier 3] Execution TIMEOUT for '{relation_name}' — SKIP")
+            relation["source_status"] = "SKIP"
+            results.append({"name": relation_name, "verdict": "SKIP",
+                             "reason": "execution timeout"})
+            continue
+        except Exception as e:
+            print(f"  [Tier 3] Execution ERROR for '{relation_name}': {e} — SKIP")
+            relation["source_status"] = "SKIP"
+            results.append({"name": relation_name, "verdict": "SKIP",
+                             "reason": f"execution error: {e}"})
+            continue
+
+        # --- Step 5: Check metamorphic relation ---
+        tolerance = relation.get("tolerance", 1e-5)
+        verdict, diagnostic = check_metamorphic_relation(
+            variant_stdout, original_passthrough_stdout, relation, tolerance
+        )
+        relation["source_status"] = verdict  # "PASS", "FAIL", or "SKIP"
+        results.append({"name": relation_name, "verdict": verdict, "diagnostic": diagnostic})
+
+        print(f"\n----- Tier 3 [{relation_name}]: {verdict} -----")
+        if diagnostic.get("summary"):
+            print(diagnostic["summary"])
+
+        # Fail-fast: stop at first FAIL
+        if verdict == "FAIL":
+            first_failure_diagnostic = diagnostic
+            break
+
+    # --- Determine overall verdict ---
+    verdicts = [r["verdict"] for r in results]
+    if "FAIL" in verdicts:
+        overall_verdict = "FAIL"
+    elif not any_ran or not verdicts:
+        overall_verdict = "SKIP"
+    elif "PASS" in verdicts:
+        overall_verdict = "PASS"
+    else:
+        overall_verdict = "SKIP"  # All relations skipped
+
+    return overall_verdict, results, first_failure_diagnostic

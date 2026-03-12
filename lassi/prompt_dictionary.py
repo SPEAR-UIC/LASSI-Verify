@@ -196,6 +196,8 @@ class PromptDictionary:
 
             "passthrough_catalog": self.load_context_file("Passthrough_Catalog.md"),
 
+            "metamorphic_catalog": self.load_context_file("Metamorphic_Relations_Catalog.md"),
+
             "passthrough_compare_fallback": """You are comparing the stdout output of two GPU programs for empirical equivalence.
 
 Program A is SOURCE_verify — the source-as-specification reference whose observable behavior
