@@ -79,8 +79,7 @@ Insert assertions at these strategic locations:
     for (int i = 0; i < N; i++) {
         if (!isfinite(h_input[i])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [input_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [input_finite]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -98,8 +97,14 @@ cudaMemcpy(h_output, d_output, N * sizeof(double), cudaMemcpyDeviceToHost);
     for (int i = 0; i < N; i++) {
         if (!isfinite(h_output[i])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [output_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [output_finite]: FAIL\n"); fflush(stdout); }
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - tier1_complete (sentinel — confirms all assertion blocks were reached)
+{
+    printf("LASSI-VERIFY ASSERTIONS [tier1_complete]: PASS\n"); fflush(stdout);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -108,12 +113,16 @@ cudaMemcpy(h_output, d_output, N * sizeof(double), cudaMemcpyDeviceToHost);
 
 ## Required Block Format
 
-Every assertion you insert **must** follow one of the three patterns below exactly. The pipeline parses `LASSI-VERIFY ASSERTIONS [label]: PASS` or `FAIL` lines from stdout. Any other format (including bare `assert()` calls) will be silently ignored by `check_tier1_assertions()`.
+Every assertion you insert **must** use two block types: **Type 1** (FAIL-only check, one per observation point) and **Type 2** (completion sentinel, one per function). Together they tell the checker: "instrumentation ran and here are the failures (if any)."
+
+The pipeline parses `LASSI-VERIFY ASSERTIONS [label]: FAIL` lines (failures) and the `[tier1_complete]: PASS` sentinel line. Any other format (including bare `assert()` calls) will be silently ignored by `check_tier1_assertions()`.
 
 ### Rules
 - Label MUST be unique within the file (e.g., `input_ptrs_valid`, `array_dims_valid`, `input_finite`, `output_finite`, `matrix_sym`, `conservation_check`)
 - `#include <cstdio>` — not `<assert.h>`
-- Each block prints exactly ONE `LASSI-VERIFY ASSERTIONS [label]:` line
+- **Type 1 blocks print ONLY on FAIL** — zero stdout output on a clean run (avoids flooding)
+- **NEVER place assertion blocks inside solver loops or compute loops** — place them BEFORE and AFTER loops at observation points (function entry, pre-H→D transfer, post-D→H transfer, function exit)
+- **Type 2 sentinel (`[tier1_complete]`) must appear ONCE, AFTER all Type 1 blocks, OUTSIDE any loops**
 - LASSI-VERIFY assertion blocks are HOST-SIDE ONLY — never in `__global__` kernel functions
 - Code runs to completion — never use `assert()`, `exit()`, or `abort()`
 
@@ -123,8 +132,7 @@ Every assertion you insert **must** follow one of the three patterns below exact
 // LASSI_INSTRUMENTATION - [Brief description of what is being checked]
 {
     bool _t1_pass = (your_condition_here);
-    printf("LASSI-VERIFY ASSERTIONS [unique_label]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [unique_label]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -138,8 +146,7 @@ Every assertion you insert **must** follow one of the three patterns below exact
     for (int i = 0; i < N; i++) {
         if (!(per_element_condition_on_i)) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [unique_label]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [unique_label]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -160,8 +167,19 @@ for (int i = 0; i < N; i++) _t1_initial_sum += array[i];
     for (int i = 0; i < N; i++) _t1_final_sum += array[i];
     double _t1_denom = (fabs(_t1_initial_sum) > 1e-300) ? fabs(_t1_initial_sum) : 1.0;
     bool _t1_pass = (fabs(_t1_final_sum - _t1_initial_sum) / _t1_denom < 1e-6);
-    printf("LASSI-VERIFY ASSERTIONS [conservation_check]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [conservation_check]: FAIL\n"); fflush(stdout); }
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+### Pattern 4: Completion sentinel (REQUIRED — one per function, after all Type 1 blocks)
+Place this **once**, AFTER all Type 1 assertion blocks and OUTSIDE any loops. It confirms to the
+checker that all assertion blocks were reached and no failures were detected.
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - tier1_complete (sentinel — confirms all assertion blocks were reached)
+{
+    printf("LASSI-VERIFY ASSERTIONS [tier1_complete]: PASS\n"); fflush(stdout);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -290,8 +308,7 @@ cudaMemcpy(h_data, d_data, N*sizeof(double), cudaMemcpyDeviceToHost);
     for (int i = 0; i < N-1; i++) {
         if (!(h_data[i] <= h_data[i+1])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [sorted_order]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [sorted_order]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -307,8 +324,7 @@ cudaMemcpy(h_matrix, d_matrix, N*N*sizeof(double), cudaMemcpyDeviceToHost);
     for (int i = 0; i < N*N; i++) {
         if (!isfinite(h_matrix[i])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [matrix_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [matrix_finite]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -322,8 +338,7 @@ double residual = compute_residual(h_A, h_b, h_x, N);
 // LASSI_INSTRUMENTATION - Verify final residual satisfies convergence tolerance
 {
     bool _t1_pass = (residual < tol);
-    printf("LASSI-VERIFY ASSERTIONS [convergence_residual]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [convergence_residual]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -341,8 +356,7 @@ double residual = compute_residual(h_A, h_b, h_x, N);
 // LASSI_INSTRUMENTATION - Validate input pointers
 {
     bool _t1_pass = (ptr != NULL);
-    printf("LASSI-VERIFY ASSERTIONS [input_ptrs_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [input_ptrs_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -354,8 +368,7 @@ double residual = compute_residual(h_A, h_b, h_x, N);
 // LASSI_INSTRUMENTATION - Validate array dimensions
 {
     bool _t1_pass = (N > 0 && M > 0);
-    printf("LASSI-VERIFY ASSERTIONS [array_dims_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [array_dims_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -367,8 +380,7 @@ double residual = compute_residual(h_A, h_b, h_x, N);
 // LASSI_INSTRUMENTATION - Validate input value ranges
 {
     bool _t1_pass = (probability >= 0.0 && probability <= 1.0);
-    printf("LASSI-VERIFY ASSERTIONS [input_range_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [input_range_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -383,8 +395,7 @@ double residual = compute_residual(h_A, h_b, h_x, N);
     for (int i = 0; i < N; i++) {
         if (!isfinite(array[i])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [input_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [input_finite]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -396,8 +407,7 @@ double residual = compute_residual(h_A, h_b, h_x, N);
 // LASSI_INSTRUMENTATION - Validate buffer sizes
 {
     bool _t1_pass = (output_size >= required_size);
-    printf("LASSI-VERIFY ASSERTIONS [buffer_size_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [buffer_size_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -409,8 +419,7 @@ double residual = compute_residual(h_A, h_b, h_x, N);
 // LASSI_INSTRUMENTATION - Validate configuration parameters
 {
     bool _t1_pass = (num_threads > 0 && num_threads <= MAX_THREADS && tolerance > 0.0 && tolerance < 1.0);
-    printf("LASSI-VERIFY ASSERTIONS [config_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [config_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -422,8 +431,7 @@ double residual = compute_residual(h_A, h_b, h_x, N);
 // LASSI_INSTRUMENTATION - Validate structure integrity
 {
     bool _t1_pass = (matrix->rows == matrix->cols);
-    printf("LASSI-VERIFY ASSERTIONS [struct_integrity]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [struct_integrity]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -446,8 +454,7 @@ double _t1_initial_total = compute_total(array, N);
     double _t1_final_total = compute_total(array, N);
     double _t1_denom = (fabs(_t1_initial_total) > 1e-300) ? fabs(_t1_initial_total) : 1.0;
     bool _t1_pass = (fabs(_t1_final_total - _t1_initial_total) / _t1_denom < 1e-6);
-    printf("LASSI-VERIFY ASSERTIONS [mass_energy_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [mass_energy_conserved]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -465,8 +472,7 @@ int _t1_initial_count = count_elements(input, N);
 {
     int _t1_final_count = count_elements(output, M);
     bool _t1_pass = (_t1_initial_count == _t1_final_count);
-    printf("LASSI-VERIFY ASSERTIONS [element_count_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [element_count_conserved]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -487,8 +493,7 @@ for (int i = 0; i < N; i++) _t1_initial_sum += array[i];
     for (int i = 0; i < N; i++) _t1_final_sum += array[i];
     double _t1_denom = (fabs(_t1_initial_sum) > 1e-300) ? fabs(_t1_initial_sum) : 1.0;
     bool _t1_pass = (fabs(_t1_final_sum - _t1_initial_sum) / _t1_denom < 1e-6);
-    printf("LASSI-VERIFY ASSERTIONS [sum_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [sum_conserved]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -506,8 +511,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
 {
     double _t1_final_norm = compute_l2_norm(vector, N);
     bool _t1_pass = (fabs(_t1_final_norm - _t1_initial_norm) < 1e-6);
-    printf("LASSI-VERIFY ASSERTIONS [norm_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [norm_conserved]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -525,8 +529,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
         _t1_sum += probs[i];
     }
     if (_t1_pass) _t1_pass = (fabs(_t1_sum - 1.0) < 1e-6);
-    printf("LASSI-VERIFY ASSERTIONS [prob_distribution_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [prob_distribution_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -547,8 +550,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
             if (fabs(matrix[i*N + j] - matrix[j*N + i]) >= 1e-10) { _t1_pass = false; break; }
         }
     }
-    printf("LASSI-VERIFY ASSERTIONS [matrix_sym]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [matrix_sym]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -561,8 +563,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
 {
     // For commutative operations like addition or multiplication
     bool _t1_pass = (result_AB == result_BA);
-    printf("LASSI-VERIFY ASSERTIONS [perm_sym]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [perm_sym]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -577,8 +578,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
     for (int i = 0; i < N/2; i++) {
         if (fabs(field[i] - field[N-1-i]) >= tolerance) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [reflection_sym]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [reflection_sym]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -593,8 +593,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
     // (actual implementation depends on coordinate system)
     double center_value = field[N/2][N/2];
     bool _t1_pass = true; // fill with radial checks as needed
-    printf("LASSI-VERIFY ASSERTIONS [rotational_sym]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [rotational_sym]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -613,8 +612,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
     for (int i = 0; i < N - 1; i++) {
         if (!(array[i] <= array[i+1])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [nondecreasing_seq]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [nondecreasing_seq]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -629,8 +627,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
     for (int i = 0; i < N - 1; i++) {
         if (!(array[i] >= array[i+1])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [nonincreasing_seq]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [nonincreasing_seq]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -642,8 +639,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
 // LASSI_INSTRUMENTATION - Convergence monotonicity check
 {
     bool _t1_pass = (current_error < previous_error * (1.0 + 1e-10));
-    printf("LASSI-VERIFY ASSERTIONS [error_decreasing]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [error_decreasing]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -660,8 +656,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
             _t1_pass = false; break;
         }
     }
-    printf("LASSI-VERIFY ASSERTIONS [bounded_monotone]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [bounded_monotone]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -680,8 +675,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
     for (int i = 0; i < N; i++) {
         if (!(temperature[i] > 0.0) || !(density[i] > 0.0)) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [positivity]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [positivity]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -696,8 +690,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
     for (int i = 0; i < N; i++) {
         if (!(count[i] >= 0) || !(concentration[i] >= 0.0)) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [non_negativity]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [non_negativity]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -712,8 +705,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
     for (int i = 0; i < N; i++) {
         if (!(occupancy[i] <= 1.0) || !(efficiency[i] <= 1.0)) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [upper_bounds]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [upper_bounds]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -730,8 +722,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
         double speed = sqrt(vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
         if (!(speed <= C)) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [speed_of_light]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [speed_of_light]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -743,8 +734,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
 // LASSI_INSTRUMENTATION - Thermodynamic constraints check
 {
     bool _t1_pass = (temperature > 0.0 && entropy_change >= 0.0 && pressure > 0.0);
-    printf("LASSI-VERIFY ASSERTIONS [thermodynamic]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [thermodynamic]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -762,8 +752,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
 {
     double _t1_final_charge = compute_total_charge(particles, N);
     bool _t1_pass = (fabs(_t1_final_charge - _t1_initial_charge) < 1e-10);
-    printf("LASSI-VERIFY ASSERTIONS [charge_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [charge_conserved]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -782,8 +771,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
     for (int i = 0; i < N; i++) {
         if (isnan(result[i])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [output_no_nan]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [output_no_nan]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -798,8 +786,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
     for (int i = 0; i < N; i++) {
         if (isinf(result[i])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [output_no_inf]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [output_no_inf]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -814,8 +801,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
     for (int i = 0; i < N; i++) {
         if (!isfinite(result[i])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [output_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [output_finite]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -828,8 +814,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
 {
     double condition_number = estimate_condition_number(matrix, N);
     bool _t1_pass = (condition_number < 1e12);
-    printf("LASSI-VERIFY ASSERTIONS [condition_number]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [condition_number]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -842,8 +827,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
 {
     double _t1_rel_err = fabs(computed - expected) / fabs(expected);
     bool _t1_pass = (_t1_rel_err < tolerance);
-    printf("LASSI-VERIFY ASSERTIONS [rel_error_bound]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [rel_error_bound]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -866,8 +850,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
             }
         }
     }
-    printf("LASSI-VERIFY ASSERTIONS [sparsity_preserved]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [sparsity_preserved]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -887,8 +870,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
         }
         if (!(diag >= row_sum)) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [diag_dominant]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [diag_dominant]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -905,8 +887,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
         if (!(matrix[i*N + i] > 0.0)) { _t1_pass = false; break; }
     }
     // For full check, would need eigenvalue computation (expensive)
-    printf("LASSI-VERIFY ASSERTIONS [pos_definite_diag]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [pos_definite_diag]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -922,8 +903,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
         _t1_dot += vector1[i] * vector2[i];
     }
     bool _t1_pass = (fabs(_t1_dot) < 1e-10);
-    printf("LASSI-VERIFY ASSERTIONS [orthogonality]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [orthogonality]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -968,8 +948,7 @@ double _t1_initial_charge = compute_total_charge(particles, N);
             if (!isfinite(h_data[i])) { _t1_pass = false; break; }
         }
     }
-    printf("LASSI-VERIFY ASSERTIONS [htod_input_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [htod_input_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 cudaMemcpy(d_data, h_data, N*sizeof(double), cudaMemcpyHostToDevice);
@@ -983,8 +962,7 @@ cudaMemcpy(h_result, d_result, N*sizeof(double), cudaMemcpyDeviceToHost);
     for (int i = 0; i < N; i++) {
         if (!isfinite(h_result[i])) { _t1_pass = false; break; }
     }
-    printf("LASSI-VERIFY ASSERTIONS [dtoh_output_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [dtoh_output_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -995,8 +973,7 @@ cudaMemcpy(h_result, d_result, N*sizeof(double), cudaMemcpyDeviceToHost);
 // LASSI_INSTRUMENTATION - Validate kernel launch parameters
 {
     bool _t1_pass = (threads > 0 && threads <= 1024 && blocks > 0);
-    printf("LASSI-VERIFY ASSERTIONS [kernel_params_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-    fflush(stdout);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [kernel_params_valid]: FAIL\n"); fflush(stdout); }
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -1118,8 +1095,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
     {
         bool _t1_pass = (A != nullptr && b != nullptr && x != nullptr
                          && N > 0 && max_iter > 0 && tol > 0.0 && tol < 1.0);
-        printf("LASSI-VERIFY ASSERTIONS [input_ptrs_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-        fflush(stdout);
+        if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [input_ptrs_valid]: FAIL\n"); fflush(stdout); }
     }
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -1130,8 +1106,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
         for (int i = 0; i < N*N; i++) {
             if (!isfinite(A[i])) { _t1_pass = false; break; }
         }
-        printf("LASSI-VERIFY ASSERTIONS [matrix_A_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-        fflush(stdout);
+        if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [matrix_A_finite]: FAIL\n"); fflush(stdout); }
     }
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -1142,8 +1117,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
         for (int i = 0; i < N; i++) {
             if (!isfinite(b[i])) { _t1_pass = false; break; }
         }
-        printf("LASSI-VERIFY ASSERTIONS [vector_b_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-        fflush(stdout);
+        if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [vector_b_finite]: FAIL\n"); fflush(stdout); }
     }
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -1154,8 +1128,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
         for (int i = 0; i < N; i++) {
             if (!isfinite(x[i])) { _t1_pass = false; break; }
         }
-        printf("LASSI-VERIFY ASSERTIONS [init_guess_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-        fflush(stdout);
+        if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [init_guess_finite]: FAIL\n"); fflush(stdout); }
     }
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -1166,8 +1139,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
         for (int i = 0; i < N; i++) {
             if (!(fabs(A[i*N + i]) > 1e-14)) { _t1_pass = false; break; }
         }
-        printf("LASSI-VERIFY ASSERTIONS [diag_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
-        fflush(stdout);
+        if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [diag_valid]: FAIL\n"); fflush(stdout); }
     }
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -1206,8 +1178,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
         for (int i = 0; i < N; i++) {
             if (!isfinite(x[i])) { _t1_pass = false; break; }
         }
-        printf("LASSI-VERIFY ASSERTIONS [output_x_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
-        fflush(stdout);
+        if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [output_x_finite]: FAIL\n"); fflush(stdout); }
     }
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -1225,8 +1196,14 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
         }
         _t1_residual_norm = sqrt(_t1_residual_norm);
         bool _t1_pass = (_t1_residual_norm < tol * 10.0);
-        printf("LASSI-VERIFY ASSERTIONS [residual_check]: %s\n", _t1_pass ? "PASS" : "FAIL");
-        fflush(stdout);
+        if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [residual_check]: FAIL\n"); fflush(stdout); }
+    }
+    // <<< END LASSI-VERIFY ASSERTIONS <<<
+
+    // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+    // LASSI_INSTRUMENTATION - tier1_complete (sentinel — confirms all assertion blocks were reached)
+    {
+        printf("LASSI-VERIFY ASSERTIONS [tier1_complete]: PASS\n"); fflush(stdout);
     }
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -1238,10 +1215,11 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
 1. ✅ Assertions placed on **host side** (not in kernel)
 2. ✅ Validation **before** host-to-device transfer
 3. ✅ Validation **after** device-to-host transfer
-4. ✅ All assertions use `<cstdio>` for printf() and fflush(); code runs to completion — no assert(), exit(), or abort()
-5. ✅ Assertions check **transformation-invariant properties** only
-6. ✅ Original kernel code **unchanged**
-7. ✅ Clear `// LASSI_INSTRUMENTATION` markers
+4. ✅ **FAIL-only printing** — no stdout flooding on clean runs; sentinel confirms instrumentation ran
+5. ✅ All assertions use `<cstdio>` for printf() and fflush(); code runs to completion — no assert(), exit(), or abort()
+6. ✅ Assertions check **transformation-invariant properties** only
+7. ✅ Original kernel code **unchanged**
+8. ✅ Clear `// LASSI_INSTRUMENTATION` markers
 8. ✅ No symmetry assumption inserted — Jacobi does not require symmetric matrices
 
 ---

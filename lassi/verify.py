@@ -202,26 +202,40 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
        they ensure assertions survive through subsequent LLM-driven transformation steps
        without being removed or modified.
 
-       **Required block format** (follow this pattern exactly):
+       **Two required block types — use BOTH:**
+
+       **Type 1 — Per-observation-point check (print ONLY on FAIL):**
     ```cpp
        // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
        // LASSI_INSTRUMENTATION - [Brief description of invariant being checked]
        {
            bool _t1_pass = (your_condition_here);
-           printf("LASSI-VERIFY ASSERTIONS [label]: %s\n", _t1_pass ? "PASS" : "FAIL");
-           fflush(stdout);
+           if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [label]: FAIL\n"); fflush(stdout); }
+       }
+       // <<< END LASSI-VERIFY ASSERTIONS <<<
+    ```
+
+       **Type 2 — Completion sentinel (ONE per function, AFTER all Type 1 blocks, OUTSIDE all loops):**
+    ```cpp
+       // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+       // LASSI_INSTRUMENTATION - tier1_complete (sentinel — confirms all assertion blocks were reached)
+       {
+           printf("LASSI-VERIFY ASSERTIONS [tier1_complete]: PASS\n"); fflush(stdout);
        }
        // <<< END LASSI-VERIFY ASSERTIONS <<<
     ```
 
        **CRITICAL format rules:**
-       - The printf line MUST use exactly this format: `"LASSI-VERIFY ASSERTIONS [label]: %s\n"`
-         where `[label]` is a short identifier matching the LASSI_INSTRUMENTATION comment.
-       - Always call `fflush(stdout)` after printf so output is not lost if the process exits.
+       - Type 1 blocks print **only on FAIL** — no output when the condition passes. The pipeline
+         infers PASS for all labels not explicitly failed.
+       - The sentinel (`[tier1_complete]`) MUST be placed AFTER all Type 1 blocks and OUTSIDE any
+         solver or compute loops. It tells the checker that instrumentation ran to completion.
+       - **DO NOT place assertion blocks inside solver loops or compute loops.** Place them
+         BEFORE the loop (validate inputs) and AFTER the loop (validate outputs/convergence).
+       - `[label]` is a short unique identifier matching the LASSI_INSTRUMENTATION comment.
        - Do NOT use C `assert()` — it can be silenced by `-DNDEBUG` compiler flags.
-       - Do NOT call `exit()` — the pipeline collects ALL assertion results before deciding;
-         exiting early hides subsequent failures.
-       - Multiple assertions should each be their own separate block with a unique label.
+       - Do NOT call `exit()` — the pipeline collects ALL assertion results before deciding.
+       - Multiple assertions should each be their own separate Type 1 block with a unique label.
 
     4. **Use ONLY standard library functions:**
        - `#include <cstdio>` for `printf()` and `fflush()`
@@ -620,13 +634,24 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
 # TIER 1: DETERMINISTIC ASSERTION CHECK
 # =============================================================================
 
+_TIER1_SENTINEL_LABEL = "tier1_complete"  # Completion sentinel label (see code_insert_asserts prompt)
+
+
 def check_tier1_assertions(stdout):
     """
     Tier 1: Deterministic check of invariant assertion results from generated code stdout.
 
-    Parses lines of the form:
-        LASSI-VERIFY ASSERTIONS [label]: PASS
-        LASSI-VERIFY ASSERTIONS [label]: FAIL
+    Two output formats are supported:
+      - FAIL-only (current): each Type 1 block prints only on FAIL; a 'tier1_complete' sentinel
+        block prints PASS unconditionally to confirm instrumentation ran to completion.
+      - Legacy (backward compat): each block prints PASS or FAIL unconditionally.
+
+    Parsing logic:
+      - Sentinel ([tier1_complete]: PASS) → stripped from label lists; recorded as sentinel_found.
+      - Any FAIL label(s) → verdict FAIL (regardless of sentinel).
+      - Sentinel present + no FAILs → verdict PASS (FAIL-only format: all checks passed silently).
+      - Sentinel absent + PASS labels present → verdict PASS (legacy format).
+      - No assertion output at all → verdict SKIP (no instrumentation or code crashed early).
 
     All assertion results are collected before returning — giving the LLM full visibility
     into every failing invariant, not just the first one.
@@ -648,23 +673,33 @@ def check_tier1_assertions(stdout):
         else:
             passing_labels.append(label)
 
+    # Extract and remove sentinel from label lists
+    sentinel_found = _TIER1_SENTINEL_LABEL in passing_labels
+    passing_labels = [l for l in passing_labels if l != _TIER1_SENTINEL_LABEL]
+    failing_labels = [l for l in failing_labels if l != _TIER1_SENTINEL_LABEL]
+
     total = len(passing_labels) + len(failing_labels)
 
-    if total == 0:
+    if not sentinel_found and total == 0:
         return "SKIP", {
             "verdict": "SKIP", "failing_labels": [], "passing_labels": [],
             "pass_count": 0, "fail_count": 0,
-            "summary": "SKIP: No LASSI-VERIFY ASSERTIONS lines found in stdout.",
+            "summary": "SKIP: No LASSI-VERIFY ASSERTIONS output found in stdout.",
         }
 
     if failing_labels:
         summary = (
-            f"FAIL: {len(failing_labels)}/{total} assertion(s) violated: "
+            f"FAIL: {len(failing_labels)} assertion(s) violated: "
             + ", ".join(f"[{l}]" for l in failing_labels)
-            + (f". Passing: " + ", ".join(f"[{l}]" for l in passing_labels) if passing_labels else "")
+            + (". Passing: " + ", ".join(f"[{l}]" for l in passing_labels) if passing_labels else "")
         )
         verdict = "FAIL"
+    elif sentinel_found:
+        # FAIL-only format: sentinel present, no FAILs → all checks passed silently
+        summary = "PASS: All assertion(s) passed (sentinel confirmed, no failures detected)."
+        verdict = "PASS"
     else:
+        # Legacy format: PASS lines found, no sentinel, no FAILs
         summary = f"PASS: All {total} assertion(s) passed."
         verdict = "PASS"
 

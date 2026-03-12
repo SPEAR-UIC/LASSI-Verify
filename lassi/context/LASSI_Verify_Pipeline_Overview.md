@@ -197,24 +197,33 @@ Source file (.cu)
 
 **Formal grounding:** Owicki-Gries auxiliary variable assertions.
 
-**What it does:** The LLM inserts runtime assertion checks directly into the source C++ code as labeled comment blocks. These blocks execute inline during each run and print `PASS` or `FAIL` to stdout for each assertion.
+**What it does:** The LLM inserts runtime assertion checks directly into the source C++ code as labeled comment blocks. These blocks execute inline during each run and print to stdout **only on FAIL** (zero stdout on a clean run), plus a single `tier1_complete` sentinel that confirms instrumentation ran to completion.
 
-**Block format (in C++ source):**
+**Block format — two types (in C++ source):**
 ```cpp
+// Type 1: per-observation-point check (print only on FAIL)
 // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - [description]
 {
-    // [assertion_label]: description
-    bool _assertion = (condition);
-    printf("LASSI-VERIFY ASSERTIONS [assertion_label]: %s\n", _assertion ? "PASS" : "FAIL");
+    bool _t1_pass = (condition);
+    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [assertion_label]: FAIL\n"); fflush(stdout); }
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+
+// Type 2: completion sentinel (ONE per function, AFTER all Type 1 blocks, OUTSIDE all loops)
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - tier1_complete (sentinel)
+{
+    printf("LASSI-VERIFY ASSERTIONS [tier1_complete]: PASS\n"); fflush(stdout);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
-**Catalog:** `Invariant_Assertions_Catalog.md` — provides a 3-layer framework (universal, domain, problem-specific) with examples for GPU kernels. All examples use the printf PASS/FAIL pattern (not `assert()`), matching what `check_tier1_assertions()` parses from stdout.
+**Catalog:** `Invariant_Assertions_Catalog.md` — provides a 3-layer framework (universal, domain, problem-specific) with examples for GPU kernels. All examples use the FAIL-only printf pattern (not `assert()`). The sentinel pattern is required and documented in Pattern 4.
 
 **When it runs (instrumentation):** Applied once at pipeline start to produce SOURCE_verify. All LASSI-generated codes inherit the assertion blocks because they are generated from SOURCE_verify.
 
-**When it runs (per-iteration checking — Option B):** Inside the main while loop, after each generated code executes, the pipeline parses its stdout for all `LASSI-VERIFY ASSERTIONS [label]: PASS/FAIL` lines via `check_tier1_assertions()`. This gives full visibility into every violated assertion before deciding to retry.
+**When it runs (per-iteration checking — Option B):** Inside the main while loop, after each generated code executes, the pipeline parses its stdout via `check_tier1_assertions()`. FAIL lines → FAIL verdict; sentinel present + no FAILs → PASS; no assertion output → SKIP. This gives full visibility into every violated assertion before deciding to retry, without flooding stdout on clean runs.
 
 **Self-correction:** On FAIL, the failing assertion labels and summary are fed back to the LLM with the instruction to fix the code without removing any LASSI-VERIFY blocks. Up to 3 retries per code (per-code counter resets on fresh generation). When the per-code budget exhausts, the code is immediately marked INVALID and the pipeline `continue`s — skipping Tier 2, Tier 3, and the judge entirely. This fail-fast behavior avoids unnecessary overhead when Tier 1 has already determined the code is incorrect.
 
