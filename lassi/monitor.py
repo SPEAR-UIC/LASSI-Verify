@@ -17,6 +17,7 @@ Works on Linux GUI, macOS, Windows, and over SSH tunnels (forward port 5007).
 No external dependencies — uses only the Python standard library.
 """
 
+import os
 import sys
 import re
 import json
@@ -49,6 +50,21 @@ def _publish(event_type: str, payload: str) -> None:
         _history.append(msg)
         for q in _subscribers:
             q.put(msg)
+
+
+def _log_lines() -> list:
+    """Return all log-type history entries as formatted '[HH:MM:SS] text\n' strings."""
+    lines = []
+    with _lock:
+        snapshot = list(_history)
+    for msg in snapshot:
+        try:
+            ev = json.loads(msg)
+            if ev.get("type") == "log":
+                lines.append(f"[{ev['ts']}] {ev['data']}\n")
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return lines
 
 
 # ── stdout/stderr tee stream ────────────────────────────────────────────────────
@@ -134,6 +150,7 @@ body {
   <h1>&#9654; LASSI Monitor</h1>
   <span id="status" class="err">connecting…</span>
   <button class="btn on" id="asbtn" onclick="toggleAS()">Auto-scroll</button>
+  <button class="btn" onclick="saveLog()">&#11015; Save log</button>
 </div>
 <div id="body">
   <div id="log"></div>
@@ -150,6 +167,17 @@ function toggleAS() {
   const b = document.getElementById('asbtn');
   b.textContent = 'Auto-scroll';
   b.className   = autoScroll ? 'btn on' : 'btn';
+}
+function saveLog() {
+  fetch('/log')
+    .then(r => r.text())
+    .then(text => {
+      const ts  = new Date().toISOString().slice(0,19).replace(/[T:]/g, '-');
+      const a   = document.createElement('a');
+      a.href     = 'data:text/plain;charset=utf-8,' + encodeURIComponent(text);
+      a.download = 'monitor_log_' + ts + '.txt';
+      a.click();
+    });
 }
 function esc(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -229,6 +257,14 @@ class _Handler(BaseHTTPRequestHandler):
                     if q in _subscribers:
                         _subscribers.remove(q)
 
+        elif self.path == "/log":
+            body = "".join(_log_lines()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type",   "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         else:
             self.send_error(404)
 
@@ -237,6 +273,31 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # ── public API ──────────────────────────────────────────────────────────────────
+
+def save_log(path: str = None) -> str:
+    """Write the full monitor log to a text file.
+
+    Each line is formatted as '[HH:MM:SS] text'.  Figures are not included.
+    Typically called at the end of the pipeline run cell to archive the log
+    alongside the other experiment output files.
+
+    Args:
+        path: Destination file path.  If None, writes to monitor_log_<timestamp>.txt
+              in the current working directory.
+
+    Returns:
+        Absolute path of the written file.
+    """
+    if path is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"monitor_log_{ts}.txt"
+    path = os.path.abspath(path)
+    lines = _log_lines()
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    print(f"[monitor] Log saved → {path}  ({len(lines)} lines)")
+    return path
+
 
 def log_figure(fig=None) -> None:
     """Send a matplotlib figure to the monitor dashboard as a PNG image.
