@@ -65,12 +65,22 @@ is checked by the comparison parser; including an unchecked or unreliable field 
 misleading. Use `min`, `max`, `mean`, and samples — these provide sufficient correctness
 evidence without N-scaling artifacts.
 
-**Label naming convention:** Use descriptive, unique labels that identify the observation
-point. Examples:
-- `[final_solution]` — the primary output array at program completion
-- `[iteration_100_residual]` — residual norm captured every 100 iterations
-- `[post_kernel_fieldA]` — field array after a named kernel completes
-- `[convergence_residual]` — scalar convergence metric
+**Label naming convention:** Use descriptive labels that identify the observation point.
+
+- **Single-location block:** the label must be unique across all passthrough blocks (each
+  identifies a distinct observation point). Examples:
+  - `[final_solution]` — the primary output array at program completion
+  - `[post_kernel_fieldA]` — field array after a named kernel completes
+  - `[convergence_residual]` — scalar convergence metric
+
+- **Block inside an outer loop over configurations or parameters** (e.g., segment sizes,
+  grid levels, tile sizes, time steps): use the **same label on every loop iteration**.
+  The LASSI-Verify checker compares repeated-label occurrences **positionally** (occurrence
+  1 vs. 1, 2 vs. 2, …), so every configuration is independently verified. Do NOT use
+  per-iteration suffixes like `[output_segsize_16]`, `[output_segsize_32]`, … — these are
+  treated as separate blocks and break positional matching. Examples:
+  - `[post_segmented_reduction]` repeated for segment_size = 16, 32, 64, … ✅
+  - `[field_step]` repeated every T/4 time steps of a stencil solver ✅
 
 **Floating-point precision:** Always use `%.17g` format for float/double values to preserve
 full IEEE 754 double precision. This ensures the deterministic comparison parser can detect
@@ -128,11 +138,20 @@ Insert after any kernel that produces a primary output or significantly transfor
 state. Place AFTER cudaDeviceSynchronize() (or equivalent) and AFTER the D→H copy that
 brings results to the host.
 
-### Priority 3: Iteration Boundaries for Convergent Algorithms
-For iterative solvers (Jacobi, CG, GMRES, etc.), capture the convergence metric (residual,
-norm, error) at regular intervals (every N iterations). Choose N so that ~3-5 intermediate
-checkpoints are created, not one per iteration. This catches convergence divergence early
-without excessive output volume.
+### Priority 3: Iteration Boundaries — Convergent Algorithms and Parametric Sweeps
+Two distinct patterns both require a block placed **inside** an outer loop:
+
+**Convergent algorithms** (Jacobi, CG, GMRES, etc.): capture the convergence metric
+(residual, norm, error) at regular intervals (every N iterations). Choose N so that ~3-5
+intermediate checkpoints are created, not one per iteration. This catches convergence
+divergence early without excessive output volume.
+
+**Parametric sweep loops** — an outer loop that iterates over different configurations
+(segment sizes, grid resolutions, tile sizes, bandwidth values, etc.) and calls a kernel
+or sub-routine once per configuration: place the passthrough block **inside** that loop,
+using the **same label every iteration**. Do NOT hoist a single capture outside the loop —
+hoisting loses all but one configuration and masks correctness differences in other
+parameter settings.
 
 ### Priority 4: Multi-Phase Pipeline Boundaries
 For codes with multiple distinct computation phases (e.g., preprocessing → main solve →
@@ -230,6 +249,40 @@ Key observation points:
 - Output hash/index array at completion: `[final_hashes]`
 - Statistics (min, max, mean) are meaningful even when individual values are hash-dependent
 
+### Parametric Sweep Loops (Segment Reduction, Bandwidth Sweeps, Grid Scans, etc.)
+Codes that run the same kernel for multiple parameter values (segment sizes, tile sizes,
+grid levels, bandwidth steps) inside an outer `for` loop over those parameters.
+
+Key observation points:
+- Output buffer **inside** the outer parameter loop, captured once per configuration: use
+  the **same label every iteration** (e.g., `[post_segmented_reduction]`). The checker
+  compares occurrence 1 vs. 1, 2 vs. 2, etc. All configurations are verified independently.
+- Final aggregate result at program completion if one exists: `[final_aggregate]`
+
+**Anti-pattern to avoid:** hoisting the passthrough block outside the loop and capturing
+only the last (or a representative) configuration. This hides correctness regressions in
+all other parameter settings.
+
+```cpp
+// CORRECT — block INSIDE outer parameter loop, same label each iteration
+for (int seg_size : seg_sizes) {
+    launch_kernel(..., seg_size, ...);
+    cudaDeviceSynchronize();
+    // >>> BEGIN LASSI-VERIFY PASSTHROUGH [post_segmented_reduction] >>>
+    { /* D→H copy, stats, printf with label [post_segmented_reduction] */ }
+    // <<< END LASSI-VERIFY PASSTHROUGH <<<
+}
+
+// WRONG — block OUTSIDE loop, captures only the last configuration
+for (int seg_size : seg_sizes) {
+    launch_kernel(..., seg_size, ...);
+    cudaDeviceSynchronize();
+}
+// >>> BEGIN LASSI-VERIFY PASSTHROUGH [post_segmented_reduction] >>>  ← hoisted: misses all but last
+{ /* ... */ }
+// <<< END LASSI-VERIFY PASSTHROUGH <<<
+```
+
 ---
 
 ## Anti-Patterns: What NOT to Do
@@ -269,6 +322,22 @@ cudaMemcpy(h_intermediate, d_intermediate, ...);  // Extra sync point mid-kernel
 ```
 **CORRECT:** Only add passthrough blocks at natural boundaries where D→H copies already
 exist or where adding one after cudaDeviceSynchronize() does not change the algorithm flow.
+
+### ❌ WRONG: Hoisting a loop-internal block outside the loop
+```cpp
+// BAD — block placed after the loop captures only the last parameter configuration
+for (int seg_size : seg_sizes) {
+    launch_kernel(..., seg_size, ...);
+    cudaDeviceSynchronize();
+}
+// >>> BEGIN LASSI-VERIFY PASSTHROUGH [post_segmented_reduction] >>>
+{ /* captures only the final seg_size — all others go unchecked */ }
+// <<< END LASSI-VERIFY PASSTHROUGH <<<
+```
+**CORRECT:** Place the block **inside** the loop, using the **same label every iteration**.
+The LASSI-Verify checker compares repeated-label occurrences positionally, so every
+configuration is independently verified. Never use per-iteration unique labels
+(e.g., `[output_seg_16]`, `[output_seg_32]`) — they break positional matching.
 
 ---
 

@@ -41,17 +41,30 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
         - Appropriate memory copy function and DeviceToHost constant
 
         **STEP 2: Select observation points**
-        Using the passthrough catalog guidance below, identify 2-5 observation points where the
-        source and any refactored code should produce identical output:
+        Using the passthrough catalog guidance below, identify the key observation points where the
+        source and any refactored code should produce identical output. Aim for 2-5 distinct code
+        locations — a block placed inside a loop counts as ONE location even though it executes
+        multiple times.
+
         - REQUIRED: at least one block capturing the primary output buffer at program completion
-        - OPTIONAL: intermediate checkpoints after major kernels or at iteration boundaries
+        - REQUIRED if the code contains an outer loop over configurations or parameters (e.g.,
+          different segment sizes, grid levels, tile sizes, time steps): place the passthrough
+          block INSIDE that loop so every configuration is captured independently.
+          Use the SAME label each iteration — the LASSI-Verify checker compares loop iterations
+          positionally and explicitly supports repeated labels. Do NOT hoist to outside the loop
+          and capture only a single representative iteration.
+        - OPTIONAL: additional intermediate checkpoints after major kernels or phase boundaries
         - Insert AFTER cudaDeviceSynchronize() (or equivalent) and AFTER D→H copy where applicable
         - Insert BEFORE any memory deallocations (cudaFree, hipFree, free)
 
         **STEP 3: Insert labeled passthrough blocks**
 
-        For each observation point, insert a block with this EXACT structure. The label must be
-        unique, descriptive, and consistent in the BEGIN and END markers:
+        For each observation point, insert a block with this EXACT structure. Label rules:
+        - For a block at a single code location: use a unique, descriptive label (e.g., [final_solution])
+        - For a block inside an outer configuration loop: use the SAME label every iteration
+          (e.g., [post_kernel_output] repeated for segment_size=16, 32, 64, ...)
+        - The label must be consistent in the C++ comment, the BEGIN printf, and the END printf
+        - The LASSI-Verify checker handles repeated labels correctly by comparing occurrences positionally
 
         ```cpp
         // >>> BEGIN LASSI-VERIFY PASSTHROUGH [label] (do not edit or delete this block) >>>
@@ -173,6 +186,106 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
     return extracted_code
 
 
+def code_insert_instrumentation_from_template(base_code, template_instrumented_code,
+                                               llm_source, model, num_ctx, system_prompt,
+                                               display_response, verifyprompt=False):
+    """
+    Instrument base_code with LASSI-VERIFY blocks (Tier 1 assertions + Tier 2 passthrough)
+    by replicating the instrumentation present in template_instrumented_code (SOURCE_verify).
+
+    Used for post-pipeline verification of the zero-shot base LLM code: the same observation
+    point labels as SOURCE_verify are inserted into the base LLM code at equivalent locations,
+    enabling fair three-tier comparison against the same SOURCE_verify reference output
+    (tier2_spec_output) that was used to verify all LASSI-generated codes.
+
+    Unlike code_insert_asserts() + code_insert_passthrough() (which each make one LLM call
+    to instrument SOURCE_verify from scratch), this function replicates EXISTING labeled blocks
+    from a known-good template in a single LLM call, ensuring label identity across codes.
+
+    Returns:
+        str: instrumented base_code with all LASSI-VERIFY blocks, or "" on failure.
+    """
+    content_prompt = f"""You are given two CUDA programs that implement the same computation:
+
+**PROGRAM A — REFERENCE (instrumented source-as-specification):**
+```cuda
+{template_instrumented_code}
+```
+
+**PROGRAM B — TARGET (base LLM refactored code, not yet instrumented):**
+```cuda
+{base_code}
+```
+
+**YOUR TASK:** Insert the SAME LASSI-VERIFY instrumentation blocks from PROGRAM A into PROGRAM B,
+adapted to PROGRAM B's specific code structure.
+
+**RULES:**
+
+1. **Exact label preservation:** Use EXACTLY the same block labels as in PROGRAM A.
+   - Every `LASSI-VERIFY ASSERTIONS [label]` block from A must appear in B with the same `[label]`.
+   - Every `LASSI-VERIFY PASSTHROUGH [label]` block from A must appear in B with the same `[label]`.
+   - Every `LASSI-VERIFY METAMORPHIC [label]` block from A must appear in B with the same `[label]`.
+
+2. **Equivalent placement:** Place each block at the logically equivalent position in B.
+   - If A checks a buffer after H→D transfer, find B's equivalent buffer after its H→D transfer.
+   - If A checks output after D→H transfer, check B's equivalent output buffer.
+   - If A instruments inside a loop, instrument at the equivalent loop location in B.
+   - If B has reorganized, renamed, or merged buffers, check the closest functional equivalent.
+
+3. **Statistical format (PASSTHROUGH blocks):** Use the same output format as A:
+   ```
+   Statistics: min=<val>, max=<val>, mean=<val>
+   Sample_first10: <v0> <v1> ... <v9>
+   Sample_last10: <vN-9> ... <vN>
+   ```
+   Use `%.17g` printf format for all floating-point values.
+
+4. **Assertion format (ASSERTIONS blocks):** Use the same one-line PASS/FAIL format as A:
+   ```
+   printf("LASSI-VERIFY ASSERTIONS [<label>]: %s\\n", <condition> ? "PASS" : "FAIL"); fflush(stdout);
+   ```
+   Adapt the boolean condition to B's variable names and structure.
+
+5. **Preserve existing blocks in B:** If B already has any LASSI-VERIFY blocks, keep them unchanged.
+
+6. **Do not change B's compute logic:** Only add instrumentation — do not alter kernel calls,
+   memory allocations, control flow, or any existing compute logic in PROGRAM B.
+
+7. **Return only the fully instrumented PROGRAM B** in a ```cuda or ```cpp code fence.
+   No explanation outside the code fence.
+"""
+    content_prompt += prompts.get_codeknowledge("passthrough_catalog")
+
+    temp = 0.2
+    if llm_source == "argo":
+        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "lmstudio":
+        response_text = lmstudio_llm(model, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "ollama":
+        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "cerebras":
+        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
+    else:
+        print("Invalid LLM source")
+        response_text = ""
+
+    print("\n\n----- " + color.BOLD + color.BLUE + "BASE LLM TEMPLATE-GUIDED INSTRUMENTATION" + color.END + " -----\n")
+    if display_response:
+        print("(hidden)\n\n")
+        display(Markdown(response_text))
+
+    pattern = r"```(.*?)```"
+    match = re.search(pattern, response_text, re.DOTALL)
+    if match:
+        extracted_code = match.group(1)
+        extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
+    else:
+        extracted_code = ""
+
+    return extracted_code
+
+
 def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False):
 
     # Append critical instruction to repsond with complete code
@@ -204,20 +317,20 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
 
        **Two required block types — use BOTH:**
 
-       **Type 1 — Per-observation-point check (print ONLY on FAIL):**
+       **Type 1 — Per-observation-point check (always prints one PASS or FAIL line):**
     ```cpp
-       // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+       // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
        // LASSI_INSTRUMENTATION - [Brief description of invariant being checked]
        {
            bool _t1_pass = (your_condition_here);
-           if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [label]: FAIL\n"); fflush(stdout); }
+           printf("LASSI-VERIFY ASSERTIONS [label]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
        }
        // <<< END LASSI-VERIFY ASSERTIONS <<<
     ```
 
        **Type 2 — Completion sentinel (ONE per function, AFTER all Type 1 blocks, OUTSIDE all loops):**
     ```cpp
-       // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+       // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
        // LASSI_INSTRUMENTATION - tier1_complete (sentinel — confirms all assertion blocks were reached)
        {
            printf("LASSI-VERIFY ASSERTIONS [tier1_complete]: PASS\n"); fflush(stdout);
@@ -226,12 +339,14 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     ```
 
        **CRITICAL format rules:**
-       - Type 1 blocks print **only on FAIL** — no output when the condition passes. The pipeline
-         infers PASS for all labels not explicitly failed.
+       - Type 1 blocks always print exactly **one line** per block: `PASS` or `FAIL`.
+         This line is essential pipeline output — **do not remove it, do not move it inside an `if`**.
+         The pipeline detects whether these blocks survive code transformation by reading this output.
        - The sentinel (`[tier1_complete]`) MUST be placed AFTER all Type 1 blocks and OUTSIDE any
          solver or compute loops. It tells the checker that instrumentation ran to completion.
        - **DO NOT place assertion blocks inside solver loops or compute loops.** Place them
          BEFORE the loop (validate inputs) and AFTER the loop (validate outputs/convergence).
+         One print per block per program execution is the target — not one print per loop iteration.
        - `[label]` is a short unique identifier matching the LASSI_INSTRUMENTATION comment.
        - Do NOT use C `assert()` — it can be silenced by `-DNDEBUG` compiler flags.
        - Do NOT call `exit()` — the pipeline collects ALL assertion results before deciding.
@@ -406,8 +521,13 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     )
 
     def extract_blocks(stdout_text):
-        """Return dict mapping label → block body string."""
-        return {m.group(1): m.group(2) for m in block_pattern.finditer(stdout_text)}
+        """Return dict mapping label → ordered list of block body strings.
+        Collects all occurrences so blocks inside loops are not silently deduplicated
+        by a dict comprehension that keeps only the last occurrence per label."""
+        result = {}
+        for m in block_pattern.finditer(stdout_text):
+            result.setdefault(m.group(1), []).append(m.group(2))
+        return result
 
     def parse_stats(block_body):
         """Parse Statistics line; return dict of {min, max, mean} as floats, or None.
@@ -467,9 +587,16 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     failures = []
     blocks_compared = 0
 
-    for label, spec_body in spec_blocks.items():
-        if label not in gen_blocks:
-            # Label present in spec but missing in generated output — treat as failure
+    for label, spec_bodies in spec_blocks.items():
+        gen_bodies = gen_blocks.get(label, [])
+        n_spec = len(spec_bodies)
+        n_gen  = len(gen_bodies)
+        # When a label appears more than once (e.g., inside a loop), tag each occurrence
+        # with "#N" so failures are distinguishable in self-correction context.
+        multi = n_spec > 1 or n_gen > 1
+
+        if n_gen == 0:
+            # Label present in spec but entirely absent from generated output — failure
             failures.append({
                 "label":     label,
                 "stat":      "block_missing",
@@ -479,67 +606,80 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
             })
             continue
 
-        gen_body = gen_blocks[label]
-        blocks_compared += 1
-
-        spec_stats = parse_stats(spec_body)
-        gen_stats  = parse_stats(gen_body)
-
-        if spec_stats is None or gen_stats is None:
-            # Cannot parse statistics — fall through to LLM fallback for this block
-            # Mark as unparseable so fallback is triggered below
+        # Any spec occurrences that exceed the generated count are also block_missing
+        for i in range(n_gen, n_spec):
+            failure_label = f"{label}#{i+1}" if multi else label
             failures.append({
-                "label":     label,
-                "stat":      "parse_error",
-                "spec":      spec_body[:200],
-                "generated": gen_body[:200],
+                "label":     failure_label,
+                "stat":      "block_missing",
+                "spec":      "(present)",
+                "generated": "(absent)",
                 "rel_err":   float('inf'),
             })
-            continue
 
-        # Derive atol from the spec block's max statistic so that near-zero statistics
-        # (e.g., converged mean ~1e-12) are compared against the field's actual dynamic
-        # range rather than against zero. atol = |spec_max| * tolerance.
-        spec_max_val = abs(spec_stats.get('max', 0.0))
-        atol = spec_max_val * tolerance
+        # Compare each occurrence positionally (occurrence i in spec vs occurrence i in gen)
+        for i, (spec_body, gen_body) in enumerate(zip(spec_bodies, gen_bodies)):
+            failure_label = f"{label}#{i+1}" if multi else label
+            blocks_compared += 1
 
-        # Compare each statistic using allclose: |a-b| <= atol + rtol*max(|a|,|b|)
-        for stat_name, spec_val in spec_stats.items():
-            gen_val = gen_stats.get(stat_name)
-            if gen_val is None:
+            spec_stats = parse_stats(spec_body)
+            gen_stats  = parse_stats(gen_body)
+
+            if spec_stats is None or gen_stats is None:
+                # Cannot parse statistics — fall through to LLM fallback for this block
+                # Mark as unparseable so fallback is triggered below
                 failures.append({
-                    "label":     label,
-                    "stat":      stat_name,
-                    "spec":      spec_val,
-                    "generated": "(missing)",
-                    "abs_err":   float('inf'),
-                    "atol":      atol,
+                    "label":     failure_label,
+                    "stat":      "parse_error",
+                    "spec":      spec_body[:200],
+                    "generated": gen_body[:200],
+                    "rel_err":   float('inf'),
                 })
                 continue
-            if not allclose_pass(spec_val, gen_val, tolerance, atol):
-                failures.append({
-                    "label":     label,
-                    "stat":      stat_name,
-                    "spec":      spec_val,
-                    "generated": gen_val,
-                    "abs_err":   abs_err(spec_val, gen_val),
-                    "atol":      atol,
-                })
 
-        # Compare sample values element-wise with the same allclose tolerance
-        spec_samples = parse_samples(spec_body)
-        gen_samples  = parse_samples(gen_body)
-        if spec_samples and gen_samples:
-            for idx, (sv, gv) in enumerate(zip(spec_samples, gen_samples)):
-                if not allclose_pass(sv, gv, tolerance, atol):
+            # Derive atol from the spec block's max statistic so that near-zero statistics
+            # (e.g., converged mean ~1e-12) are compared against the field's actual dynamic
+            # range rather than against zero. atol = |spec_max| * tolerance.
+            spec_max_val = abs(spec_stats.get('max', 0.0))
+            atol = spec_max_val * tolerance
+
+            # Compare each statistic using allclose: |a-b| <= atol + rtol*max(|a|,|b|)
+            for stat_name, spec_val in spec_stats.items():
+                gen_val = gen_stats.get(stat_name)
+                if gen_val is None:
                     failures.append({
-                        "label":     label,
-                        "stat":      f"sample[{idx}]",
-                        "spec":      sv,
-                        "generated": gv,
-                        "abs_err":   abs_err(sv, gv),
+                        "label":     failure_label,
+                        "stat":      stat_name,
+                        "spec":      spec_val,
+                        "generated": "(missing)",
+                        "abs_err":   float('inf'),
                         "atol":      atol,
                     })
+                    continue
+                if not allclose_pass(spec_val, gen_val, tolerance, atol):
+                    failures.append({
+                        "label":     failure_label,
+                        "stat":      stat_name,
+                        "spec":      spec_val,
+                        "generated": gen_val,
+                        "abs_err":   abs_err(spec_val, gen_val),
+                        "atol":      atol,
+                    })
+
+            # Compare sample values element-wise with the same allclose tolerance
+            spec_samples = parse_samples(spec_body)
+            gen_samples  = parse_samples(gen_body)
+            if spec_samples and gen_samples:
+                for idx, (sv, gv) in enumerate(zip(spec_samples, gen_samples)):
+                    if not allclose_pass(sv, gv, tolerance, atol):
+                        failures.append({
+                            "label":     failure_label,
+                            "stat":      f"sample[{idx}]",
+                            "spec":      sv,
+                            "generated": gv,
+                            "abs_err":   abs_err(sv, gv),
+                            "atol":      atol,
+                        })
 
     # Check for blocks present in generated output but not in spec (informational only, not a failure)
     extra_labels = set(gen_blocks.keys()) - set(spec_blocks.keys())
@@ -893,14 +1033,16 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             "**METAMORPHIC output block format** (print BEFORE and AFTER the kernel, "
             "using 'Sum:' field):\n\n"
             "```\n"
-            f"=== BEGIN LASSI-VERIFY METAMORPHIC [{obs_points[0] if len(obs_points) > 0 else 'before'}] ===\n"
+            "=== BEGIN LASSI-VERIFY METAMORPHIC [before] ===\n"
             "Relation: conservation\nBuffer: <buffer_name>\nElements: <N>\nSum: %.17g\n"
-            f"=== END LASSI-VERIFY METAMORPHIC [{obs_points[0] if len(obs_points) > 0 else 'before'}] ===\n"
+            "=== END LASSI-VERIFY METAMORPHIC [before] ===\n"
             "... kernel execution ...\n"
-            f"=== BEGIN LASSI-VERIFY METAMORPHIC [{obs_points[1] if len(obs_points) > 1 else 'after'}] ===\n"
+            "=== BEGIN LASSI-VERIFY METAMORPHIC [after] ===\n"
             "Relation: conservation\nBuffer: <buffer_name>\nElements: <N>\nSum: %.17g\n"
-            f"=== END LASSI-VERIFY METAMORPHIC [{obs_points[1] if len(obs_points) > 1 else 'after'}] ===\n"
+            "=== END LASSI-VERIFY METAMORPHIC [after] ===\n"
             "```\n"
+            "The labels MUST be EXACTLY `[before]` and `[after]` — do not substitute observation "
+            "point names or any other text.\n"
         )
     elif relation_type == "MONOTONICITY":
         block_format = (
@@ -957,11 +1099,18 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         )
     elif relation_type == "CONSERVATION":
         transform_instruction = (
-            "**Step 1 — Insert a before-kernel METAMORPHIC block** to capture the conserved quantity.\n"
-            "**Step 2 — Insert an after-kernel METAMORPHIC block** to capture the conserved quantity "
-            "after the final D→H transfer.\n"
-            "No input transformation is needed — the relation checks that the computation preserves "
-            "a quantity across execution.\n"
+            "No input transformation is needed — the relation checks that the computation "
+            "preserves a total sum across execution.\n\n"
+            "**Step 1 — Insert a [before] block** BEFORE the computation kernel runs:\n"
+            "  - Compute the sum of the primary INPUT buffer (the data being reduced/processed).\n"
+            "  - Copy d_in (or equivalent) to a temporary host buffer, loop to accumulate the sum,\n"
+            "    then print the block with the EXACT label `[before]`.\n\n"
+            "**Step 2 — Insert an [after] block** AFTER the kernel and D→H transfer:\n"
+            "  - Compute the sum of the primary OUTPUT buffer (the result of the computation).\n"
+            "  - Use the already-copied host output buffer (or issue a fresh D→H copy), loop to\n"
+            "    accumulate the sum, then print the block with the EXACT label `[after]`.\n\n"
+            "The checker verifies: |sum_after − sum_before| / |sum_before| < tolerance.\n"
+            "Both labels MUST be exactly `[before]` and `[after]` — not observation point names.\n"
         )
     elif relation_type == "MONOTONICITY":
         transform_instruction = (
@@ -1088,10 +1237,18 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
     iter_patt      = re.compile(r'Iteration:\s*(\d+)')
 
     def extract_meta_blocks(text):
-        return {m.group(1): m.group(2) for m in meta_block_pattern.finditer(text)}
+        """Return dict mapping label → ordered list of block body strings (all occurrences)."""
+        result = {}
+        for m in meta_block_pattern.finditer(text):
+            result.setdefault(m.group(1), []).append(m.group(2))
+        return result
 
     def extract_pass_blocks(text):
-        return {m.group(1): m.group(2) for m in pass_block_pattern.finditer(text)}
+        """Return dict mapping label → ordered list of block body strings (all occurrences)."""
+        result = {}
+        for m in pass_block_pattern.finditer(text):
+            result.setdefault(m.group(1), []).append(m.group(2))
+        return result
 
     def parse_stats(body):
         m = stats_pattern.search(body)
@@ -1148,67 +1305,76 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                                   "detail": "PASSTHROUGH block absent in original output"})
                 continue
 
-            orig_stats = parse_stats(pass_blocks[label])
-            var_stats  = parse_stats(meta_blocks[label])
-            blocks_compared += 1
+            # Each value in the dict is now a list of block bodies (all occurrences).
+            # Compare positionally so loop-internal blocks are not silently deduplicated.
+            pass_bodies = pass_blocks[label]
+            meta_bodies = meta_blocks[label]
+            n_pairs = min(len(pass_bodies), len(meta_bodies))
+            multi = max(len(pass_bodies), len(meta_bodies)) > 1
 
-            if orig_stats is None or var_stats is None:
-                failures.append({"label": label, "stat": "parse_error",
-                                  "detail": "Could not parse Statistics line in one or both blocks"})
-                continue
+            for i in range(n_pairs):
+                failure_label = f"{label}#{i+1}" if multi else label
+                orig_stats = parse_stats(pass_bodies[i])
+                var_stats  = parse_stats(meta_bodies[i])
+                blocks_compared += 1
 
-            # NaN/Inf guard: skip block if any statistic is non-finite
-            if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
-                continue
-
-            # atol anchored to |factor * orig_max| * rtol so near-zero fields
-            # are judged against the field's actual dynamic range.
-            orig_max_val = abs(orig_stats.get('max', 0.0))
-            atol = abs(factor) * orig_max_val * rtol
-
-            for stat_name, orig_val in orig_stats.items():
-                var_val = var_stats.get(stat_name)
-                if var_val is None:
-                    failures.append({"label": label, "stat": stat_name,
-                                      "orig": orig_val, "variant": "(missing)"})
+                if orig_stats is None or var_stats is None:
+                    failures.append({"label": failure_label, "stat": "parse_error",
+                                      "detail": "Could not parse Statistics line in one or both blocks"})
                     continue
-                # When factor < 0, min and max of the field swap under the transformation:
-                # the minimum of the scaled field is factor * orig_max (not factor * orig_min).
-                # Mean is always linear regardless of factor sign.
-                if factor < 0 and stat_name == 'min':
-                    expected_var = factor * orig_stats.get('max', orig_val)
-                elif factor < 0 and stat_name == 'max':
-                    expected_var = factor * orig_stats.get('min', orig_val)
-                else:
-                    expected_var = factor * orig_val
-                if not both_finite(var_val, expected_var):
-                    continue  # NaN/Inf guard
-                if not allclose(var_val, expected_var, rtol, atol):
-                    failures.append({
-                        "label": label, "stat": stat_name,
-                        "orig": orig_val, "expected_variant": expected_var,
-                        "actual_variant": var_val,
-                        "abs_err": abs(var_val - expected_var),
-                        "atol": atol, "rtol": rtol,
-                    })
 
-            # Element-wise sample comparison
-            orig_samples = parse_samples(pass_blocks[label])
-            var_samples  = parse_samples(meta_blocks[label])
-            for idx, (ov, vv) in enumerate(zip(orig_samples, var_samples)):
-                if not both_finite(ov, vv):
+                # NaN/Inf guard: skip block if any statistic is non-finite
+                if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
                     continue
-                expected_vv = factor * ov
-                if not both_finite(vv, expected_vv):
-                    continue
-                if not allclose(vv, expected_vv, rtol, atol):
-                    failures.append({
-                        "label": label, "stat": f"sample[{idx}]",
-                        "orig": ov, "expected_variant": expected_vv,
-                        "actual_variant": vv,
-                        "abs_err": abs(vv - expected_vv),
-                        "atol": atol, "rtol": rtol,
-                    })
+
+                # atol anchored to |factor * orig_max| * rtol so near-zero fields
+                # are judged against the field's actual dynamic range.
+                orig_max_val = abs(orig_stats.get('max', 0.0))
+                atol = abs(factor) * orig_max_val * rtol
+
+                for stat_name, orig_val in orig_stats.items():
+                    var_val = var_stats.get(stat_name)
+                    if var_val is None:
+                        failures.append({"label": failure_label, "stat": stat_name,
+                                          "orig": orig_val, "variant": "(missing)"})
+                        continue
+                    # When factor < 0, min and max of the field swap under the transformation:
+                    # the minimum of the scaled field is factor * orig_max (not factor * orig_min).
+                    # Mean is always linear regardless of factor sign.
+                    if factor < 0 and stat_name == 'min':
+                        expected_var = factor * orig_stats.get('max', orig_val)
+                    elif factor < 0 and stat_name == 'max':
+                        expected_var = factor * orig_stats.get('min', orig_val)
+                    else:
+                        expected_var = factor * orig_val
+                    if not both_finite(var_val, expected_var):
+                        continue  # NaN/Inf guard
+                    if not allclose(var_val, expected_var, rtol, atol):
+                        failures.append({
+                            "label": failure_label, "stat": stat_name,
+                            "orig": orig_val, "expected_variant": expected_var,
+                            "actual_variant": var_val,
+                            "abs_err": abs(var_val - expected_var),
+                            "atol": atol, "rtol": rtol,
+                        })
+
+                # Element-wise sample comparison
+                orig_samples = parse_samples(pass_bodies[i])
+                var_samples  = parse_samples(meta_bodies[i])
+                for idx, (ov, vv) in enumerate(zip(orig_samples, var_samples)):
+                    if not both_finite(ov, vv):
+                        continue
+                    expected_vv = factor * ov
+                    if not both_finite(vv, expected_vv):
+                        continue
+                    if not allclose(vv, expected_vv, rtol, atol):
+                        failures.append({
+                            "label": failure_label, "stat": f"sample[{idx}]",
+                            "orig": ov, "expected_variant": expected_vv,
+                            "actual_variant": vv,
+                            "abs_err": abs(vv - expected_vv),
+                            "atol": atol, "rtol": rtol,
+                        })
 
         if failures:
             lines = []
@@ -1247,10 +1413,17 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
     elif relation_type == "CONSERVATION":
         meta_blocks = extract_meta_blocks(variant_stdout)
 
-        before_blocks = {k: v for k, v in meta_blocks.items() if 'before' in k.lower()}
-        after_blocks  = {k: v for k, v in meta_blocks.items() if 'after' in k.lower()}
+        # Flatten all before/after occurrences into ordered lists so blocks inside
+        # loops are not silently deduplicated. extract_meta_blocks returns dict-of-lists.
+        before_bodies = []
+        after_bodies  = []
+        for k, bodies in meta_blocks.items():
+            if 'before' in k.lower():
+                before_bodies.extend(bodies)
+            elif 'after' in k.lower():
+                after_bodies.extend(bodies)
 
-        if not before_blocks or not after_blocks:
+        if not before_bodies or not after_bodies:
             return "SKIP", {
                 "verdict": "SKIP", "relation_name": relation_name, "factor": None,
                 "blocks_compared": 0, "failures": [],
@@ -1260,18 +1433,19 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
         failures = []
         blocks_compared = 0
 
-        for bk, bv in before_blocks.items():
-            # Match to corresponding after block (replace 'before'→'after' in label)
-            ak = bk.lower().replace('before', 'after')
-            # Try exact match first, then any after block
-            matched_after_body = after_blocks.get(ak)
-            if matched_after_body is None and after_blocks:
-                matched_after_body = next(iter(after_blocks.values()))
-            if matched_after_body is None:
-                continue
+        # Broadcast: if there is one canonical before and many afters (or vice versa),
+        # pair the single before/after with every corresponding after/before so that
+        # conservation is checked for every loop iteration, not just the last one.
+        if len(before_bodies) == 1 and len(after_bodies) > 1:
+            pairs = [(before_bodies[0], av) for av in after_bodies]
+        elif len(after_bodies) == 1 and len(before_bodies) > 1:
+            pairs = [(bv, after_bodies[0]) for bv in before_bodies]
+        else:
+            pairs = list(zip(before_bodies, after_bodies))
 
+        for pair_idx, (bv, av) in enumerate(pairs):
             bm = sum_pattern.search(bv)
-            am = sum_pattern.search(matched_after_body)
+            am = sum_pattern.search(av)
             if not bm or not am:
                 continue
 
@@ -1285,16 +1459,17 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                 continue  # NaN/Inf guard
 
             blocks_compared += 1
+            pair_label = f"before/after#{pair_idx+1}" if len(pairs) > 1 else "before/after"
             if abs(s_before) < 1e-300:
                 # Near-zero baseline: absolute check
                 if abs(s_after - s_before) > rtol:
-                    failures.append({"label": f"{bk}/{ak}", "stat": "sum",
+                    failures.append({"label": pair_label, "stat": "sum",
                                       "before": s_before, "after": s_after,
                                       "abs_err": abs(s_after - s_before)})
             else:
                 rel_err = abs(s_after - s_before) / abs(s_before)
                 if rel_err > rtol:
-                    failures.append({"label": f"{bk}/{ak}", "stat": "sum_relative_change",
+                    failures.append({"label": pair_label, "stat": "sum_relative_change",
                                       "before": s_before, "after": s_after,
                                       "rel_err": rel_err, "rtol": rtol})
 
@@ -1328,14 +1503,15 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
         meta_blocks = extract_meta_blocks(variant_stdout)
 
         residuals = []
-        for label, body in meta_blocks.items():
-            im = iter_patt.search(body)
-            rm = residual_patt.search(body)
-            if im and rm:
-                try:
-                    residuals.append((int(im.group(1)), float(rm.group(1))))
-                except ValueError:
-                    pass
+        for label, bodies in meta_blocks.items():
+            for body in bodies:
+                im = iter_patt.search(body)
+                rm = residual_patt.search(body)
+                if im and rm:
+                    try:
+                        residuals.append((int(im.group(1)), float(rm.group(1))))
+                    except ValueError:
+                        pass
 
         if len(residuals) < 2:
             return "SKIP", {
@@ -1434,6 +1610,7 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
 
         failures = []
         blocks_compared = 0
+        equivariance_ran = False
         # Factor is always 1.0 for PERMUTATIVE/ROTATION (invariance)
         perm_factor = 1.0
 
@@ -1448,101 +1625,109 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                                   "detail": "PASSTHROUGH block absent in original output"})
                 continue
 
-            orig_stats = parse_stats(pass_blocks[label])
-            var_stats  = parse_stats(meta_blocks[label])
-            blocks_compared += 1
+            # Each value in the dict is now a list of block bodies (all occurrences).
+            # Compare positionally so loop-internal blocks are not silently deduplicated.
+            pass_bodies = pass_blocks[label]
+            meta_bodies = meta_blocks[label]
+            n_pairs = min(len(pass_bodies), len(meta_bodies))
+            multi = max(len(pass_bodies), len(meta_bodies)) > 1
 
-            if orig_stats is None or var_stats is None:
-                failures.append({"label": label, "stat": "parse_error",
-                                  "detail": "Could not parse Statistics line in one or both blocks"})
-                continue
+            for i in range(n_pairs):
+                failure_label = f"{label}#{i+1}" if multi else label
+                orig_stats = parse_stats(pass_bodies[i])
+                var_stats  = parse_stats(meta_bodies[i])
+                blocks_compared += 1
 
-            # NaN/Inf guard
-            if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
-                continue
-
-            # Step A: invariance check — each aggregate stat of Z ≈ Y (factor=1.0)
-            orig_max_val = abs(orig_stats.get('max', 0.0))
-            atol = orig_max_val * rtol
-            for stat_name, orig_val in orig_stats.items():
-                var_val = var_stats.get(stat_name)
-                if var_val is None:
-                    failures.append({"label": label, "stat": stat_name,
-                                      "orig": orig_val, "variant": "(missing)"})
+                if orig_stats is None or var_stats is None:
+                    failures.append({"label": failure_label, "stat": "parse_error",
+                                      "detail": "Could not parse Statistics line in one or both blocks"})
                     continue
-                if not both_finite(var_val, orig_val):
+
+                # NaN/Inf guard
+                if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
                     continue
-                if not allclose(var_val, orig_val, rtol, atol):
-                    failures.append({
-                        "label": label, "stat": stat_name,
-                        "orig": orig_val, "expected_variant": orig_val,
-                        "actual_variant": var_val,
-                        "abs_err": abs(var_val - orig_val),
-                        "atol": atol, "rtol": rtol,
-                    })
 
-            # Step B: element equivariance — use Sample_at_idx1/idx2 from METAMORPHIC block
-            # for Z values; look up Y values from passthrough first10/last10 using Elements field.
-            meta_body = meta_blocks[label]
-            m1 = swap_idx1_patt.search(meta_body)
-            m2 = swap_idx2_patt.search(meta_body)
-            mat1 = sample_at1_patt.search(meta_body)
-            mat2 = sample_at2_patt.search(meta_body)
-            if m1 and m2:
-                try:
-                    idx1 = int(m1.group(1))
-                    idx2 = int(m2.group(1))
-                except ValueError:
-                    idx1, idx2 = -1, -1
-
-                # Determine N for last10 offset computation
-                n_elem = 0
-                me = elements_patt_perm.search(meta_body)
-                if me:
-                    try:
-                        n_elem = int(me.group(1))
-                    except ValueError:
-                        pass
-
-                # Get Z[idx1] and Z[idx2]: prefer Sample_at_idx fields; fall back to Sample_first10
-                z1, z2 = None, None
-                if mat1 and mat2:
-                    try:
-                        z1 = float(mat1.group(1))
-                        z2 = float(mat2.group(1))
-                    except ValueError:
-                        pass
-                if z1 is None or z2 is None:
-                    # Legacy fallback: read Z from concatenated first10/last10 samples
-                    var_samples = parse_samples(meta_body)
-                    if 0 <= idx1 < len(var_samples):
-                        z1 = var_samples[idx1]
-                    if 0 <= idx2 < len(var_samples):
-                        z2 = var_samples[idx2]
-
-                # Get Y[idx1] and Y[idx2] from passthrough (first10 or last10)
-                y1 = lookup_y_value(pass_blocks[label], idx1, n_elem)
-                y2 = lookup_y_value(pass_blocks[label], idx2, n_elem)
-
-                if z1 is not None and z2 is not None and y1 is not None and y2 is not None:
-                    # Z[idx1] should ≈ Y[idx2]
-                    if both_finite(z1, y2) and not allclose(z1, y2, rtol, atol):
+                # Step A: invariance check — each aggregate stat of Z ≈ Y (factor=1.0)
+                orig_max_val = abs(orig_stats.get('max', 0.0))
+                atol = orig_max_val * rtol
+                for stat_name, orig_val in orig_stats.items():
+                    var_val = var_stats.get(stat_name)
+                    if var_val is None:
+                        failures.append({"label": failure_label, "stat": stat_name,
+                                          "orig": orig_val, "variant": "(missing)"})
+                        continue
+                    if not both_finite(var_val, orig_val):
+                        continue
+                    if not allclose(var_val, orig_val, rtol, atol):
                         failures.append({
-                            "label": label, "stat": f"equivariance[Z[{idx1}]≈Y[{idx2}]]",
-                            "orig": y2, "expected_variant": y2, "actual_variant": z1,
-                            "abs_err": abs(z1 - y2), "atol": atol, "rtol": rtol,
+                            "label": failure_label, "stat": stat_name,
+                            "orig": orig_val, "expected_variant": orig_val,
+                            "actual_variant": var_val,
+                            "abs_err": abs(var_val - orig_val),
+                            "atol": atol, "rtol": rtol,
                         })
-                    # Z[idx2] should ≈ Y[idx1]
-                    if both_finite(z2, y1) and not allclose(z2, y1, rtol, atol):
-                        failures.append({
-                            "label": label, "stat": f"equivariance[Z[{idx2}]≈Y[{idx1}]]",
-                            "orig": y1, "expected_variant": y1, "actual_variant": z2,
-                            "abs_err": abs(z2 - y1), "atol": atol, "rtol": rtol,
-                        })
-                # If y1/y2 not found in passthrough: equivariance silently skipped for this label
-                # (indices outside captured first10/last10 range — invariance still checked above)
 
-        equivariance_ran = m1 is not None and m2 is not None if labels_to_check else False
+                # Step B: element equivariance — use Sample_at_idx1/idx2 from METAMORPHIC block
+                # for Z values; look up Y values from passthrough first10/last10 using Elements field.
+                meta_body = meta_bodies[i]
+                m1 = swap_idx1_patt.search(meta_body)
+                m2 = swap_idx2_patt.search(meta_body)
+                mat1 = sample_at1_patt.search(meta_body)
+                mat2 = sample_at2_patt.search(meta_body)
+                if m1 and m2:
+                    equivariance_ran = True
+                    try:
+                        idx1 = int(m1.group(1))
+                        idx2 = int(m2.group(1))
+                    except ValueError:
+                        idx1, idx2 = -1, -1
+
+                    # Determine N for last10 offset computation
+                    n_elem = 0
+                    me = elements_patt_perm.search(meta_body)
+                    if me:
+                        try:
+                            n_elem = int(me.group(1))
+                        except ValueError:
+                            pass
+
+                    # Get Z[idx1] and Z[idx2]: prefer Sample_at_idx fields; fall back to Sample_first10
+                    z1, z2 = None, None
+                    if mat1 and mat2:
+                        try:
+                            z1 = float(mat1.group(1))
+                            z2 = float(mat2.group(1))
+                        except ValueError:
+                            pass
+                    if z1 is None or z2 is None:
+                        # Legacy fallback: read Z from concatenated first10/last10 samples
+                        var_samples = parse_samples(meta_body)
+                        if 0 <= idx1 < len(var_samples):
+                            z1 = var_samples[idx1]
+                        if 0 <= idx2 < len(var_samples):
+                            z2 = var_samples[idx2]
+
+                    # Get Y[idx1] and Y[idx2] from passthrough (first10 or last10)
+                    y1 = lookup_y_value(pass_bodies[i], idx1, n_elem)
+                    y2 = lookup_y_value(pass_bodies[i], idx2, n_elem)
+
+                    if z1 is not None and z2 is not None and y1 is not None and y2 is not None:
+                        # Z[idx1] should ≈ Y[idx2]
+                        if both_finite(z1, y2) and not allclose(z1, y2, rtol, atol):
+                            failures.append({
+                                "label": failure_label, "stat": f"equivariance[Z[{idx1}]≈Y[{idx2}]]",
+                                "orig": y2, "expected_variant": y2, "actual_variant": z1,
+                                "abs_err": abs(z1 - y2), "atol": atol, "rtol": rtol,
+                            })
+                        # Z[idx2] should ≈ Y[idx1]
+                        if both_finite(z2, y1) and not allclose(z2, y1, rtol, atol):
+                            failures.append({
+                                "label": failure_label, "stat": f"equivariance[Z[{idx2}]≈Y[{idx1}]]",
+                                "orig": y1, "expected_variant": y1, "actual_variant": z2,
+                                "abs_err": abs(z2 - y1), "atol": atol, "rtol": rtol,
+                            })
+                    # If y1/y2 not found in passthrough: equivariance silently skipped for this label
+                    # (indices outside captured first10/last10 range — invariance still checked above)
 
         if failures:
             lines = []
@@ -1746,7 +1931,11 @@ def run_metamorphic_variants(source_code, active_relations, contract,
         verdict, diagnostic = check_metamorphic_relation(
             variant_stdout, original_passthrough_stdout, relation, tolerance
         )
-        relation["source_status"] = verdict  # "PASS", "FAIL", or "SKIP"
+        # Only update source_status during Stage 0 (code_version is None).
+        # In the main loop, source_status was frozen at Stage 0 and must not be overwritten
+        # by per-generated-code verdicts — doing so would corrupt the contract JSON record.
+        if code_version is None:
+            relation["source_status"] = verdict  # "PASS", "FAIL", or "SKIP"
         results.append({"name": relation_name, "verdict": verdict, "diagnostic": diagnostic})
 
         print(f"\n----- Tier 3 [{relation_name}]: {verdict} -----")
@@ -1783,10 +1972,15 @@ def strip_verify_blocks(source_code):
       Closing: // <<< END LASSI-VERIFY ASSERTIONS <<<
                // <<< END LASSI-VERIFY PASSTHROUGH <<<
     """
+    # Match opening: // >>> BEGIN LASSI-VERIFY (ASSERTIONS|PASSTHROUGH) ... \n
+    # Match closing:  // <<< END LASSI-VERIFY (ASSERTIONS|PASSTHROUGH) ...  \n
+    # The closing pattern intentionally does NOT require a specific trailing arrow sequence
+    # (<<<  vs  >>>) because LLMs occasionally generate the wrong closing arrows.
+    # The [^\n]* absorbs any trailing characters (including <<< or >>> variants).
     pattern = re.compile(
         r'// >>> BEGIN LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH)[^\n]*\n'
         r'.*?'
-        r'// <<< END LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH) <<<[^\n]*\n?',
+        r'// <<< END LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH)[^\n]*\n?',
         re.DOTALL
     )
     return pattern.sub('', source_code)

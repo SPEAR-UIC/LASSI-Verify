@@ -197,16 +197,16 @@ Source file (.cu)
 
 **Formal grounding:** Owicki-Gries auxiliary variable assertions.
 
-**What it does:** The LLM inserts runtime assertion checks directly into the source C++ code as labeled comment blocks. These blocks execute inline during each run and print to stdout **only on FAIL** (zero stdout on a clean run), plus a single `tier1_complete` sentinel that confirms instrumentation ran to completion.
+**What it does:** The LLM inserts runtime assertion checks directly into the source C++ code as labeled comment blocks. These blocks execute inline during each run and always print exactly one `PASS` or `FAIL` line per block to stdout, plus a single `tier1_complete` sentinel that confirms instrumentation ran to completion. Blocks are placed OUTSIDE solver/compute loops (one print per block per program execution).
 
 **Block format — two types (in C++ source):**
 ```cpp
-// Type 1: per-observation-point check (print only on FAIL)
+// Type 1: per-observation-point check (always prints one PASS or FAIL line)
 // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - [description]
 {
     bool _t1_pass = (condition);
-    if (!_t1_pass) { printf("LASSI-VERIFY ASSERTIONS [assertion_label]: FAIL\n"); fflush(stdout); }
+    printf("LASSI-VERIFY ASSERTIONS [assertion_label]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 
@@ -219,11 +219,11 @@ Source file (.cu)
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
-**Catalog:** `Invariant_Assertions_Catalog.md` — provides a 3-layer framework (universal, domain, problem-specific) with examples for GPU kernels. All examples use the FAIL-only printf pattern (not `assert()`). The sentinel pattern is required and documented in Pattern 4.
+**Catalog:** `Invariant_Assertions_Catalog.md` — provides a 3-layer framework (universal, domain, problem-specific) with examples for GPU kernels. All examples use the always-print `PASS/FAIL` printf pattern (not `assert()`). The sentinel pattern is required and documented in Pattern 4.
 
 **When it runs (instrumentation):** Applied once at pipeline start to produce SOURCE_verify. All LASSI-generated codes inherit the assertion blocks because they are generated from SOURCE_verify.
 
-**When it runs (per-iteration checking — Option B):** Inside the main while loop, after each generated code executes, the pipeline parses its stdout via `check_tier1_assertions()`. FAIL lines → FAIL verdict; sentinel present + no FAILs → PASS; no assertion output → SKIP. This gives full visibility into every violated assertion before deciding to retry, without flooding stdout on clean runs.
+**When it runs (per-iteration checking — Option B):** Inside the main while loop, after each generated code executes, the pipeline parses its stdout via `check_tier1_assertions()`. FAIL lines → FAIL verdict; sentinel present + all PASS → PASS; no assertion output (blocks stripped) → SKIP. The always-print format makes blocks look like essential output (similar to Tier 2 passthrough), reducing LLM stripping.
 
 **Self-correction:** On FAIL, the failing assertion labels and summary are fed back to the LLM with the instruction to fix the code without removing any LASSI-VERIFY blocks. Up to 3 retries per code (per-code counter resets on fresh generation). When the per-code budget exhausts, the code is immediately marked INVALID and the pipeline `continue`s — skipping Tier 2, Tier 3, and the judge entirely. This fail-fast behavior avoids unnecessary overhead when Tier 1 has already determined the code is incorrect.
 
@@ -239,9 +239,11 @@ Source file (.cu)
 ```
 === BEGIN LASSI-VERIFY PASSTHROUGH [label] (do not edit or delete this block) >>>
 Buffer: <buffer_name>
+Type: <dtype_name>
 Elements: <N>
 Statistics: min=%.17g, max=%.17g, mean=%.17g
-Sample_first10: %.17g %.17g ...
+Sample_first10: %.17g %.17g ...  (up to 10 values)
+Sample_last10:  %.17g %.17g ...  (up to 10 values; omitted if N ≤ 10)
 === END LASSI-VERIFY PASSTHROUGH <<<
 ```
 
@@ -281,7 +283,7 @@ On FAIL: self-correction (up to 3 retries per code, sharing global counter).
 |------|-------|--------------|
 | **SCALING** | Z_stat ≈ factor × Y_stat; Z_sample[i] ≈ factor × Y_sample[i] | Factor, Statistics, Sample_first10 |
 | **SYMMETRY** | Same as SCALING with factor=−1 (min/max swap) | Factor, Statistics, Sample_first10 |
-| **PERMUTATIVE** | Step A: Z_stat ≈ Y_stat (invariance, factor=1.0); Step B: Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1] (equivariance, fires when indices in first10/last10 range) | Swap_idx1, Swap_idx2, Sample_at_idx1, Sample_at_idx2, Statistics, Sample_first10 |
+| **PERMUTATIVE / ROTATION** | Step A: Z_stat ≈ Y_stat (invariance, factor=1.0); Step B: Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1] (equivariance, fires when indices fall in first10 or last10 range) | Swap_idx1, Swap_idx2, Sample_at_idx1, Sample_at_idx2, Statistics, Sample_first10 |
 | **CONSERVATION** | \|sum_after − sum_before\| / \|sum_before\| < rtol | Sum (before + after blocks) |
 | **MONOTONICITY** | residual[k] ≥ residual[k+1] − rtol×\|residual[k]\| | Iteration, Residual (per-iter blocks) |
 
@@ -289,7 +291,7 @@ On FAIL: self-correction (up to 3 retries per code, sharing global counter).
 
 **Default tolerance:** `tier3_tolerance = 1e-5` (slightly looser than Tier 2).
 
-**Relation cost:** All currently implemented relation types (CONSERVATION, SYMMETRY, SCALING, PERMUTATIVE, ROTATION, MONOTONICITY) require 1 extra compile + run (labeled `"cheap"` in the catalog). The theoretical zero-extra-run optimization for CONSERVATION/SYMMETRY is not yet implemented.
+**Relation cost:** All currently implemented relation types (SCALING, SYMMETRY, PERMUTATIVE, ROTATION, CONSERVATION, MONOTONICITY) require 1 extra compile + run (labeled `"cheap"` in the catalog). ROTATION shares the same checker and variant-generation code path as PERMUTATIVE (both are handled by the `elif relation_type in ("PERMUTATIVE", "ROTATION"):` branch). The theoretical zero-extra-run optimization for CONSERVATION/SYMMETRY is not yet implemented.
 
 ---
 

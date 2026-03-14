@@ -486,8 +486,14 @@ def auto_code_llmgeneration_pipeline(prompts,
 
         # Initial zero-shot refactor attempt    
         if zero_shot and compile_result == "" and stage == "stage1":
-            # Increment code version for Stage 1
-            code_version = code_version + 1
+            # Set code_version to the index where baseLLM will be stored in code_blocks
+            # (code_blocks already has [SOURCE_orig, SOURCE_verify], so len=2 = next index).
+            # Using len(code_blocks) instead of code_version+1 keeps code_version equal to
+            # the last code_blocks index after each successful append — no base offset.
+            # get_power.py's existing local +1 for non-zero-shot executions still correctly
+            # compensates: zero-shot executes with code_version=2 (energy file "v2" = baseLLM),
+            # LASSI first executes with code_version=2 (+1 → "v3" = code_blocks[3]), etc.
+            code_version = len(code_blocks)  # = 2: index where baseLLM will be appended
             print("\n\n----- " + color.BOLD + color.BLUE + "STARTING STAGE 1: BASE LLM REFACTORING WITHOUT SELF-CORRECTION " + color.END + " -----\n")
             print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
             
@@ -812,7 +818,17 @@ def auto_code_llmgeneration_pipeline(prompts,
             if few_shot_learning:
                 refactoring_plan_guide_iteration = refactoring_plan_guide_iteration + "\n\n" + prompts.get_codeknowledge(source_lang + "_c_few_shot_examples")
             
-            refactoring_plan_guide_iteration = refactoring_plan_guide_iteration + "\n\n" + refactoring_plan + "\n\n" + code_to_refactor  # "\n\n" + context_prompt +
+            # LASSI-VERIFY preservation notice: injected immediately before the code so the LLM
+            # cannot miss it. Redundant with the prompt_dictionary warning; belt-and-suspenders.
+            _lv_notice = (
+                "\n\n[LASSI-VERIFY PRESERVATION REQUIREMENT] The CODE TO REFACTOR below contains "
+                "LASSI-VERIFY ASSERTIONS and LASSI-VERIFY PASSTHROUGH blocks delimited by "
+                "'// >>> BEGIN LASSI-VERIFY' and '// <<< END LASSI-VERIFY <<<'. "
+                "You MUST copy ALL of these blocks into your output exactly as written. "
+                "Do NOT remove, modify, restructure, or move them. "
+                "Removing these blocks will cause correctness verification to fail."
+            )
+            refactoring_plan_guide_iteration = refactoring_plan_guide_iteration + "\n\n" + refactoring_plan + _lv_notice + "\n\n" + code_to_refactor  # "\n\n" + context_prompt +
             refactoring_plan_iteration_tokens = lassi.token_analysis.token_count(refactoring_plan_guide_iteration)
 
             print("\n\n" + color.BOLD + color.GREEN + "----- REFACTORING PLAN WITH INSTRUCTIONS PROMPT " + color.END + "(energy efficiency *iteration* with code, token count: " + str(refactoring_plan_iteration_tokens) + "): ")  # + refactoring_plan_iteration + "\n\n")
@@ -875,7 +891,17 @@ def auto_code_llmgeneration_pipeline(prompts,
             if few_shot_learning:
                 refactoring_plan_guide = refactoring_plan_guide + "\n\n" + prompts.get_codeknowledge(source_lang + "_c_few_shot_examples")
             
-            refactoring_plan_guide = refactoring_plan_guide + "\n\n" + refactoring_plan + "\n\n" + code_to_refactor  # "\n\n" + context_prompt +
+            # LASSI-VERIFY preservation notice: injected immediately before the code so the LLM
+            # cannot miss it. Redundant with the prompt_dictionary warning; belt-and-suspenders.
+            _lv_notice = (
+                "\n\n[LASSI-VERIFY PRESERVATION REQUIREMENT] The CODE TO REFACTOR below contains "
+                "LASSI-VERIFY ASSERTIONS and LASSI-VERIFY PASSTHROUGH blocks delimited by "
+                "'// >>> BEGIN LASSI-VERIFY' and '// <<< END LASSI-VERIFY <<<'. "
+                "You MUST copy ALL of these blocks into your output exactly as written. "
+                "Do NOT remove, modify, restructure, or move them. "
+                "Removing these blocks will cause correctness verification to fail."
+            )
+            refactoring_plan_guide = refactoring_plan_guide + "\n\n" + refactoring_plan + _lv_notice + "\n\n" + code_to_refactor  # "\n\n" + context_prompt +
             refactoring_plan_tokens = lassi.token_analysis.token_count(refactoring_plan_guide)
            
             print("\n\n" + color.BOLD + color.GREEN + "----- REFACTORING PLAN WITH INSTRUCTIONS PROMPT " + color.END + "(energy efficiency improvement with code, token count: " + str(refactoring_plan_tokens) + "): ")  # \n\n" + refactoring_plan + "\n\n")
@@ -1052,7 +1078,11 @@ def auto_code_llmgeneration_pipeline(prompts,
             if not zero_shot:
                 tier1_verdict, tier1_diagnostic = lassi.verify.check_tier1_assertions(exe_output_generated)
                 if tier1_verdict == "PASS":
-                    print(f"\n----- LASSI-Verify Tier 1: PASS ({tier1_diagnostic['pass_count']} assertion(s)) -----")
+                    if tier1_diagnostic['pass_count'] == 0:
+                        # Sentinel fired but no assertion blocks in stdout — LLM likely stripped them.
+                        print(f"\n----- LASSI-Verify Tier 1: PASS (sentinel only — 0 assertion blocks found; LASSI-VERIFY blocks may have been stripped by LLM) -----")
+                    else:
+                        print(f"\n----- LASSI-Verify Tier 1: PASS ({tier1_diagnostic['pass_count']} assertion(s)) -----")
                 elif tier1_verdict == "SKIP":
                     print(f"\n----- LASSI-Verify Tier 1: SKIP (no assertion blocks found in stdout) -----")
                 elif tier1_verdict == "FAIL":
@@ -1062,6 +1092,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     self_correction_tier1_counter_code += 1
                     iteration_log["v" + str(code_version)]["self_correction_count"] += 1
                     if self_correction_tier1_counter_code <= self_correction_tier1_counter_code_max:
+                        code_version -= 1  # roll back: pop removes the code so code_version must stay in sync
                         code_blocks.pop()
                         compile_result = "tier1_failure"
                         print(f"\n----- LASSI-Verify Tier 1: self-correction "
@@ -1120,6 +1151,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     # code_blocks is popped to keep it in sync with runtime_history (not updated on
                     # Tier 2 failure). Without this pop, tracking_best_version = len(code_blocks)-1
                     # after a later win would be out of bounds for runtime_history (IndexError).
+                    code_version -= 1  # roll back: pop removes the code so code_version must stay in sync
                     code_blocks.pop()
                     compile_result = "tier2_failure"
                     print(f"\n----- LASSI-Verify Tier 2: FAIL — self-correction {self_correction_verify_counter_code}/{self_correction_verify_counter_code_max} (global total: {self_correction_verify_counter}) -----")
@@ -1182,6 +1214,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 if self_correction_tier3_counter_code <= self_correction_tier3_counter_code_max:
                     # Still within per-code budget: pop code_blocks to keep in sync with history,
                     # then self-correct with Tier 3 diagnostic feedback.
+                    code_version -= 1  # roll back: pop removes the code so code_version must stay in sync
                     code_blocks.pop()
                     compile_result = "tier3_failure"
                     print(f"\n----- LASSI-Verify Tier 3: FAIL — self-correction "
@@ -1583,7 +1616,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         best_code_raw = code_blocks[tracking_best_version]
         best_clean_code = lassi.verify.strip_verify_blocks(best_code_raw)
 
-        best_clean_path = os.path.join(directory, file_name + "_best_clean.cu")
+        best_clean_path = os.path.join(experiment_data_directory, file_name_save + "_best_clean.cu")
         with open(best_clean_path, 'w') as _bcf:
             _bcf.write(best_clean_code)
 
@@ -1624,9 +1657,12 @@ def auto_code_llmgeneration_pipeline(prompts,
                         lassiee_clean_energy_J = round(_clean_energy_J, 4)
                         if sourcecode_total_energy_joules and sourcecode_total_energy_joules > 0:
                             lassiee_clean_energy_diff = round(100.0 * (_clean_energy_J - sourcecode_total_energy_joules) / sourcecode_total_energy_joules, 2)
-                    if duration and duration > 0:
-                        lassiee_clean_runtime_diff = round(100.0 * (_clean_duration - duration) / duration, 2)
-                    print(f"[Best Clean Run] Runtime: {lassiee_clean_runtime_s:.4f}s  ({lassiee_clean_runtime_diff}% vs source)")
+                    # Baseline: runtime_history[0] = SOURCE_orig (uninstrumented) — the fair comparison.
+                    # duration at this point is SOURCE_verify (overwritten at Stage 0b line ~371).
+                    _src_rt_baseline = runtime_history[0] if runtime_history and runtime_history[0] > 0 else None
+                    if _src_rt_baseline:
+                        lassiee_clean_runtime_diff = round(100.0 * (_clean_duration - _src_rt_baseline) / _src_rt_baseline, 2)
+                    print(f"[Best Clean Run] Runtime: {lassiee_clean_runtime_s:.4f}s  ({lassiee_clean_runtime_diff}% vs source uninstrumented)")
                     if power_measure:
                         print(f"[Best Clean Run] Energy: {lassiee_clean_energy_J} J  ({lassiee_clean_energy_diff}% vs source)")
             except Exception as _clean_ex:
@@ -1646,7 +1682,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             compare_code = prompts.get_code_comparison("CUDA_cpp")
         elif detected_vendor.upper() == "AMD":
             compare_code = prompts.get_code_comparison("HIP_cpp")
-        compare_code = compare_code + "\n\n" + "[BEGIN SOURCE CODE AND RESULTS]\n\n" + input_code
+        compare_code = compare_code + "\n\n" + "[BEGIN SOURCE CODE AND RESULTS]\n\n" + original_input_code  # uninstrumented source (no Tier 1/2 blocks)
         compare_code = compare_code + "\n\nOUTPUT: \n\n" + input_content_llmjudge_dict["source_stdout"]
         compare_code = compare_code + "\n\nCode execution duration: " + str(round(duration, 2)) + " s"
         compare_code = compare_code + "\nTotal Energy Consumed: " + str(round(sourcecode_total_energy_joules,2)) + " J" + "\nAverage Power: " + str(round(sourcecode_ave_power,2)) + " W"
@@ -1713,9 +1749,10 @@ def auto_code_llmgeneration_pipeline(prompts,
     # meta_data_file += "\n"
     meta_data_file += "Code Error Self-correction iteration count: " + str(self_correction_counter)
     meta_data_file += "\n"
-    # less 2 on the data collection length
-    # because the first two values are the source code and the base LLM result.
-    ee_iterations = len(energy_history) - 2
+    # less 3 on the data collection length:
+    # index 0 = SOURCE_orig, index 1 = SOURCE_verify, index 2 = base LLM (zero-shot).
+    # LASSI-generated codes start at index 3, so subtract 3 to count only LASSI iterations.
+    ee_iterations = len(energy_history) - 3
     meta_data_file += "Energy Efficiency Self-improvement iteration count: " + str(ee_iterations)  # str(self_correction_power_counter)
     
     if yes_power_feedback:
@@ -1737,12 +1774,16 @@ def auto_code_llmgeneration_pipeline(prompts,
         experiment_data["lassiee_runtime_s"] = runtime_history[best_index] if best_index > 0  else "N/A"
         experiment_data["lassiee_valid"] = valid_code_history[best_index] if best_index > 0  else "N/A"
         experiment_data["lassiee_version"] = str(best_index)
-        experiment_data["lassiee_llm_temp"] = iteration_log["v" + str(best_index)]["LLM_temperature"] if best_index > 0  else "N/A"
-        experiment_data["lassiee_selfcorrections"] = iteration_log["v" + str(best_index)]["self_correction_count"] if best_index > 0  else "N/A"
-        experiment_data["lassiee_eeiterations"] = iteration_log["v" + str(best_index)]["energy_refactor_count"] if best_index > 0  else "N/A"
+        # iteration_log only has entries for generated codes (v2+); SOURCE_verify (v1) is never added.
+        # Guard must be > 1, not > 0, to avoid KeyError when best_index = 1 (SOURCE_verify stayed best).
+        experiment_data["lassiee_llm_temp"] = iteration_log["v" + str(best_index)]["LLM_temperature"] if best_index > 1  else "N/A"
+        experiment_data["lassiee_selfcorrections"] = iteration_log["v" + str(best_index)]["self_correction_count"] if best_index > 1  else "N/A"
+        experiment_data["lassiee_eeiterations"] = iteration_log["v" + str(best_index)]["energy_refactor_count"] if best_index > 1  else "N/A"
         experiment_data["lassiee_energy_diff"] = round(((energy_history[best_index] - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if best_index > 0 and power_measure and sourcecode_total_energy_joules != 0 else "N/A"
         experiment_data["lassiee_avg_power_diff"] = round(((power_history[best_index] - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if best_index > 0 and power_measure and sourcecode_ave_power != 0 else "N/A"
-        experiment_data["lassiee_runtime_diff"] = round(((runtime_history[best_index] - duration) / duration) * 100 ,2) if best_index > 0 and duration != 0 else "N/A"
+        # Baseline: runtime_history[0] = SOURCE_orig (uninstrumented). duration at this point
+        # is SOURCE_verify runtime (overwritten at Stage 0b); using it would give an inflated diff.
+        experiment_data["lassiee_runtime_diff"] = round(((runtime_history[best_index] - runtime_history[0]) / runtime_history[0]) * 100 ,2) if best_index > 0 and len(runtime_history) > 0 and runtime_history[0] != 0 else "N/A"
         match_code_comparison_response = re.search(r"\[OPTIMIZATION LIST\](.*?)\[/OPTIMIZATION LIST\]", code_comparison_response, re.DOTALL)
         if match_code_comparison_response:
             optimization_list_text = match_code_comparison_response.group(1).strip()
@@ -1777,6 +1818,166 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["lassiee_clean_energy_J"] = lassiee_clean_energy_J
     experiment_data["lassiee_clean_energy_diff"] = lassiee_clean_energy_diff
 
+    # --- POST-PIPELINE: Three-Tier Verification of Base LLM (Zero-Shot) Code ---
+    # Apply the same three-tier verification framework to the base LLM code to determine
+    # its trustworthiness independent of the LLM judge. No self-correction: this step
+    # measures the code "as-is" to provide an honest, empirically grounded verdict.
+    # If any tier fails, base_llm_verified_valid = False (may override the prior judge verdict).
+    # Gated on run_tier2 and a non-empty passthrough spec — if Tier 2 never ran, we have no
+    # SOURCE_verify reference output to compare against.
+    base_llm_tier1_verdict = "NA"
+    base_llm_tier2_verdict = "NA"
+    base_llm_tier3_verdict = "NA"
+    base_llm_verified_valid = "NA"
+    base_llm_verification = {
+        "skipped": True,
+        "reason": "base LLM code not available or Tier 2 not enabled",
+        "tier1_verdict": "NA", "tier2_verdict": "NA", "tier3_verdict": "NA", "verified_valid": "NA",
+    }
+
+    if len(code_blocks) > 2 and run_tier2 and passthrough_spec_output != "":
+        print("\n\n=== POST-PIPELINE: Three-Tier Verification of Base LLM Code ===")
+        print("Instrumenting zero-shot code with same Tier 1+2 observation points as SOURCE_verify ...")
+        try:
+            # Step 1: Template-guided instrumentation — replicate SOURCE_verify's LASSI-VERIFY blocks
+            # into the base LLM code at equivalent locations (single LLM call, Tier 1 + Tier 2).
+            base_llm_instrumented = lassi.verify.code_insert_instrumentation_from_template(
+                code_blocks[2],     # base LLM code (generated from SOURCE_orig, no instrumentation)
+                input_code,         # SOURCE_verify (Tier 1 + Tier 2 instrumented — the template)
+                llm_source, model, num_ctx, system_prompt,
+                display_response, verifyprompt
+            )
+
+            if not base_llm_instrumented:
+                print("[Base LLM Verification] Instrumentation LLM returned empty code — skipping.")
+                base_llm_verification["reason"] = "instrumentation_failed"
+            else:
+                # Write instrumented code to disk
+                base_llm_verify_path = os.path.join(
+                    experiment_data_directory, file_name_save + "_base_llm_verify.cu"
+                )
+                with open(base_llm_verify_path, 'w') as _blf:
+                    _blf.write(base_llm_instrumented)
+
+                # Step 2: Compile instrumented base LLM code
+                print("[Base LLM Verification] Compiling instrumented base LLM code ...")
+                compile_err_bl, base_llm_exe = lassi.code_manager.compile_code(
+                    base_llm_verify_path, target_lang, code_compiler, code_compiler_kwds
+                )
+
+                if compile_err_bl:
+                    print(f"[Base LLM Verification] COMPILE ERROR:\n{str(compile_err_bl)[:300]}")
+                    base_llm_verification = {
+                        "skipped": False, "reason": "compile_error",
+                        "tier1_verdict": "NA", "tier2_verdict": "NA",
+                        "tier3_verdict": "NA", "verified_valid": False,
+                    }
+                else:
+                    # Step 3: Execute (power_measure=False — correctness run only, no energy overhead)
+                    print("[Base LLM Verification] Executing ...")
+                    _bl_result, _bl_stdout, _bl_energy_J, _bl_avg_power, _bl_std_power, \
+                        _bl_duration, _bl_metrics = lassi.code_manager.execute_code_selectvendor(
+                        experiment_data_directory,
+                        2,                    # code_version = base LLM index
+                        True,                 # zero_shot=True
+                        trial_number,
+                        directory,
+                        base_llm_exe,
+                        exe_input_parameters,
+                        False,                # power_measure=False (correctness run only)
+                        "base_llm_verify",    # code_source label
+                        target_lang,
+                        build_script,
+                        make_script,
+                        gpu_vendor="auto",
+                        wait=3
+                    )
+
+                    if _bl_result != "0":
+                        print("[Base LLM Verification] EXECUTE ERROR")
+                        base_llm_verification = {
+                            "skipped": False, "reason": "execute_error",
+                            "tier1_verdict": "NA", "tier2_verdict": "NA",
+                            "tier3_verdict": "NA", "verified_valid": False,
+                        }
+                    else:
+                        # Step 4: Tier 1 — invariant assertion check
+                        _bl_tier1_verdict, _bl_tier1_diag = lassi.verify.check_tier1_assertions(_bl_stdout)
+                        print(f"[Base LLM Verification] Tier 1: {_bl_tier1_verdict}")
+                        if _bl_tier1_verdict == "FAIL":
+                            print(_bl_tier1_diag.get("summary", ""))
+                        base_llm_tier1_verdict = _bl_tier1_verdict
+
+                        # Step 5: Tier 2 — empirical equivalence vs SOURCE_verify reference
+                        _bl_tier2_verdict, _bl_tier2_diag = lassi.verify.compare_passthrough_outputs(
+                            spec_stdout=passthrough_spec_output,
+                            generated_stdout=_bl_stdout,
+                            tolerance=tier2_tolerance,
+                            llm_source=llm_source, model=model, num_ctx=num_ctx,
+                            system_prompt=system_prompt, verifyprompt=verifyprompt
+                        )
+                        print(f"[Base LLM Verification] Tier 2: {_bl_tier2_verdict}")
+                        if _bl_tier2_diag.get("failures"):
+                            print(_bl_tier2_diag.get("summary", ""))
+                        base_llm_tier2_verdict = _bl_tier2_verdict
+
+                        # Step 6: Tier 3 — metamorphic testing (if active and Tier 2 not failed)
+                        _bl_tier3_verdict = "SKIP"
+                        _bl_tier3_results = []
+                        if run_tier3 and tier3_active_relations and not _bl_tier2_verdict.startswith("FAIL"):
+                            _bl_tier3_verdict, _bl_tier3_results, _bl_tier3_diag = \
+                                lassi.verify.run_metamorphic_variants(
+                                base_llm_instrumented,
+                                tier3_active_relations,
+                                tier3_contract,
+                                _bl_stdout,        # base LLM's own output as Tier 3 baseline (self-referential)
+                                llm_source, model, num_ctx, system_prompt,
+                                display_response,
+                                directory, file_name, code_compiler, code_compiler_kwds,
+                                build_script, make_script, code_build_script,
+                                exe_input_parameters,
+                                experiment_data_directory=experiment_data_directory,
+                                code_version="base_llm",
+                                verifyprompt=verifyprompt
+                            )
+                            print(f"[Base LLM Verification] Tier 3: {_bl_tier3_verdict}")
+                        base_llm_tier3_verdict = _bl_tier3_verdict
+
+                        # Step 7: Final verdict — any FAIL in any tier overrides prior judge decision
+                        _bl_all_pass = (
+                            _bl_tier1_verdict == "PASS" and
+                            not _bl_tier2_verdict.startswith("FAIL") and
+                            not _bl_tier3_verdict.startswith("FAIL")
+                        )
+                        base_llm_verified_valid = _bl_all_pass
+                        base_llm_verification = {
+                            "skipped": False,
+                            "tier1_verdict": _bl_tier1_verdict,
+                            "tier1_diagnostic": _bl_tier1_diag,
+                            "tier2_verdict": _bl_tier2_verdict,
+                            "tier2_diagnostic": _bl_tier2_diag,
+                            "tier3_verdict": _bl_tier3_verdict,
+                            "tier3_results": _bl_tier3_results,
+                            "verified_valid": _bl_all_pass,
+                        }
+                        print(f"\n[Base LLM Verification] FINAL VERDICT: "
+                              f"{'VALID' if _bl_all_pass else 'INVALID'} "
+                              f"(T1:{_bl_tier1_verdict}, T2:{_bl_tier2_verdict}, T3:{_bl_tier3_verdict})")
+
+        except Exception as _bl_ex:
+            print(f"[Base LLM Verification] EXCEPTION: {_bl_ex}")
+            base_llm_verification = {
+                "skipped": False, "reason": f"exception: {str(_bl_ex)}",
+                "tier1_verdict": "NA", "tier2_verdict": "NA", "tier3_verdict": "NA",
+                "verified_valid": False,
+            }
+
+    verification_log["base_llm_verification"] = base_llm_verification
+    experiment_data["base_llm_tier1_verdict"] = base_llm_tier1_verdict
+    experiment_data["base_llm_tier2_verdict"] = base_llm_tier2_verdict
+    experiment_data["base_llm_tier3_verdict"] = base_llm_tier3_verdict
+    experiment_data["base_llm_verified_valid"] = base_llm_verified_valid
+
     # --- LASSI-VERIFY JSON SIDECAR: save full verification_log for detailed inspection ---
     # tier2_spec_output (large stdout) and sourcecode_analysis (large text) are excluded here;
     # they are captured in the metadata .txt file. All other fields are saved verbatim.
@@ -1794,20 +1995,28 @@ def auto_code_llmgeneration_pipeline(prompts,
         meta_data_file += "Total Energy (J): "
         meta_data_file += "  Idle: " + str(round(idle_energy_joules, 2))
         meta_data_file += "  Source code: " + str(round(sourcecode_total_energy_joules, 2))
-        meta_data_file += "  Base LLM code: " + str(round(energy_history[1], 2))
+        meta_data_file += "  Base LLM code: " + (str(round(energy_history[2], 2)) if len(energy_history) > 2 else "NA")
         meta_data_file += "  Best Refactored code: " + str(round(energy_history[best_index], 2))
         meta_data_file += "\n"
         meta_data_file += "Average Power (W): "
         meta_data_file += "  Idle: " + str(round(idle_ave_power, 2))
         meta_data_file += "  Source code: " + str(round(sourcecode_ave_power, 2))
-        meta_data_file += "  Base LLM code: " + str(round(power_history[1], 2))
+        meta_data_file += "  Base LLM code: " + (str(round(power_history[2], 2)) if len(power_history) > 2 else "NA")
         meta_data_file += "  Best Refactored code: " + str(round(power_history[best_index], 2))
         meta_data_file += "\n"
+        # Runtime: use uninstrumented values wherever available.
+        # - Source code: runtime_history[0] = SOURCE_orig (uninstrumented; no Tier 1/2 overhead)
+        # - Base LLM code: runtime_history[2] = zero-shot output (generated from SOURCE_orig, no LASSI-VERIFY blocks)
+        # - Best refactored code: prefer lassiee_clean_runtime_s (strip-and-rerun) if available;
+        #   fall back to instrumented runtime_history[best_index] with a note.
+        # Idle runtime is omitted — not meaningful for runtime-performance mode.
+        _base_llm_rt = str(round(runtime_history[2], 4)) if len(runtime_history) > 2 else "NA"
+        _best_rt_val = lassiee_clean_runtime_s if lassiee_clean_runtime_s != "NA" else runtime_history[best_index]
+        _best_rt_note = " (uninstrumented)" if lassiee_clean_runtime_s != "NA" else " (instrumented — clean run unavailable)"
         meta_data_file += "Runtime (s): "
-        meta_data_file += "  Idle: " + str(round(duration, 2))
-        meta_data_file += "  Source code: " + str(round(duration, 2))
-        meta_data_file += "  Base LLM code: " + str(round(runtime_history[1], 2))
-        meta_data_file += "  Best Refactored code: " + str(round(runtime_history[best_index], 2))
+        meta_data_file += "  Source code (uninstrumented): " + str(round(runtime_history[0], 4))
+        meta_data_file += "  Base LLM code: " + _base_llm_rt
+        meta_data_file += "  Best Refactored code: " + str(round(_best_rt_val, 4)) + _best_rt_note
     if yes_execute:
         meta_data_file += "\n\n\n----- SOURCE: EXECUTION OUTPUT -----\n"
         meta_data_file += best_refactored_code_dict["source_stdout"]
