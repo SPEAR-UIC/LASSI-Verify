@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
     for(unsigned int j = 0; j < numNodes; j++)
     {
       int index = i*numNodes + j;
-      pathDistanceMatrix[index] = rand() % (MAXDISTANCE + 1);
+      pathDistanceMatrix[index] = rand() % MAXDISTANCE + 1;
     }
   for(unsigned int i = 0; i < numNodes; ++i)
   {

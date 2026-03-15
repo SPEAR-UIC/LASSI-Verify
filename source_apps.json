@@ -33,7 +33,7 @@
         },
         "floydwarshall": {
             "app_folder": "floydwarshall",
-            "app_params": ["2048", "100", "256"],
+            "app_params": ["2048", "100", "16"],
             "code_lines": 295
         },
         "keogh": {

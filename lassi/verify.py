@@ -578,6 +578,7 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
             "tolerance":       tolerance,
             "blocks_compared": 0,
             "failures":        [],
+            "max_relative_error": None,
             "summary":         "SKIP: No LASSI-VERIFY PASSTHROUGH blocks found in either output. "
                                "Passthrough insertion may have failed or blocks were removed during refactoring."
         }
@@ -586,6 +587,7 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
 
     failures = []
     blocks_compared = 0
+    max_rel_err = 0.0   # largest relative error across all blocks and stats (for Table 2)
 
     for label, spec_bodies in spec_blocks.items():
         gen_bodies = gen_blocks.get(label, [])
@@ -647,6 +649,7 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
             for stat_name, spec_val in spec_stats.items():
                 gen_val = gen_stats.get(stat_name)
                 if gen_val is None:
+                    max_rel_err = max(max_rel_err, float('inf'))
                     failures.append({
                         "label":     failure_label,
                         "stat":      stat_name,
@@ -656,6 +659,9 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
                         "atol":      atol,
                     })
                     continue
+                _denom = max(abs(spec_val), atol)
+                _rel = abs_err(spec_val, gen_val) / _denom if _denom > 0 else (0.0 if abs_err(spec_val, gen_val) == 0.0 else float('inf'))
+                max_rel_err = max(max_rel_err, _rel)
                 if not allclose_pass(spec_val, gen_val, tolerance, atol):
                     failures.append({
                         "label":     failure_label,
@@ -671,6 +677,9 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
             gen_samples  = parse_samples(gen_body)
             if spec_samples and gen_samples:
                 for idx, (sv, gv) in enumerate(zip(spec_samples, gen_samples)):
+                    _denom = max(abs(sv), atol)
+                    _rel = abs_err(sv, gv) / _denom if _denom > 0 else (0.0 if abs_err(sv, gv) == 0.0 else float('inf'))
+                    max_rel_err = max(max_rel_err, _rel)
                     if not allclose_pass(sv, gv, tolerance, atol):
                         failures.append({
                             "label":     failure_label,
@@ -728,6 +737,7 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
             "tolerance":       tolerance,
             "blocks_compared": blocks_compared,
             "failures":        failures,
+            "max_relative_error": max_rel_err if max_rel_err != float('inf') else None,
             "summary":         summary,
         }
         return llm_verdict, diagnostic
@@ -765,9 +775,36 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
         "tolerance":       tolerance,
         "blocks_compared": blocks_compared,
         "failures":        failures,
+        "max_relative_error": max_rel_err if max_rel_err != float('inf') else None,
         "summary":         summary,
     }
     return verdict, diagnostic
+
+
+# =============================================================================
+# LABEL EXTRACTION HELPERS (used by Table 2 per-attempt logging)
+# =============================================================================
+
+def extract_tier1_labels(code_text):
+    """Return comma-separated list of Tier 1 assertion labels present in the code source.
+    Excludes the sentinel label 'tier1_complete'. Used to document what was checkable
+    per attempt and detect cases where the LLM accidentally stripped assertion blocks."""
+    labels = re.findall(r'LASSI-VERIFY ASSERTIONS \[([^\]]+)\]', code_text)
+    labels = [l for l in labels if l != _TIER1_SENTINEL_LABEL]
+    # Deduplicate while preserving order
+    seen = set()
+    unique = [l for l in labels if not (l in seen or seen.add(l))]
+    return ",".join(unique)
+
+
+def extract_tier2_labels(code_text):
+    """Return comma-separated list of Tier 2 passthrough block labels present in the code source.
+    Used to document observation points per attempt and detect stripped blocks."""
+    labels = re.findall(r'BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\]', code_text)
+    # Deduplicate while preserving order
+    seen = set()
+    unique = [l for l in labels if not (l in seen or seen.add(l))]
+    return ",".join(unique)
 
 
 # =============================================================================

@@ -118,7 +118,7 @@ Every assertion you insert **must** use two block types: **Type 1** (always-prin
 The pipeline parses `LASSI-VERIFY ASSERTIONS [label]: PASS` and `LASSI-VERIFY ASSERTIONS [label]: FAIL` lines, plus the `[tier1_complete]: PASS` sentinel. Any other format (including bare `assert()` calls) will be silently ignored by `check_tier1_assertions()`.
 
 ### Rules
-- Label MUST be unique within the file (e.g., `input_ptrs_valid`, `array_dims_valid`, `input_finite`, `output_finite`, `matrix_sym`, `conservation_check`)
+- Label MUST be **globally unique within the file** — no two assertion blocks may share the same label string. The parser counts each `PASS`/`FAIL` line as a separate assertion instance; duplicate labels make the failure count misleading and inflate `tier1_assertions_failed`. For code with **multiple kernel launches** checking the same invariant, use a numeric or semantic suffix: `kernel_params_valid_k1`, `kernel_params_valid_k2`, `kernel_params_valid_k3` — not `kernel_params_valid` repeated. (e.g., `input_ptrs_valid`, `array_dims_valid`, `input_finite`, `output_finite`, `matrix_sym`, `conservation_check`)
 - `#include <cstdio>` — not `<assert.h>`
 - **Type 1 blocks always print exactly one line** (`PASS` or `FAIL`) — this line is essential pipeline output and must never be removed or hidden inside a conditional
 - **NEVER place assertion blocks inside solver loops or compute loops** — place them BEFORE and AFTER loops at observation points (function entry, pre-H→D transfer, post-D→H transfer, function exit). One print per block per program execution is the target — not one print per loop iteration.

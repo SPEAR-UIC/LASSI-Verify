@@ -7,5 +7,6 @@ pandas
 matplotlib
 tiktoken
 aiohttp
+markdown
 numba
 # jupyterlab

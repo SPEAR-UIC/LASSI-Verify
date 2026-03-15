@@ -201,7 +201,7 @@ def test_source_code(app_name, experiment_data_directory,
         energy_history.append(round(sourcecode_total_energy_joules, 2))
         actual_ave_power = sourcecode_ave_power - idle_ave_power
         power_history.append(round(float(sourcecode_ave_power), 2))
-        runtime_history.append(round(float(duration),2))
+        runtime_history.append(round(float(duration),4))
         valid_code_history.append("SOURCE")
 
     return (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power,
