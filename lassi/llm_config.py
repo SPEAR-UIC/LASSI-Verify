@@ -371,57 +371,5 @@ def argo_llm(model, system_prompt, content_prompt, temp=0.2, verifyprompt=False,
     }
 
     response = lassi.argostream_curl.argo_fetch_with_curl(payload)
-    # response = requests.post(url, json=data, headers=headers, verify=False)
-
-    # print(response.json()['response'])
-
-    # headers = [
-    #     "-H", "Content-Type: application/json",
-    #     "-H", "Accept: text/plain",
-    #     "-H", "Host: apps-dev.inside.anl.gov"
-    # ]
-
-    # Run curl as a subprocess, capturing output as it streams
-    # process = subprocess.Popen(
-    #     ["curl", "-k", "-X", "POST", url, *headers, "-d", payload],
-    #     stdout=subprocess.PIPE,
-    #     stderr=subprocess.PIPE,
-    #     text=True,
-    #     bufsize=1  # Line-buffered for real-time output
-    # )
-
-    # response_text = []
-
-    # Read output line by line and capture everything
-    # with process.stdout:
-    #     for line in iter(process.stdout.readline, ''):
-    #         print(line, end="", flush=True)  # Print each chunk live
-    #         response_text.append(line.strip())  # Store the full response properly
-
-    # Ensure the process is completed
-    # process.wait()
-
-    # Join the response lines properly before returning
-    # final_response = "\n".join(response_text)
     
-    # Run the async function
-    # response_text = fetch_stream(url, data, headers)
-    #response_text = fetch_with_curl(url, payload)
-
-    # print("response_text: \n\n", response_text)
-
-    # Send POST request
-    # response = requests.post(url, data=payload, headers=headers, stream=True)
-    # response_text = response.json()['response']
-    # Use httpx to send the request with streaming enabled
-    # with httpx.stream("POST", url, json=data, headers=headers) as response:
-    #     print("Status Code: ", response.status_code)
-    #     print("Headers: ", response.headers)
-    #     print("Streaming Response: ")
-    #     # Read chunks as they arrive
-    #     for chunk_content in response.iter_bytes():  # response.iter_content(chunk_size=1):
-    #         if chunk_content:
-    #        = ""      response_text += chunk_content
-    #             print(chunk_content.decode(errors="replace"), end="", flush=True)  # Print each chunk as it arrives
-
     return response

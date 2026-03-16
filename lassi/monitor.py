@@ -244,6 +244,11 @@ details.html-collapsible[open] > summary::before { content: '▼  '; }
   white-space: pre-wrap; word-break: break-word; font-family: 'Consolas', monospace;
 }
 /* ── line classification colours ── */
+.lassi-start {
+  color: #9cdcfe; font-weight: bold; font-size: 15px; letter-spacing: 0.4px;
+  background: #1a2a3a; border-top: 3px solid #569cd6; border-bottom: 1px solid #3a5a8a;
+  margin-top: 16px; padding: 7px 4px;
+}
 .stage-header {
   color: #569cd6; font-weight: bold;
   border-top: 1px solid #2a3a4a; margin-top: 10px; padding-top: 4px;
@@ -297,6 +302,13 @@ details.exec-block {
 }
 details.exec-block > summary { color: #4ec9b0; }
 .exec-block .collapsible-cap { color: #3a7a7a; border-top: 1px solid #1e4a4a; }
+/* refactoring plan block — steel-blue accent */
+details.refplan-block {
+  border-left: 4px solid #7a9abf; border-bottom: 2px solid #4a6a8f;
+  border-top: 1px solid #4a6a8f; border-right: 1px solid #4a6a8f;
+}
+details.refplan-block > summary { color: #9cdcfe; }
+.refplan-block .collapsible-cap { color: #5a7a9f; border-top: 1px solid #3a5a7f; }
 /* LLM response section markers */
 .llm-response  { color: #9cdcfe; font-style: italic; }
 /* metrics / results section */
@@ -391,6 +403,7 @@ function classify(text) {
       /\[Base LLM Verification\].*\bSKIP\b/.test(t))                    return 'tier-skip';
   if (/Program executed successfully/.test(t))                                      return 'exec-success';
   if (/STARTING CODE INSERT/.test(t))                                               return 'verify-insert';
+  if (/STARTING LASSI:/.test(t))                                                    return 'lassi-start';
   if (/STARTING (STAGE|LASSI)|WELCOME TO PIPELINE|SOURCE CODE: Test compile/.test(t)) return 'stage-header';
   if (/LLM RESPONSE:|END LLM RESPONSE/.test(t))                                    return 'llm-response';
   if (/Power and Energy Feedback data/.test(t))                                     return 'metrics-header';
@@ -440,6 +453,9 @@ function _closeBlock() {
 }
 
 function addLog(ts, text) {
+  // Close-and-fall-through: line signals end of current block AND is rendered normally
+  if (_blockTarget && /THE REFACTORING PLAN PROMPT/.test(text)) { _closeBlock(); }
+
   if (/=====> VERIFY THE PROMPTING <=====/.test(text)) {
     _openBlock(ts, 'PROMPT REVIEW', 'prompt-block', '▲  end of prompt review'); return;
   }
@@ -448,6 +464,9 @@ function addLog(ts, text) {
     _openBlock(ts, 'CODE EXECUTION OUTPUT', 'exec-block', '▲  end of execution output'); return;
   }
   if (/< END: Standard Output >/.test(text))           { _closeBlock(); return; }
+  if (/LLM RESPONSE: refactoring plan/.test(text)) {
+    _openBlock(ts, 'REFACTORING PLAN', 'refplan-block', '▲  end of refactoring plan'); return;
+  }
   const cls    = classify(text);
   const node   = document.createElement('span');
   node.className = 'log-line' + (cls ? ' ' + cls : '');

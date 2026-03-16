@@ -131,8 +131,14 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
         - ONLY add: new passthrough blocks and any minimally required headers
 
         **OUTPUT INSTRUCTIONS:**
-        Output ONLY the complete, modified source code ready to compile. Do not include explanatory
-        text, commentary, or markdown formatting outside of a single code fence.
+        Always provide the complete and fully functional instrumented code without placeholders,
+        comments, or references suggesting that parts of the original code should be included.
+        Ensure every part of the instrumented code is explicitly written out.
+        Do NOT use ellipsis (...), shorthand like "// [other kernels unchanged]",
+        "// ... rest of code ...", "// same as before", or ANY comment or notation suggesting
+        sections were omitted or skipped. Output ONLY the complete, modified source code ready
+        to compile. Do not include explanatory text, commentary, or markdown formatting outside
+        of a single code fence.
 
         ----
 
@@ -182,6 +188,16 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
         extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)  # Strip language specifier (e.g. cpp\n)
     else:
         extracted_code = ""
+
+    # Sanity check: instrumentation only adds lines — same or fewer lines means the LLM
+    # omitted sections via placeholder comments (e.g. "// ... [other kernels unchanged] ...").
+    input_lines = len(source_code.splitlines())
+    output_lines = len(extracted_code.splitlines())
+    if extracted_code and output_lines <= input_lines:
+        print(f"\n[WARNING] Passthrough instrumentation line count check FAILED: "
+              f"input={input_lines} lines, output={output_lines} lines. "
+              f"LLM likely omitted code via placeholder comments. Rejecting output.")
+        return ""
 
     return extracted_code
 
@@ -399,20 +415,27 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
         ---
         
         **Output Instructions:**
-        
+
+        Always provide the complete and fully functional instrumented code without placeholders,
+        comments, or references suggesting that parts of the original code should be included.
+        Ensure every part of the instrumented code is explicitly written out.
+        Do NOT use ellipsis (...), shorthand like "// [other kernels unchanged]",
+        "// ... rest of code ...", "// same as before", or ANY comment or notation suggesting
+        sections were omitted or skipped.
+
         Only output the complete, modified source file with inserted assertion blocks, ready to compile under `nvcc` or `hipcc`.
-        
+
         **Do NOT include:**
         - Explanatory commentary about what you changed
         - Descriptions of your reasoning
         - Summaries of insertions
-        
+
         **DO include:**
         - The complete source file with all original code intact
         - Assertion blocks surrounded by protective comments
         - Any necessary additional #include directives at the top
         - All assertions using correct variable names and array bounds from the source
-        
+
         ---
 
     """
@@ -448,9 +471,9 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
         print("(hidden)\n\n")
         display(Markdown(response_text))
 
-    # Extract only the code block - 
+    # Extract only the code block -
     # Search for the ``` pattern in the text
-    #   Regular expression pattern to match text between triple backticks 
+    #   Regular expression pattern to match text between triple backticks
     #   that represent code blocks within generated responses from the LLM.
     pattern = r"```(.*?)```"
     match = re.search(pattern, response_text, re.DOTALL)
@@ -465,6 +488,16 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
         extracted_code = ""
 
     # print("\nEXTRACTED CODE: ", extracted_code)  # DEBUG: uncomment to inspect extracted code block
+
+    # Sanity check: instrumentation only adds lines — same or fewer lines means the LLM
+    # omitted sections via placeholder comments (e.g. "// ... [other kernels unchanged] ...").
+    input_lines = len(source_code.splitlines())
+    output_lines = len(extracted_code.splitlines())
+    if extracted_code and output_lines <= input_lines:
+        print(f"\n[WARNING] Assertion instrumentation line count check FAILED: "
+              f"input={input_lines} lines, output={output_lines} lines. "
+              f"LLM likely omitted code via placeholder comments. Rejecting output.")
+        return ""
 
     return extracted_code
 
@@ -1182,9 +1215,15 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         + transform_instruction + "\n"
         + block_format + "\n"
         "**OUTPUT INSTRUCTIONS:**\n"
-        "- Output ONLY the complete, modified source code ready to compile.\n"
-        "- Do NOT include explanatory text or commentary outside of a single code fence.\n"
-        "- The output must compile with nvcc or hipcc.\n\n"
+        "Always provide the complete and fully functional instrumented code without placeholders, "
+        "comments, or references suggesting that parts of the original code should be included. "
+        "Ensure every part of the instrumented code is explicitly written out. "
+        "Do NOT use ellipsis (...), shorthand like '// [other kernels unchanged]', "
+        "'// ... rest of code ...', '// same as before', or ANY comment or notation suggesting "
+        "sections were omitted or skipped. "
+        "Output ONLY the complete, modified source code ready to compile. "
+        "Do NOT include explanatory text or commentary outside of a single code fence. "
+        "The output must compile with nvcc or hipcc.\n\n"
         + (
             "[REFERENCE TEMPLATE — how this metamorphic relation was inserted into the SOURCE_verify version]\n"
             "The following shows the validated strategy used to insert this same relation into the "
@@ -1225,6 +1264,16 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
     else:
         extracted_code = ""
+
+    # Sanity check: instrumentation only adds lines — same or fewer lines means the LLM
+    # omitted sections via placeholder comments (e.g. "// ... [other kernels unchanged] ...").
+    input_lines = len(source_code.splitlines())
+    output_lines = len(extracted_code.splitlines())
+    if extracted_code and output_lines <= input_lines:
+        print(f"\n[WARNING] Metamorphic variant line count check FAILED: "
+              f"input={input_lines} lines, output={output_lines} lines. "
+              f"LLM likely omitted code via placeholder comments. Rejecting output.")
+        return ""
 
     return extracted_code
 

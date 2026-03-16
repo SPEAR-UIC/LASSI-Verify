@@ -478,8 +478,11 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Write the instrumented source to disk so test_source_code compiles and runs it —
     # not the original .cu file. This gives true SOURCE_verify metrics that include
     # any overhead from the inserted invariant assertion checks (and passthrough blocks if Tier 2 enabled).
-    source_base, source_ext = os.path.splitext(source_file_path)
-    verify_source_file_path = source_base + "_verify" + source_ext
+    # Saved to the experiment folder (not alongside the original source) — it is an experiment artifact,
+    # not a permanent modification of the benchmark source. After this point, the pipeline always uses
+    # code_blocks[1] (in-memory) and never reads this file again.
+    _, source_ext = os.path.splitext(source_file_path)
+    verify_source_file_path = os.path.join(experiment_data_directory, file_name + "_verify" + source_ext)
     with open(verify_source_file_path, 'w') as _vf:
         _vf.write(input_code)
     print(f"\n----- LASSI-Verify: instrumented source written to {verify_source_file_path} -----")
@@ -714,7 +717,26 @@ def auto_code_llmgeneration_pipeline(prompts,
             print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
 
             tier1_diag_summary = tier1_diagnostic.get("summary", "(no diagnostic available)")
-            failing_labels_str = ", ".join(f"[{l}]" for l in tier1_diagnostic.get("failing_labels", []))
+            failing_labels = tier1_diagnostic.get("failing_labels", [])
+            failing_labels_str = ", ".join(f"[{l}]" for l in failing_labels)
+
+            # Extract the full assertion block source for each failing label so the LLM knows
+            # exactly what condition needs to evaluate to true — not just the label name.
+            _block_re = re.compile(
+                r'(// >>> BEGIN LASSI-VERIFY ASSERTIONS.*?// <<< END LASSI-VERIFY ASSERTIONS <<<)',
+                re.DOTALL
+            )
+            failing_block_texts = []
+            for _label in failing_labels:
+                for _bm in _block_re.finditer(code_blocks[1]):  # SOURCE_verify is authoritative — unmodified by LLM
+                    if f'[{_label}]' in _bm.group(1):
+                        failing_block_texts.append(_bm.group(1).strip())
+                        break
+            failing_blocks_section = (
+                "\n\n=== FAILING ASSERTION BLOCK(S) — source of the condition that printed FAIL ===\n"
+                + "\n\n".join(failing_block_texts) +
+                "\n=== END FAILING ASSERTION BLOCK(S) ===\n"
+            ) if failing_block_texts else ""
 
             error_correction_prompt_intro = (
                 "\n\nThe above code compiled and executed successfully but FAILED LASSI-Verify "
@@ -723,9 +745,13 @@ def auto_code_llmgeneration_pipeline(prompts,
                 "=== TIER 1 DIAGNOSTIC ===\n"
                 + tier1_diag_summary +
                 "\n\nFailing assertion label(s): " + (failing_labels_str if failing_labels_str else "(see diagnostic above)") +
+                failing_blocks_section +
                 "\n=== END TIER 1 DIAGNOSTIC ===\n\n"
-                "Fix the generated code so that all invariant assertions PASS. "
-                "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
+                "Fix the generated code so that the condition(s) shown in the failing assertion "
+                "block(s) above evaluate to true. "
+                "Do NOT remove, comment out, or modify any LASSI-VERIFY ASSERTIONS or "
+                "LASSI-VERIFY PASSTHROUGH blocks — the fix must be in the surrounding "
+                "computation, not in the assertions themselves. "
                 "The issue is a mathematical correctness error — the computation violates a "
                 "transformation-invariant property that any correct implementation must satisfy."
             )
