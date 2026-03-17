@@ -1263,7 +1263,18 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         extracted_code = match.group(1)
         extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
     else:
-        extracted_code = ""
+        # Fallback: LLM response did not include code fences (common for very long files).
+        # Try to extract from the first preprocessor directive or CUDA/C++ keyword.
+        # Without this, long kernels like lid-driven-cavity always SKIP Tier 3 because
+        # the LLM response for a 1000+ line file omits backtick fences.
+        fallback_pattern = r'((?:#include|#pragma|#define|__global__|extern\s+"C").*)'
+        fallback_match = re.search(fallback_pattern, response_text, re.DOTALL)
+        if fallback_match:
+            extracted_code = fallback_match.group(1)
+            print(f"\n[WARNING] code_insert_metamorphic_variant: no code fences in LLM response for '{relation_name}'; extracted from first code directive.")
+        else:
+            extracted_code = ""
+            print(f"\n[WARNING] code_insert_metamorphic_variant: no code fences or code directives found for '{relation_name}'; cannot extract variant.")
 
     # Sanity check: instrumentation only adds lines — same or fewer lines means the LLM
     # omitted sections via placeholder comments (e.g. "// ... [other kernels unchanged] ...").

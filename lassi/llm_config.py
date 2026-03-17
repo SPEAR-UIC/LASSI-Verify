@@ -18,6 +18,9 @@ from urllib3.exceptions import InsecureRequestWarning
 
 warnings.simplefilter("ignore", InsecureRequestWarning)
 
+# Argo Gateway username — set this in the notebook via lassi.llm_config.argo_username = "your_username"
+argo_username = "mdearing"
+
 """
 Local hosted LLM via OLLAMA API, GGUF quantized models
 
@@ -348,15 +351,17 @@ def argo_llm(model, system_prompt, content_prompt, temp=0.2, verifyprompt=False,
         print("\n=====< LLM Prompt Not Shown >=====\n")
     
     # Data to be sent as a POST in JSON format
+    # Claude models do not accept top_p alongside temperature — omit it for those models.
     data = {
-        "user": "mdearing",
+        "user": argo_username,
         "model": model,   # gpt35, gpt4turbo
         "system": system_prompt,
         "prompt": [content_prompt],
         "stop": [],
         "temperature": round(temp, 1),
-        "top_p": 0.9,
     }
+    if not model.lower().startswith("claude"):
+        data["top_p"] = 0.9
 
     # Convert the dict to JSON string for curl
     payload = json.dumps(data)

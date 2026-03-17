@@ -257,8 +257,9 @@ details.html-collapsible[open] > summary::before { content: '▼  '; }
 .tier-fail    { color: #f44747; font-weight: bold; }
 .tier-skip    { color: #dcdcaa; }
 .iteration-restart {
-  color: #f4a247; font-weight: bold; font-size: 14px;
-  border-top: 3px solid #a06020; margin-top: 14px; padding-top: 6px;
+  color: #f4a247; font-weight: bold; font-size: 15px; letter-spacing: 0.4px;
+  background: #2a1a08; border-top: 3px solid #a06020; border-bottom: 1px solid #7a4010;
+  margin-top: 16px; padding: 7px 4px;
 }
 .self-correct { color: #f4a247; font-weight: bold; }
 .loop-step    { color: #5a8aaa; }
@@ -286,7 +287,7 @@ details.collapsible-block[open] > summary::before { content: '▼  '; }
 .collapsible-body { padding: 2px 14px; border-top: 1px solid #222; }
 .collapsible-cap {
   margin-top: 4px; padding: 2px 0; font-size: 10px;
-  text-align: right; font-style: italic; user-select: none;
+  text-align: left; font-style: italic; user-select: none;
 }
 /* prompt-review block — green accent */
 details.prompt-block {

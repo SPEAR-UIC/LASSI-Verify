@@ -33,6 +33,28 @@ from lassi.gpu_detector import detect_gpu_vendors
 
 
 
+def _strip_lassi_verify_stdout(stdout_text):
+    """Strip all LASSI-VERIFY instrumentation lines from execution stdout before sending to
+    the LLM judge. Removes Tier 2 passthrough blocks (BEGIN...END with all content between)
+    and Tier 1 assertion lines (LASSI-VERIFY ASSERTIONS [...]: PASS/FAIL).
+    This gives the judge the same uninstrumented benchmark output the original LLM judge used,
+    preventing context-window overflow from loop-inserted passthrough blocks."""
+    if not stdout_text:
+        return stdout_text
+    # Remove Tier 2 passthrough blocks (multi-line: everything from \n=== BEGIN to END ===\n)
+    stripped = re.sub(
+        r'\n?=== BEGIN LASSI-VERIFY PASSTHROUGH \[.*?\] ===\n.*?=== END LASSI-VERIFY PASSTHROUGH \[.*?\] ===\n?',
+        '\n',
+        stdout_text,
+        flags=re.DOTALL
+    )
+    # Remove Tier 1 assertion lines (single-line PASS/FAIL prints)
+    stripped = re.sub(r'^LASSI-VERIFY ASSERTIONS \[.*?\]: (PASS|FAIL)\s*$', '', stripped, flags=re.MULTILINE)
+    # Collapse runs of 3+ blank lines to 2 (keeps output readable)
+    stripped = re.sub(r'\n{3,}', '\n\n', stripped)
+    return stripped.strip()
+
+
 def _build_attempt_record(app_name, trial_number, code_block_index, attempt_number,
                           is_final_attempt, generation_type, sc_trigger,
                           llm_temperature, compile_status, execute_status,
@@ -371,6 +393,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     self_correction_counter = 0
     self_correction_power_counter = 0
     fresh_generation_count = 0              # Table 1 ★: count of distinct fresh LASSI code generations started (includes codes that never executed)
+    judge_api_error_count = 0               # Safety net: counts LLM judge calls that returned neither VALID nor INVALID (e.g. context overflow). Pipeline stops if ≥3.
 
     # Pull in prompts used for base (vanilla) LLM
     # Same prompting strategy for STAGE 1 and STAGE 2
@@ -452,7 +475,7 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     input_code = lassi.verify.code_insert_asserts(
         input_content_llmjudge_dict["source_code"],
-        llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=True
+        llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt
     )
 
     input_content_llmjudge_dict["source_code"] = input_code
@@ -465,7 +488,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     if run_tier2:
         passthrough_code = lassi.verify.code_insert_passthrough(
             input_code,  # already has Tier 1 assertions
-            llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=True
+            llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt
         )
         if passthrough_code != "":
             input_code = passthrough_code
@@ -482,7 +505,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     # not a permanent modification of the benchmark source. After this point, the pipeline always uses
     # code_blocks[1] (in-memory) and never reads this file again.
     _, source_ext = os.path.splitext(source_file_path)
-    verify_source_file_path = os.path.join(experiment_data_directory, file_name + "_verify" + source_ext)
+    verify_source_file_path = os.path.join(experiment_data_directory, file_name + "_verify_Trial" + str(trial_number) + source_ext)
     with open(verify_source_file_path, 'w') as _vf:
         _vf.write(input_code)
     print(f"\n----- LASSI-Verify: instrumented source written to {verify_source_file_path} -----")
@@ -522,7 +545,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         tier3_contract = lassi.verify.generate_metamorphic_contract(
             input_code,  # SOURCE_verify (Tier 1 + Tier 2 instrumented)
             llm_source, model, num_ctx, system_prompt, display_response,
-            verifyprompt=True
+            verifyprompt=verifyprompt
         )
         if tier3_contract and tier3_contract.get("relations"):
             print(f"\n----- LASSI-Verify Tier 3: running SOURCE_verify metamorphic variants (filter) -----")
@@ -537,7 +560,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 build_script, make_script, code_build_script,
                 exe_input_parameters,
                 experiment_data_directory=experiment_data_directory,
-                verifyprompt=True
+                verifyprompt=verifyprompt
             )
             # Mark relations active/inactive based on source filter results.
             # "PASS" → relation is applicable; "FAIL" or "SKIP" → filter inactive.
@@ -759,8 +782,8 @@ def auto_code_llmgeneration_pipeline(prompts,
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
             error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
             error_prompt_tokens = lassi.token_analysis.token_count(error_prompt)
-            if verifyprompt:
-                print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 1 assertion self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
+            # if verifyprompt:
+            #     print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 1 assertion self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to fix code following Tier 1 assertion failure." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
 
@@ -804,8 +827,8 @@ def auto_code_llmgeneration_pipeline(prompts,
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
             error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
             error_prompt_tokens = lassi.token_analysis.token_count(error_prompt)
-            if verifyprompt:
-                print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 2 verification self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
+            # if verifyprompt:
+            #     print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 2 verification self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to fix code following Tier 2 verification failure." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
 
@@ -837,8 +860,8 @@ def auto_code_llmgeneration_pipeline(prompts,
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
             error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
             error_prompt_tokens = lassi.token_analysis.token_count(error_prompt)
-            if verifyprompt:
-                print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 3 metamorphic self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
+            # if verifyprompt:
+            #     print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(Tier 3 metamorphic self-correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to fix code following Tier 3 metamorphic test failure." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
 
@@ -881,8 +904,8 @@ def auto_code_llmgeneration_pipeline(prompts,
             error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro + "\n\n" + error_message
             error_prompt_tokens = lassi.token_analysis.token_count(error_prompt)
             print("\n\n----- " + color.BOLD + color.RED + "ERROR SELF-CORRECTION" + color.END + " -----")
-            if verifyprompt:
-                print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(error correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
+            # if verifyprompt:
+            #    print("\n\n" + color.BOLD + "REVIEW PROMPT " + color.END + "(error correction, token count: " + str(error_prompt_tokens) + "): " + error_prompt + "\n\n")
             # error_prompt = re.sub('\n', ' ', error_prompt)
             print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to generate code following an error." + color.END + "\n\n")
             code_response, code_block = lassi.llm_methods.code_generator_llm(llm_source, model_coder, num_ctx_coder, 0.2, this_llm_systemcode_prompt, error_prompt, display_response, verifyprompt)
@@ -1588,7 +1611,13 @@ def auto_code_llmgeneration_pipeline(prompts,
                     judge_dict["source_code"] = code_blocks[0]      # compare vanilla LLM against original (uninstrumented) source
                     judge_dict["source_stdout"] = source_orig_stdout  # use uninstrumented stdout; source_verify_stdout has passthrough dump noise
                 else:
-                    judge_dict = input_content_llmjudge_dict         # compare LASSI against instrumented source
+                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy so strip below does not mutate the shared dict
+                    judge_dict["source_stdout"] = source_orig_stdout  # uninstrumented baseline; source_verify_stdout has Tier 2 passthrough noise
+                # Strip Tier 1 + Tier 2 LASSI-VERIFY instrumentation from refactored stdout
+                # so the judge sees only the benchmark's primary output — matching the
+                # original (pre-LASSI) judge design and preventing context-window overflow
+                # from loop-inserted passthrough blocks (which can produce thousands of lines).
+                judge_dict["refactored_stdout"] = _strip_lassi_verify_stdout(judge_dict.get("refactored_stdout", ""))
                 valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(target_lang, llm_source, model_judge, num_ctx, system_prompt, judge_dict, power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt)
             else:
                 # Pure three-tier mode (LASSI only, never zero_shot): Tier 1 + Tier 2 determine validity.
@@ -1604,7 +1633,16 @@ def auto_code_llmgeneration_pipeline(prompts,
             # (e.g. "NONE", malformed output) is treated as INVALID.
             if valid_code_flag != "VALID":
                 if valid_code_flag != "INVALID":
-                    print(f"\n----- LLM judge returned unexpected verdict '{valid_code_flag}' — normalizing to INVALID -----")
+                    judge_api_error_count += 1
+                    print(f"\n----- LLM judge returned unexpected verdict '{valid_code_flag}' — normalizing to INVALID (judge API error count: {judge_api_error_count}/3) -----")
+                    if judge_api_error_count >= 3:
+                        raise RuntimeError(
+                            f"LLM judge returned a non-verdict ('{valid_code_flag}') 3 times in a row. "
+                            "This likely indicates a persistent API error (e.g. context-window overflow, "
+                            "network timeout). Stopping pipeline to prevent further wasted iterations. "
+                            "Check the monitor log for the error details, fix the root cause "
+                            "(e.g. reduce prompt size), then restart."
+                        )
                 valid_code_flag = "INVALID"
 
             # Handle scenario where we might have a bad power measurement
@@ -2090,9 +2128,8 @@ def auto_code_llmgeneration_pipeline(prompts,
 
         compare_code_prompt_tokens = lassi.token_analysis.token_count(compare_code)
 
-        if verifyprompt:
-            print("\n----- " + color.BOLD + color.GREEN + "REVIEW THE CODE COMPARISON PROMPT " + color.END + " (prompt token count: " + str(compare_code_prompt_tokens) + "): \n\n" + compare_code + "\n")
-
+        # if verifyprompt:
+        #    print("\n----- " + color.BOLD + color.GREEN + "REVIEW THE CODE COMPARISON PROMPT " + color.END + " (prompt token count: " + str(compare_code_prompt_tokens) + "): \n\n" + compare_code + "\n")
         # Send prompt to LLM endpoint
         print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "LLM prompt to compare codes." + color.END + "\n\n")
         code_comparison_response = lassi.llm_methods.llm_call("code comparison", llm_source, model, num_ctx, system_prompt, compare_code, display_response, verifyprompt)

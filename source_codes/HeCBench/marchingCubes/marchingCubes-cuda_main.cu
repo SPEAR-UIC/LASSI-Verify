@@ -6,7 +6,7 @@
 #include <random>
 #include <chrono>
 #include <cuda.h>
-#include "/home/cc/lassi/LASSI-EE/source_codes/HeCBench/marchingCubes/tables.h"
+#include "/home/mdearing/Research/LASSI/LASSI-Verify/source_codes/HeCBench/marchingCubes/tables.h"
 
 // problem size
 constexpr unsigned int N(1024);
