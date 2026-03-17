@@ -160,6 +160,10 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
     # print("  content_prompt: " + str(content_prompt))
     # print("  display_response: " + str(display_response))
 
+    # Override with the verification insertion system prompt — preserves all existing code,
+    # prevents the performance-optimization system prompt from compressing LASSI-VERIFY blocks.
+    system_prompt = prompts.get_system_prompt("verify_insert")
+
     temp = 0.2
     if llm_source == "argo":
         response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
@@ -445,7 +449,7 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     
     
     print("\n----- " + color.BOLD + color.PURPLE + "STARTING CODE INSERT - Invariant Assertions" + color.END + " -----\n")
-    
+
     # print("\n\nDEBUG input parameter values:")
     # print("  llm_source: " + str(llm_source))
     # print("  model: " + str(model))
@@ -453,6 +457,10 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     # print("  system_prompt: " + str(system_prompt))
     # print("  content_prompt: " + str(content_prompt))
     # print("  display_response: " + str(display_response))
+
+    # Override with the verification insertion system prompt — preserves all existing code,
+    # prevents the performance-optimization system prompt from compressing LASSI-VERIFY blocks.
+    system_prompt = prompts.get_system_prompt("verify_insert")
 
     temp = 0.2
     if llm_source == "argo":
@@ -1029,6 +1037,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
     description   = relation.get("description", "")
     expected_rel  = relation.get("expected_relationship", "")
     tolerance     = relation.get("tolerance", 1e-5)
+    input_lines   = len(source_code.splitlines())
 
     # --- Relation specification block (human-readable, for the LLM) ---
     rel_spec = (
@@ -1214,7 +1223,9 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         "**MODIFICATION INSTRUCTIONS:**\n"
         + transform_instruction + "\n"
         + block_format + "\n"
-        "**OUTPUT INSTRUCTIONS:**\n"
+        f"**OUTPUT INSTRUCTIONS:**\n"
+        f"The source code below has exactly {input_lines} lines. Your output MUST have MORE than "
+        f"{input_lines} lines — you are inserting instrumentation, so the output must be longer.\n"
         "Always provide the complete and fully functional instrumented code without placeholders, "
         "comments, or references suggesting that parts of the original code should be included. "
         "Ensure every part of the instrumented code is explicitly written out. "
@@ -1242,51 +1253,74 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
           f"STARTING Tier 3: Inserting metamorphic variant ({relation_name})" +
           color.END + " -----\n")
 
+    # Override with the verification insertion system prompt — preserves all existing code,
+    # prevents the performance-optimization system prompt from compressing LASSI-VERIFY blocks.
+    system_prompt = prompts.get_system_prompt("verify_insert")
+
     temp = 0.2
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    else:
-        print("Invalid LLM source for code_insert_metamorphic_variant")
-        return ""
-
-    if display_response:
-        display(Markdown(response_text))
-
-    # Extract code block (same pattern as code_insert_asserts / code_insert_passthrough)
-    pattern = r"```(.*?)```"
-    match = re.search(pattern, response_text, re.DOTALL)
-    if match:
-        extracted_code = match.group(1)
-        extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
-    else:
-        # Fallback: LLM response did not include code fences (common for very long files).
-        # Try to extract from the first preprocessor directive or CUDA/C++ keyword.
-        # Without this, long kernels like lid-driven-cavity always SKIP Tier 3 because
-        # the LLM response for a 1000+ line file omits backtick fences.
-        fallback_pattern = r'((?:#include|#pragma|#define|__global__|extern\s+"C").*)'
-        fallback_match = re.search(fallback_pattern, response_text, re.DOTALL)
-        if fallback_match:
-            extracted_code = fallback_match.group(1)
-            print(f"\n[WARNING] code_insert_metamorphic_variant: no code fences in LLM response for '{relation_name}'; extracted from first code directive.")
+    _prev_output_lines = None
+    # Allow one retry with an explicit line count warning if the LLM truncates the output.
+    for _attempt in range(2):
+        if _attempt == 0:
+            _prompt = content_prompt
         else:
-            extracted_code = ""
-            print(f"\n[WARNING] code_insert_metamorphic_variant: no code fences or code directives found for '{relation_name}'; cannot extract variant.")
+            _prompt = (
+                f"[CRITICAL CORRECTION] Your previous output had only {_prev_output_lines} lines "
+                f"but the source code has {input_lines} lines. You omitted sections of code using "
+                f"placeholder comments. You MUST output ALL {input_lines}+ lines of the source code "
+                f"verbatim with only the metamorphic instrumentation added. "
+                f"Do not use '// ... rest unchanged', ellipsis, or any shorthand notation.\n\n"
+            ) + content_prompt
 
-    # Sanity check: instrumentation only adds lines — same or fewer lines means the LLM
-    # omitted sections via placeholder comments (e.g. "// ... [other kernels unchanged] ...").
-    input_lines = len(source_code.splitlines())
-    output_lines = len(extracted_code.splitlines())
-    if extracted_code and output_lines <= input_lines:
-        print(f"\n[WARNING] Metamorphic variant line count check FAILED: "
-              f"input={input_lines} lines, output={output_lines} lines. "
-              f"LLM likely omitted code via placeholder comments. Rejecting output.")
-        return ""
+        if llm_source == "argo":
+            response_text = argo_llm(model, system_prompt, _prompt, temp, verifyprompt)
+        elif llm_source == "ollama":
+            response_text = ollama_llm_nostream(model, num_ctx, system_prompt, _prompt, temp, verifyprompt)
+        elif llm_source == "cerebras":
+            response_text = cerebras_llm(model, num_ctx, system_prompt, _prompt, temp, verifyprompt)
+        else:
+            print("Invalid LLM source for code_insert_metamorphic_variant")
+            return ""
 
-    return extracted_code
+        if display_response:
+            display(Markdown(response_text))
+
+        # Extract code block (same pattern as code_insert_asserts / code_insert_passthrough)
+        pattern = r"```(.*?)```"
+        match = re.search(pattern, response_text, re.DOTALL)
+        if match:
+            extracted_code = match.group(1)
+            extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
+        else:
+            # Fallback: LLM response did not include code fences (common for very long files).
+            # Try to extract from the first preprocessor directive or CUDA/C++ keyword.
+            # Without this, long kernels like lid-driven-cavity always SKIP Tier 3 because
+            # the LLM response for a 1000+ line file omits backtick fences.
+            fallback_pattern = r'((?:#include|#pragma|#define|__global__|extern\s+"C").*)'
+            fallback_match = re.search(fallback_pattern, response_text, re.DOTALL)
+            if fallback_match:
+                extracted_code = fallback_match.group(1)
+                print(f"\n[WARNING] code_insert_metamorphic_variant: no code fences in LLM response for '{relation_name}'; extracted from first code directive.")
+            else:
+                extracted_code = ""
+                print(f"\n[WARNING] code_insert_metamorphic_variant: no code fences or code directives found for '{relation_name}'; cannot extract variant.")
+
+        # Sanity check: instrumentation only adds lines — same or fewer lines means the LLM
+        # omitted sections via placeholder comments (e.g. "// ... [other kernels unchanged] ...").
+        output_lines = len(extracted_code.splitlines())
+        if extracted_code and output_lines <= input_lines:
+            _prev_output_lines = output_lines
+            retry_msg = "Retrying with explicit line count correction." if _attempt == 0 else "Rejecting output."
+            print(f"\n[WARNING] Metamorphic variant line count check FAILED: "
+                  f"input={input_lines} lines, output={output_lines} lines. "
+                  f"LLM likely omitted code via placeholder comments. {retry_msg}")
+            if _attempt == 0:
+                continue  # retry
+            else:
+                return ""  # two failures — give up
+
+        return extracted_code
+    return ""  # should not be reached
 
 
 def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, relation,

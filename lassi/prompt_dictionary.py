@@ -50,6 +50,24 @@ class PromptDictionary:
 
             "general_system_nocontext_HIP_runtime": "You are an expert C++/HIP engineer. Your goal is to refactor provided HIP C++ code to reduce wall-clock execution time by improving GPU and CPU utilization and parallelism, while preserving all original functionality and expected output. You always surround your generated code with the three characters ```.",
 
+            # Verification Code Insertion SYSTEM Prompt (Tier 1, 2, 3)
+            # Used by code_insert_asserts(), code_insert_passthrough(), and
+            # code_insert_metamorphic_variant() in verify.py. These tasks perform SURGICAL
+            # INSERTION only — adding new assertion/passthrough/metamorphic blocks at
+            # designated locations while leaving ALL existing code exactly intact.
+            # Using the performance-optimization system prompt for these tasks causes the LLM
+            # to "simplify" existing LASSI-VERIFY instrumentation blocks, producing output
+            # with fewer lines than the input (silent code loss).
+            "verify_insert": (
+                "You are an expert C++/CUDA engineer performing surgical code insertion. "
+                "Your ONLY task is to INSERT new instrumentation code at specified locations "
+                "in an existing source file. "
+                "You MUST preserve ALL existing code EXACTLY as written — do not modify, simplify, "
+                "reorder, optimize, or remove any existing code, comments, blank lines, or whitespace. "
+                "Every single line of the input file must appear in your output, in the same order. "
+                "You always surround your generated code with the three characters ```."
+            ),
+
         }
         
         # Code Refactoring for Energy Efficiency TASK Prompts
