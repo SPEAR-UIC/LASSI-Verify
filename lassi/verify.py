@@ -842,6 +842,9 @@ def extract_tier2_labels(code_text):
     """Return comma-separated list of Tier 2 passthrough block labels present in the code source.
     Used to document observation points per attempt and detect stripped blocks."""
     labels = re.findall(r'BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\]', code_text)
+    # Filter out format-specifier artifacts (e.g. '%s', '%d') that can appear if the LLM
+    # generates a dynamic label via printf format string instead of a hardcoded label name.
+    labels = [l for l in labels if l and '%' not in l]
     # Deduplicate while preserving order
     seen = set()
     unique = [l for l in labels if not (l in seen or seen.add(l))]
@@ -2073,10 +2076,16 @@ def run_metamorphic_variants(source_code, active_relations, contract,
         if diagnostic.get("summary"):
             print(diagnostic["summary"])
 
-        # Fail-fast: stop at first FAIL
+        # Fail-fast on FAIL — but ONLY in the main loop (generated codes, code_version != None).
+        # In Stage 0 (source filter, code_version=None) ALL relations must be evaluated
+        # independently: just because one relation fails for the source does not mean another
+        # should be skipped. Stopping early in Stage 0 leaves subsequent relations with
+        # source_status=None, which prevents them from ever being applied to generated codes.
         if verdict == "FAIL":
             first_failure_diagnostic = diagnostic
-            break
+            if code_version is not None:
+                break  # main loop: fail-fast, stop testing further relations
+            # Stage 0: record failure, continue to next relation
 
     # --- Determine overall verdict ---
     verdicts = [r["verdict"] for r in results]

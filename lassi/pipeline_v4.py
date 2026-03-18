@@ -321,6 +321,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         
     lassi.monitor.clear_log()   # reset monitor so saved log contains only this run
     print("\n----- WELCOME TO PIPELINE v4! CODE -----\n")
+    print(f">>> App: {app_name}  |  Trial: {trial_number}")
 
     vendors = detect_gpu_vendors()
     if not vendors:
@@ -449,7 +450,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     verification_log["tier2_tolerance"] = tier2_tolerance
     verification_log["tier2_spec_output"] = ""          # populated after Stage 1 execution
     verification_log["tier2_results"] = []              # per-iteration list of {code_version, verdict, diagnostic}
-    verification_log["verified_pass_count"] = 0         # count of iterations where Tier 2 PASS
+    verification_log["tier2_pass_count"] = 0             # count of iterations where Tier 2 PASS (key matches CSV column and experiment_data field)
     verification_log["judge_discrepancies"] = []        # cases where LLM judge and three-tier verdict disagree
     # judge_discrepancy entry schema: {code_version, zero_shot, type ("false_positive"|"false_negative"), judge_verdict, tier2_verdict, final_verdict}
     # Tier 3 verification log fields (initialized here; populated after Stage 0 contract generation)
@@ -618,7 +619,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # Fresh LASSI code generation — new code_block_index, reset attempt counter
                 current_generation_type = "lassi_fresh"
                 attempt_number = 1
-                fresh_generation_count += 1     # Table 1 ★: count all fresh code starts regardless of outcome
+                # fresh_generation_count is incremented only after code_blocks.append() succeeds below,
+                # so aborted fresh starts (e.g. temperature-max break before LLM call) are not counted.
             elif compile_result_before_generation in _tier_retry_map:
                 current_generation_type = _tier_retry_map[compile_result_before_generation]
                 attempt_number += 1
@@ -1245,8 +1247,14 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # Increment code version to get ready for the next iteration.
                 if not zero_shot:
                     code_version = code_version + 1
-                # Initiate a new iteration log for this code version
-                iteration_log["v" + str(code_version)] = {"self_correction_count": 0, "energy_refactor_count": 0, "LLM_temperature": round(code_gen_temp,1)}
+                # Initiate a new iteration log for this code version.
+                # Carry over any existing self_correction_count: after a Tier 1/2/3 pop-and-retry,
+                # code_version is rolled back and then re-incremented to the same value, so the
+                # failing attempt's SC count is already in iteration_log["vN"]. Preserving it ensures
+                # lassiee_selfcorrections reflects all SCs needed to reach the final code, not just
+                # SCs that happened AFTER the last successful keeper block.
+                _prev_sc_count = iteration_log.get("v" + str(code_version), {}).get("self_correction_count", 0)
+                iteration_log["v" + str(code_version)] = {"self_correction_count": _prev_sc_count, "energy_refactor_count": 0, "LLM_temperature": round(code_gen_temp,1)}
                 print("--> SAVING code version: " + str(code_version))
                 if not zero_shot:
                     this_code_version = code_version
@@ -1259,6 +1267,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     file.write(code_block)
                 file.close()
                 code_blocks.append(code_block)  # save this code in our code collection list
+                if current_generation_type == "lassi_fresh":
+                    fresh_generation_count += 1  # Table 1 ★: count only after code is confirmed produced
                 input_content_llmjudge_dict["refactored_code"] = code_block
                 input_content_llmjudge_dict["refactored_stdout"] = exe_output_generated
                 input_content_llmjudge_dict["refactored_metrics"] = metrics_results_string
@@ -1498,8 +1508,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_exhausted = True
                     compile_result = "energy_efficiency"  # drive fresh code generation (not Tier 2 retry)
             # Tier 2 PASS or SKIP: record in verification log and proceed to judge
-            if run_tier2 and not zero_shot and "verified_pass_count" in verification_log and tier2_verdict.startswith("PASS"):
-                verification_log["verified_pass_count"] += 1
+            if run_tier2 and not zero_shot and "tier2_pass_count" in verification_log and tier2_verdict.startswith("PASS"):
+                verification_log["tier2_pass_count"] += 1
 
             # --- TIER 3: Metamorphic Testing (after Tier 2 PASS/SKIP, before judge) ---
             # Applies only to LASSI-generated codes with active relations.
@@ -2240,7 +2250,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Computed outside the yes_power_feedback block so they are always recorded.
     tier2_results = verification_log.get("tier2_results", [])
     discrepancies = verification_log.get("judge_discrepancies", [])
-    experiment_data["tier2_pass_count"] = verification_log.get("verified_pass_count", 0)
+    experiment_data["tier2_pass_count"] = verification_log.get("tier2_pass_count", 0)
     # tier2_fail_total / tier3_fail_total: recompute from attempt_log_buffer to capture all retry failures
     # (verification_log["tier2_results"] only stores final per-version outcomes, missing intermediate retries)
     experiment_data["tier2_fail_total"] = sum(1 for r in attempt_log_buffer if str(r.get("tier2_verdict", "")).startswith("FAIL"))

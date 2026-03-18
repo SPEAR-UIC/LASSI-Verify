@@ -253,6 +253,10 @@ details.html-collapsible[open] > summary::before { content: '▼  '; }
   color: #569cd6; font-weight: bold;
   border-top: 1px solid #2a3a4a; margin-top: 10px; padding-top: 4px;
 }
+.run-info {
+  color: #9cdcfe; font-size: 13px; background: #1a2a3a;
+  padding: 3px 8px; border-bottom: 1px solid #3a5a8a; margin-bottom: 6px;
+}
 .tier-pass    { color: #4ec9b0; font-weight: bold; }
 .tier-fail    { color: #f44747; font-weight: bold; }
 .tier-skip    { color: #dcdcaa; }
@@ -406,6 +410,7 @@ function classify(text) {
   if (/STARTING CODE INSERT/.test(t))                                               return 'verify-insert';
   if (/STARTING LASSI:/.test(t))                                                    return 'lassi-start';
   if (/STARTING (STAGE|LASSI)|WELCOME TO PIPELINE|SOURCE CODE: Test compile/.test(t)) return 'stage-header';
+  if (t.startsWith('>>> App:'))                                                       return 'run-info';
   if (/LLM RESPONSE:|END LLM RESPONSE/.test(t))                                    return 'llm-response';
   if (/Power and Energy Feedback data/.test(t))                                     return 'metrics-header';
   if (/Energy consumed \(J\)|Average power \(W\)|Runtime \(s\)|Tracking metrics/.test(t)) return 'metrics-sub';
@@ -458,7 +463,9 @@ function addLog(ts, text) {
   if (_blockTarget && /THE REFACTORING PLAN PROMPT/.test(text)) { _closeBlock(); }
 
   if (/=====> VERIFY THE PROMPTING <=====/.test(text)) {
-    _openBlock(ts, 'PROMPT REVIEW', 'prompt-block', '▲  end of prompt review'); return;
+    const tm = text.match(/\[tokens:\s*([\d,]+)\]/);
+    const label = tm ? 'PROMPT REVIEW  ·  ' + tm[1] + ' tokens' : 'PROMPT REVIEW';
+    _openBlock(ts, label, 'prompt-block', '▲  end of prompt review'); return;
   }
   if (/END PROMPT REVIEW/.test(text))                  { _closeBlock(); return; }
   if (/< BEGIN: STANDARD OUTPUT FROM CODE EXECUTION >/.test(text)) {

@@ -34,6 +34,16 @@ two executions are equivalent if they produce the same sequence of observable ev
 - Intermediate GPU kernel state (not host-accessible without an extra D→H copy)
 - Timing values, performance counters, or power readings (transformation-dependent)
 - Thread-local or block-local variables (not visible from host)
+- **Solver convergence diagnostics: residuals, error norms, iteration counts, convergence
+  scalars** — these are implementation-internal metrics that legitimately differ between
+  correct implementations using different FP evaluation orders or algorithmic strategies
+  (e.g., a swap-kernel implementation and a pointer-swap ping-pong implementation converge
+  via different floating-point trajectories, producing different residual values at exit
+  even though both produce the same correct output field). Tier 1 assertions check that
+  the solver terminated correctly (finite value, correct sign, sentinel PASS); Tier 2
+  checks the actual output the solver produced. Capture the **primary output array** (the
+  converged field, solution vector, output buffer) — not the diagnostic that describes
+  how hard the solver worked to get there.
 - Values that legitimately change between source and refactored code due to
   floating-point reordering (prefer statistics like min/max/mean which are more robust)
 - Raw binary data — always convert to human-readable text format
@@ -71,7 +81,6 @@ evidence without N-scaling artifacts.
   identifies a distinct observation point). Examples:
   - `[final_solution]` — the primary output array at program completion
   - `[post_kernel_fieldA]` — field array after a named kernel completes
-  - `[convergence_residual]` — scalar convergence metric
 
 **Floating-point precision:** Always use `%.17g` format for float/double values to preserve
 full IEEE 754 double precision. This ensures the deterministic comparison parser can detect
@@ -211,10 +220,17 @@ lv_min, lv_max, etc.) to avoid shadowing existing code variables.
 ### Linear Solvers (Jacobi, CG, GMRES, etc.)
 Key observation points:
 - Final solution vector `x` at program completion: `[final_solution]`
-- Residual norm `||Ax - b||` at iteration milestones: `[residual_iter_N]`
 - Right-hand side `b` before solve (validates input unchanged): `[rhs_pre_solve]`
 
-Scalar values (residuals): use a single-element "buffer" with N=1.
+⛔ **Do NOT capture residual norms, convergence scalars, or error metrics** as passthrough
+observation points. These are solver diagnostics — implementation-specific measures of
+convergence progress that legitimately differ between the reference implementation and an
+optimized one (the final residual value changes when the FP evaluation order of the stencil
+or reduction changes, e.g., a swap-kernel vs. pointer-swap ping-pong optimization). Capturing
+these causes systematic Tier 2 false-failures that are unfixable by self-correction, burning
+through the SC budget without any prospect of resolution. Use Tier 1 assertions instead to
+check that the solver terminated (is the residual finite? non-negative? below the tolerance
+threshold?).
 
 ### Stencil Computations (CFD, heat equation, wave equation)
 Key observation points:
@@ -298,6 +314,33 @@ printf("=== BEGIN PASSTHROUGH DATA ===\n");  // No label — parser cannot match
 printf("Statistics: min=%f, max=%f\n", min_val, max_val);  // %f loses precision
 ```
 **CORRECT:** Use `%.17g` for all float/double values.
+
+### ❌ WRONG: Capturing solver convergence diagnostics as passthrough observation points
+```cpp
+// BAD — the final error scalar is a solver diagnostic, not a computational result.
+// Its FP value legitimately changes when the optimization alters the evaluation order
+// (e.g., swap-kernel → pointer-swap), causing permanent Tier 2 failures that self-
+// correction cannot resolve because no code change can reduce a FP-order difference.
+printf("\n=== BEGIN LASSI-VERIFY PASSTHROUGH [final_error_scalar] ===\n");
+printf("Buffer: error\nType: float\nElements: 1\n");
+printf("Statistics: min=%.17g, max=%.17g, mean=%.17g\n", error, error, error);
+printf("Sample_first10: %.17g\n", (double)error);
+printf("=== END LASSI-VERIFY PASSTHROUGH [final_error_scalar] ===\n");
+```
+**CORRECT:** Use a Tier 1 assertion to check that the solver terminated correctly, and a
+passthrough block capturing the primary output array (the converged field):
+```cpp
+// Tier 1: check solver terminated correctly
+{
+    bool _t1_pass = (std::isfinite(error) && error >= 0.0f);
+    printf("LASSI-VERIFY ASSERTIONS [post_solve_error_valid]: %s\n",
+           _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+// Tier 2: capture the actual computational result
+// >>> BEGIN LASSI-VERIFY PASSTHROUGH [final_solution] >>>
+{ /* D→H copy of h_f, stats, printf of field array */ }
+// <<< END LASSI-VERIFY PASSTHROUGH <<<
+```
 
 ### ❌ WRONG: Shadowing existing variable names
 ```cpp

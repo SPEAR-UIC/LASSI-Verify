@@ -336,7 +336,13 @@ Return a single JSON block with this structure:
 - `factor`: scaling factor (for SCALING/SYMMETRY), or `null`
 - `input_variables`: C++ variable names of host arrays/scalars to transform (from the source code)
 - `observation_points`: METAMORPHIC block label(s); must match PASSTHROUGH labels when comparing
-  scaled output to original
+  scaled output to original. **MUST be the primary output array** (e.g., `["final_solution"]`,
+  `["final_field"]`) — never use convergence scalars, error norms, residuals, or iteration
+  counts as observation points for SCALING, SYMMETRY, or NEGATION relations. Convergence
+  diagnostics legitimately differ between a reference implementation and an optimized one due
+  to FP evaluation order changes; they cannot serve as relational checks. If the passthrough
+  catalog already captures the primary output array under a specific label, use that label here
+  so the METAMORPHIC block is co-located with the existing PASSTHROUGH block.
 - `expected_relationship`: human-readable description of the output check
 - `tolerance`: relative tolerance for the comparison (default 1e-5; use 1e-8 for conservation)
 - `cost`: `"cheap"` (all current relation types require 1 extra compile + run)
@@ -623,6 +629,14 @@ OR all boundary condition values are also scaled by alpha
 **Note:** This is the most common applicable SCALING for iterative solvers (Jacobi, CG, etc.).
 If Dirichlet BCs in the rows of A are fixed at non-zero values and NOT also scaled, this relation
 does not apply — SOURCE_verify will fail it and filter it inactive.
+
+⛔ **Do NOT use convergence scalars or residuals as observation points for SCALING/SYMMETRY.**
+Use the primary output array (the converged solution field or vector). The convergence residual
+at exit legitimately differs between the reference and an optimized implementation because FP
+reordering changes the convergence trajectory — the solver may terminate at a slightly different
+residual value even though the output field is numerically equivalent. Including the residual
+as an observation point will cause the source filter to FAIL the relation incorrectly, preventing
+it from being applied to any generated code.
 
 ---
 

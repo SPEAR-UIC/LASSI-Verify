@@ -12,6 +12,7 @@ import html
 import time
 from IPython.display import display, HTML, clear_output
 import lassi.argostream_curl
+import lassi.token_analysis
 
 import warnings
 from urllib3.exceptions import InsecureRequestWarning
@@ -34,9 +35,10 @@ Example: model='codestral:latest'
 
 
 def ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp=0.2, verifyprompt=False):
-    
+
     if verifyprompt:
-        print("\n=====> VERIFY THE PROMPTING <=====\n")
+        _tok = lassi.token_analysis.token_count(system_prompt + " " + content_prompt)
+        print(f"\n=====> VERIFY THE PROMPTING <===== [tokens: {_tok:,}]\n")
         print(f"TEMPERATURE: {round(temp, 1)}")
         print(f"\nSYSTEM: {system_prompt}")
         print(f"\nPROMPT: {content_prompt}")
@@ -83,14 +85,15 @@ def cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp=0.2, verify
     html_display = display(HTML(""), display_id=True)
 
     if verifyprompt:
-        print("\n=====> VERIFY THE PROMPTING <=====\n")
+        _tok = lassi.token_analysis.token_count(system_prompt + " " + content_prompt)
+        print(f"\n=====> VERIFY THE PROMPTING <===== [tokens: {_tok:,}]\n")
         print(f"TEMPERATURE: {round(temp, 1)}")
         print(f"\nSYSTEM: {system_prompt}")
         print(f"\nPROMPT: {content_prompt}")
         print("\n=====^^^^^ END PROMPT REVIEW ^^^^^=====\n")
     else:
         print("\n=====< LLM Prompt Not Shown >=====\n")
-            
+
     response_text = ""
 
     client = Cerebras(
@@ -174,7 +177,8 @@ def ollama_llm(model, num_ctx, system_prompt, content_prompt, temp=0.2, verifypr
     html_display = display(HTML(""), display_id=True)
 
     if verifyprompt:
-        print("\n=====> VERIFY THE PROMPTING <=====\n")
+        _tok = lassi.token_analysis.token_count(system_prompt + " " + content_prompt)
+        print(f"\n=====> VERIFY THE PROMPTING <===== [tokens: {_tok:,}]\n")
         print(f"TEMPERATURE: {round(temp, 1)}")
         print(f"\nSYSTEM: {system_prompt}")
         print(f"\nPROMPT: {content_prompt}")
@@ -340,9 +344,10 @@ def argo_llm(model, system_prompt, content_prompt, temp=0.2, verifyprompt=False,
     
     if model == "gpto1preview":
         content_prompt = system_prompt + "\n\n" + content_prompt
-    
+
     if verifyprompt:
-        print("\n=====> VERIFY THE PROMPTING <=====\n")
+        _tok = lassi.token_analysis.token_count(system_prompt + " " + content_prompt)
+        print(f"\n=====> VERIFY THE PROMPTING <===== [tokens: {_tok:,}]\n")
         print(f"TEMPERATURE: {round(temp, 1)}")
         print(f"\nSYSTEM: {system_prompt}")
         print(f"\nPROMPT: {content_prompt}")
