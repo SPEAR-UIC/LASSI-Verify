@@ -290,9 +290,11 @@ details.collapsible-block > summary::before { content: '▶  '; font-size: 10px;
 details.collapsible-block[open] > summary::before { content: '▼  '; }
 .collapsible-body { padding: 2px 14px; border-top: 1px solid #222; }
 .collapsible-cap {
-  margin-top: 4px; padding: 2px 0; font-size: 10px;
+  margin-top: 4px; padding: 2px 4px; font-size: 10px;
   text-align: left; font-style: italic; user-select: none;
+  cursor: pointer;
 }
+.collapsible-cap:hover { opacity: 0.7; }
 /* prompt-review block — green accent */
 details.prompt-block {
   border-left: 4px solid #6a9955; border-bottom: 2px solid #3a5a3a;
@@ -451,6 +453,7 @@ function _closeBlock() {
       const cap = document.createElement('div');
       cap.className = 'collapsible-cap';
       cap.textContent = capText;
+      cap.onclick = () => { const d = cap.closest('details'); if (d) d.open = false; };
       _blockBody.appendChild(cap);
     }
   }

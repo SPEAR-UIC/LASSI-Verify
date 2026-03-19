@@ -225,7 +225,8 @@ def selfprompting_context_builder(generate_context_flag,
                                   total_energy_joules=None,
                                   ave_power=None,
                                   verifyprompt=False,
-                                  power_measure=True):   # power_measure=False selects runtime optimization prompts
+                                  power_measure=True,   # power_measure=False selects runtime optimization prompts
+                                  precomputed_code_description=None):  # If provided, skip code_description_llm() call (already generated for Tier 1/2/3 context)
     """
     Update the system and user content prompts to include
     background context and self-prompted context.
@@ -272,9 +273,15 @@ def selfprompting_context_builder(generate_context_flag,
         # Requet LLM summary description of the provided SOURCE code
         # Use original_code (uninstrumented) if provided so the LLM describes the clean source
         # without being distracted by invariant assertion instrumentation comments.
-        code_for_description = original_code if original_code is not None else input_code
-        print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to describe the source code." + color.END + "\n")
-        llm_code_description_response = lassi.llm_methods.code_description_llm(llm_source, model, num_ctx, general_system_prompt, input_context, code_for_description, display_response, verifyprompt)
+        # Use precomputed description if available (generated early for Tier 1/2/3 context)
+        # to avoid an extra LLM call. Either way the result appears under the same header.
+        if precomputed_code_description:
+            llm_code_description_response = precomputed_code_description
+            print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "using pre-generated code description (Tier 1/2/3 context)." + color.END + "\n")
+        else:
+            code_for_description = original_code if original_code is not None else input_code
+            print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to describe the source code." + color.END + "\n")
+            llm_code_description_response = lassi.llm_methods.code_description_llm(llm_source, model, num_ctx, general_system_prompt, input_context, code_for_description, display_response, verifyprompt)
         content = content + "[YOUR ANALYSIS OF THE SOURCE CODE TO REFACTOR]\n" + llm_code_description_response + "\n\n"
         # refactor_instructions = prompts.get_code_ee_refactoring_prompt(str(source_lang + "_refactor"))  # Includes prompt to generate a refactoring plan
 

@@ -368,7 +368,7 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     
     # ------------------------------------------
-    # ----- STAGE 1: VANILLA LLM REFACTOR -----
+    # ----- STAGE 0': VANILLA LLM REFACTOR -----
     # ------------------------------------------
     """
     STAGE 1: ZERO-SHOT REFACTOR - STANDALONE BASE LLM CAPABILITY
@@ -393,8 +393,8 @@ def auto_code_llmgeneration_pipeline(prompts,
     code_block = ""
     self_correction_counter = 0
     self_correction_power_counter = 0
-    fresh_generation_count = 0              # Table 1 ★: count of distinct fresh LASSI code generations started (includes codes that never executed)
-    judge_api_error_count = 0               # Safety net: counts LLM judge calls that returned neither VALID nor INVALID (e.g. context overflow). Pipeline stops if ≥3.
+    fresh_generation_count = 0 # Table 1 ★: count of distinct fresh LASSI code generations started (includes codes that never executed)
+    judge_api_error_count = 0 # Safety net: counts LLM judge calls that returned neither VALID nor INVALID (e.g. context overflow). Pipeline stops if ≥3.
 
     # Pull in prompts used for base (vanilla) LLM
     # Same prompting strategy for STAGE 1 and STAGE 2
@@ -444,6 +444,33 @@ def auto_code_llmgeneration_pipeline(prompts,
     else:
         code_analysis = "None"
     verification_log["sourcecode_analysis"] = code_analysis
+
+    # --- Early code description for Tier 1/2/3 context ---
+    # Generate once here, before Tier 1/2/3 instrumentation calls, so the LLM has
+    # algorithmic context when inserting assertions, passthrough points, and generating
+    # the metamorphic contract. Always runs (generate_context_flag is still False here;
+    # it flips to True only at LASSI start — so we cannot gate on it).
+    # Uses the LASSI system prompt fetched directly (same key as the second context builder call)
+    # and uninstrumented input_code (same code that becomes original_input_code at line 475).
+    # The result is passed back to selfprompting_context_builder as precomputed_code_description
+    # to avoid running code_description_llm() a second time there.
+    llm_code_description_response = ""
+    if source_lang == "CUDA":
+        _desc_sys_key = "general_system_cuda_ee" if power_measure else "general_system_CUDA_runtime"
+    elif source_lang == "HIP":
+        _desc_sys_key = "general_system_hip_ee" if power_measure else "general_system_HIP_runtime"
+    else:
+        _desc_sys_key = "general_system_cuda_ee"
+    _desc_system_prompt = lassi.pipeline_methods.prompts.get_system_prompt(_desc_sys_key)
+    print("\n" + color.GREEN + "--> ... " + color.UNDERLINE +
+          "prompt LLM to describe source code (Tier 1/2/3 context)." + color.END + "\n")
+    llm_code_description_response = lassi.llm_methods.code_description_llm(
+        llm_source, model, num_ctx, _desc_system_prompt,
+        "",          # input_context not yet available; description derivable from code alone
+        input_code,  # uninstrumented source (same code that becomes original_input_code)
+        display_response, verifyprompt
+    )
+
     # Tier 2 verification log fields (initialized here; populated during the main loop)
     verification_log["run_llm_judge"] = run_llm_judge
     verification_log["tier2_enabled"] = run_tier2
@@ -476,7 +503,8 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     input_code = lassi.verify.code_insert_asserts(
         input_content_llmjudge_dict["source_code"],
-        llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt
+        llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt,
+        code_description=llm_code_description_response
     )
 
     input_content_llmjudge_dict["source_code"] = input_code
@@ -489,7 +517,8 @@ def auto_code_llmgeneration_pipeline(prompts,
     if run_tier2:
         passthrough_code = lassi.verify.code_insert_passthrough(
             input_code,  # already has Tier 1 assertions
-            llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt
+            llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt,
+            code_description=llm_code_description_response
         )
         if passthrough_code != "":
             input_code = passthrough_code
@@ -546,7 +575,8 @@ def auto_code_llmgeneration_pipeline(prompts,
         tier3_contract = lassi.verify.generate_metamorphic_contract(
             input_code,  # SOURCE_verify (Tier 1 + Tier 2 instrumented)
             llm_source, model, num_ctx, system_prompt, display_response,
-            verifyprompt=verifyprompt
+            verifyprompt=verifyprompt,
+            code_description=llm_code_description_response
         )
         if tier3_contract and tier3_contract.get("relations"):
             print(f"\n----- LASSI-Verify Tier 3: running SOURCE_verify metamorphic variants (filter) -----")
@@ -595,7 +625,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     
     
     # --------------------------------------------------------
-    # INITIATE LASSI-EE LLM CODE GENERATION ITERATIVE PIPELINE
+    # INITIATE LASSI LLM CODE GENERATION ITERATIVE PIPELINE
     while (
         (compile_result != "" or stage == "stage1" or stage == "stage2")
         and self_correction_counter <= self_correction_max
@@ -659,6 +689,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 ave_power=power_history[tracking_best_version] if power_measure else 0.0,
                 verifyprompt=verifyprompt,
                 power_measure=power_measure,
+                precomputed_code_description=llm_code_description_response,  # Skip regeneration — already generated for Tier 1/2/3 context
             )
             change_strategy = False
 
@@ -880,14 +911,23 @@ def auto_code_llmgeneration_pipeline(prompts,
                 self_correction_counter = self_correction_counter + 1
                 execute_sc_count += 1                       # Table 1 ★ per-type SC counter
                 current_sc_trigger = "execute_error"        # Table 2 ★ trigger for next attempt record
-                iteration_log["v" + str(code_version)]["self_correction_count"] += 1
+                # Use len(code_blocks) as the intended code_version for this failing code.
+                # code_version is still the previous keeper's version (incremented only inside the keeper block);
+                # len(code_blocks) is the index this code WOULD occupy if it compiled/executed successfully.
+                # This is stable across SC retries (a2, a3, ...) since nothing is appended until the keeper block.
+                _pending_cv_key = "v" + str(len(code_blocks))
+                iteration_log.setdefault(_pending_cv_key, {"self_correction_count": 0, "energy_refactor_count": 0, "LLM_temperature": round(code_gen_temp, 1)})
+                iteration_log[_pending_cv_key]["self_correction_count"] += 1
                 error_correction_prompt_intro = "\n -- The above CODE TO FIX was executed after a successul compile with " + code_compiler + " " + code_compiler_kwds + " and produced the following execution error: "
                 error_message = execute_result
             else:  # Must be a compiler error
                 self_correction_counter = self_correction_counter + 1
                 compile_sc_count += 1                       # Table 1 ★ per-type SC counter
                 current_sc_trigger = "compile_error"        # Table 2 ★ trigger for next attempt record
-                iteration_log["v" + str(code_version)]["self_correction_count"] += 1
+                # Same rationale: use len(code_blocks) not code_version (see execute_error branch above).
+                _pending_cv_key = "v" + str(len(code_blocks))
+                iteration_log.setdefault(_pending_cv_key, {"self_correction_count": 0, "energy_refactor_count": 0, "LLM_temperature": round(code_gen_temp, 1)})
+                iteration_log[_pending_cv_key]["self_correction_count"] += 1
                 # NOTE: Maybe do not provide the original code in the other language when trying to fix code in the target language.
                 error_correction_prompt_intro = "\n\n -- The above CODE TO FIX was compiled with " + code_compiler + " " + code_compiler_kwds + " and produced the following compile error: "
                 error_message = compile_result
@@ -1460,11 +1500,13 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # Tier 2 failed: increment both global and per-code self-correction counters.
                 self_correction_verify_counter += 1
                 self_correction_verify_counter_code += 1
-                tier2_sc_count += 1                             # Table 1 ★ per-type SC counter
-                iteration_log["v" + str(code_version)]["self_correction_count"] += 1
 
                 if self_correction_verify_counter_code < self_correction_verify_counter_code_max:
                     # Still within per-code budget: pop code, self-correct with Tier 2 feedback.
+                    # Only increment SC counters when a new attempt will actually be generated.
+                    # (Exhausted final attempts must NOT count — no new SC is produced.)
+                    tier2_sc_count += 1                             # Table 1 ★ per-type SC counter
+                    iteration_log["v" + str(code_version)]["self_correction_count"] += 1
                     # code_blocks is popped to keep it in sync with runtime_history (not updated on
                     # Tier 2 failure). Without this pop, tracking_best_version = len(code_blocks)-1
                     # after a later win would be out of bounds for runtime_history (IndexError).
@@ -1503,8 +1545,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     # Tier 2 self-correction context is cleared automatically: compile_result != "tier2_failure"
                     # on the next iteration triggers reset of self_correction_verify_counter_code.
                     print(f"\n----- LASSI-Verify Tier 2: FAIL — per-code budget exhausted ({self_correction_verify_counter_code_max} attempts), marking INVALID, fresh generation next -----")
-                    # Note: tier2_sc_count was already incremented unconditionally above (line 1371).
-                    # Do NOT increment again here — that would double-count the exhausted event.
+                    # Note: tier2_sc_count is NOT incremented here — the exhausted final FAIL does not
+                    # produce a new SC attempt, so it should not count as a self-correction event.
                     tier2_exhausted = True
                     compile_result = "energy_efficiency"  # drive fresh code generation (not Tier 2 retry)
             # Tier 2 PASS or SKIP: record in verification log and proceed to judge
@@ -2251,9 +2293,12 @@ def auto_code_llmgeneration_pipeline(prompts,
     tier2_results = verification_log.get("tier2_results", [])
     discrepancies = verification_log.get("judge_discrepancies", [])
     experiment_data["tier2_pass_count"] = verification_log.get("tier2_pass_count", 0)
-    # tier2_fail_total / tier3_fail_total: recompute from attempt_log_buffer to capture all retry failures
-    # (verification_log["tier2_results"] only stores final per-version outcomes, missing intermediate retries)
-    experiment_data["tier2_fail_total"] = sum(1 for r in attempt_log_buffer if str(r.get("tier2_verdict", "")).startswith("FAIL"))
+    # tier2_fail_total: number of codes where the Tier 2 per-code budget was exhausted (INVALID outcome).
+    # Counts only final-attempt rows with a FAIL verdict — symmetric with tier2_pass_count, which counts
+    # codes whose final T2 verdict was PASS. Intermediate retry FAILs are captured by tier2_selfcorrections.
+    experiment_data["tier2_fail_total"] = sum(1 for r in attempt_log_buffer
+                                              if str(r.get("tier2_verdict", "")).startswith("FAIL")
+                                              and r.get("is_final_attempt", False))
     experiment_data["judge_false_positives"] = sum(1 for d in discrepancies if d.get("type") == "false_positive")
     experiment_data["judge_false_negatives"] = sum(1 for d in discrepancies if d.get("type") == "false_negative")
     tier3_results_vlog = verification_log.get("tier3_results", [])

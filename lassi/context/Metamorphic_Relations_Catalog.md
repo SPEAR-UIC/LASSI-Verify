@@ -287,6 +287,13 @@ parameter in this way, what exactly should change in the output?"
 **Output-driven** (for CONSERVATION): Ask "What aggregation of the output should be preserved?
 What input structure allows me to decompose it?"
 
+**IMPORTANT — null-factor relations are not supported in Phase 1/2:** Only propose relations where
+`factor` is a concrete non-null number (e.g., `2.0`, `-1.0`, `1.0`). Any relation requiring
+element-wise array comparison — including reflection symmetry, general permutations, and
+SYMMETRY/SCALING entries where you cannot state a single scalar `factor` — must be omitted.
+These are Phase 3 future work. See the ❌ Null-Factor Anti-Pattern below. Proposing a null-factor
+relation wastes a contract slot; the pipeline will SKIP it without verification benefit.
+
 ### Step 3: Use Constants from the Kernel
 
 For SCALING: choose α from physically meaningful kernel constants. If the kernel has a timestep `dt`,
@@ -403,6 +410,33 @@ BAD priority: use MONOTONICITY for a linear PDE when SCALING clearly applies
 ```
 
 MONOTONICITY is the last resort. Always prefer equality/quantitative-ratio relations.
+
+### ❌ Null-Factor Relations (Phase 3 Only — Not Yet Supported)
+
+```
+BAD (Phase 1/2): { "type": "SYMMETRY", "factor": null, "name": "horizontal_reflection" }
+BAD (Phase 1/2): { "type": "SCALING",  "factor": null, "name": "negation_symmetry" }
+```
+
+**What a null-factor relation is:** A relation with `"factor": null` requires element-wise array
+comparison between the original output Y and the transformed variant output Z. This is a Phase 3
+capability that is not yet implemented in the LASSI-Verify pipeline.
+
+**Why to avoid it:** Relations with `factor: null` are **automatically SKIP'd** during the Stage 0
+source filter — the pipeline detects the null factor and marks them inactive before even attempting
+to compile or run the variant. Every null-factor relation you propose wastes a contract slot and
+produces zero verification value for any trial.
+
+**What to do instead:** For SYMMETRY relations, only propose relations where `factor` is a known
+non-null scalar (e.g., `factor: -1.0` for antisymmetric negation, `factor: 1.0` for element-wise
+equivalence under permutation with a paired PERMUTATIVE check). If the symmetry you have in mind
+requires inspecting individual array elements rather than comparing aggregate statistics (min/max/mean)
+scaled by a constant, that is a null-factor relation — skip it and choose a SCALING or CONSERVATION
+relation instead.
+
+**Formal note:** The current checker compares `Z_stat ≈ factor × Y_stat` for each scalar statistic
+(min, max, mean). This requires an explicit numeric factor. Element-wise comparison (needed for
+reflection symmetry, general permutations, etc.) is deferred to Phase 3.
 
 ### ❌ Composite MRs in Phase 1
 

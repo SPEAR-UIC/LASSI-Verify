@@ -242,10 +242,13 @@ Buffer: <buffer_name>
 Type: <dtype_name>
 Elements: <N>
 Statistics: min=%.17g, max=%.17g, mean=%.17g
-Sample_first10: %.17g %.17g ...  (up to 10 values)
-Sample_last10:  %.17g %.17g ...  (up to 10 values; omitted if N ≤ 10)
+Sample_first10:  %.17g %.17g ...  (up to 10 values; indices 0–9)
+Sample_last10:   %.17g %.17g ...  (10 values at N-10..N-1; omitted if N ≤ 10)
+Sample_spread10: %.17g %.17g ...  (10 interior values at (k+1)*N/11, k=0..9; omitted if N ≤ 10)
 === END LASSI-VERIFY PASSTHROUGH <<<
 ```
+
+`Sample_spread10` was added to provide guaranteed interior coverage. `Sample_first10`/`Sample_last10` only cover array boundaries (indices 0–9 and N-10..N-1). For convergence-sensitive solvers, interior divergence can be masked if boundary elements happen to look correct — notably observed in Jacobi when a pointer-swap bug left boundary rows intact while the interior diverged. `Sample_spread10` at evenly-spaced indices `(k+1)*N/11` catches interior bugs regardless of array layout.
 
 **Comparison:** Deterministic first (`|a-b| ≤ atol + rtol×max(|a|,|b|)` with `atol = |spec_max|×rtol`). Falls back to LLM parse if deterministic parsing fails. Default `tier2_tolerance = 1e-6`.
 
@@ -289,6 +292,18 @@ On FAIL: self-correction (up to 3 retries per code, sharing global counter).
 
 **Catalog:** `Metamorphic_Relations_Catalog.md` — formal 3-tuples, examples, contraindications, and implementation notes for each relation type.
 
+**Null-factor relations — Phase 3 future work (NOT yet implemented):**
+
+All currently-implemented relation types require a concrete numeric `factor` in the contract JSON. The checker computes `Z_stat ≈ factor × Y_stat` and `Z_sample[i] ≈ factor × Y_sample[i]` for each block field. This is sufficient for SCALING, SYMMETRY (factor=−1), and PERMUTATIVE (factor=1.0, with index-swap equivariance checks).
+
+A **null-factor** relation is one where no fixed scalar relates the variant output to the baseline — instead, the check requires element-wise array comparison between two specific output buffers (e.g., "the sorted output is always a permutation of the input"). These checks cannot be expressed as `Z_stat ≈ factor × Y_stat` on aggregate statistics and require full buffer reads and sorted-match or set-equivalence logic.
+
+**Why deferred:** Implementing null-factor requires a distinct comparison code path (buffer-level permutation/equality rather than scalar scaling), a new passthrough field format that preserves enough elements for meaningful comparison, and a new variant-generation prompt that communicates the element-wise expectation to the LLM. This is non-trivial and would significantly expand the checker. The Phase 1/2 design deliberately excluded null-factor to ship a working scalar checker first.
+
+**Importance:** Moderate. Null-factor relations would add coverage for PERMUTATIVE relations where sorted output is compared to sorted input (sortedness invariant), and for CONSERVATION checks where exact element preservation (not just sum) is the claim. However, the current PERMUTATIVE check (invariant stats + equivariant index swap) already provides structural coverage for most permutation-like operations. Null-factor becomes most valuable for kernels whose correctness claim is purely "output is a rearrangement of input with no scaling" — relatively rare in numerical HPC kernels.
+
+**Anti-pattern:** Do NOT propose null-factor relations in the metamorphic contract (i.e., `factor: null` or omitting `factor`). The pipeline will SKIP them without any verification benefit, wasting a contract slot. Null-factor support will be added in Phase 3.
+
 **Default tolerance:** `tier3_tolerance = 1e-5` (slightly looser than Tier 2).
 
 **Relation cost:** All currently implemented relation types (SCALING, SYMMETRY, PERMUTATIVE, ROTATION, CONSERVATION, MONOTONICITY) require 1 extra compile + run (labeled `"cheap"` in the catalog). ROTATION shares the same checker and variant-generation code path as PERMUTATIVE (both are handled by the `elif relation_type in ("PERMUTATIVE", "ROTATION"):` branch). The theoretical zero-extra-run optimization for CONSERVATION/SYMMETRY is not yet implemented.
@@ -312,7 +327,7 @@ The zero-shot (vanilla LLM) code always goes through the judge — it has no Tie
 
 Discrepancies are logged in `verification_log["judge_discrepancies"]` and CSV columns `judge_false_positives` / `judge_false_negatives`.
 
-**Tier 2 coverage note:** `sample_first10` AND `sample_last10` are both captured and compared, so both boundary regions are covered. The weakness is specifically the **interior** (elements 10 through N-11 for large N). For convergence-sensitive solvers (e.g., Jacobi), interior divergence can be masked if boundary elements happen to look correct. This is precisely what Tier 3 PERMUTATIVE testing is designed to catch.
+**Tier 2 coverage note:** Three sample fields are captured: `Sample_first10` (indices 0–9), `Sample_last10` (N-10..N-1), and `Sample_spread10` (10 evenly-spaced interior indices `(k+1)*N/11`). Together these provide boundary + interior coverage. The original weakness — interior divergence masked by intact boundary elements (observed in a Jacobi pointer-swap bug) — is addressed by `Sample_spread10`. Tier 3 PERMUTATIVE testing provides additional structural coverage for cases where element-level sampling may still miss permutations.
 
 ---
 

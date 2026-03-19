@@ -12,7 +12,23 @@ from lassi.llm_config import argo_llm, cerebras_llm, ollama_llm, ollama_llm_nost
 prompts = PromptDictionary()
 
 
-def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False):
+def _strip_prompt_tags(code):
+    """Remove prompt wrapper tags that the LLM may echo into its output.
+
+    Tags like [/END SOURCE CODE], [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS], etc.
+    are used in our prompt to delimit context sections. Some LLMs reproduce them
+    verbatim inside the code fence, causing compile errors. Strip any line that
+    consists solely of one of our bracket tags.
+    """
+    return re.sub(
+        r'^\s*\[/?(?:BEGIN|END)\s+(?:SOURCE CODE|CODE ANALYSIS)[^\]]*\]\s*$',
+        '',
+        code,
+        flags=re.MULTILINE
+    )
+
+
+def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False, code_description=None):
 
     content_prompt = r"""
         You are preparing GPU-accelerated scientific code for Tier 2 empirical equivalence checking
@@ -101,6 +117,18 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
                     printf(" %.17g", (double)lv_host_buf[lv_i]);
                 printf("\n");
             }
+
+            if ((int)<N> > 10) {
+                // Sample_spread10: 10 evenly-spaced interior elements at indices (k+1)*N/11.
+                // Covers interior of the buffer regardless of array layout, catching bugs
+                // that Sample_first10/last10 miss when boundary elements are unchanged.
+                printf("Sample_spread10:");
+                for (int lv_k = 0; lv_k < 10; lv_k++) {
+                    int lv_spread_idx = (lv_k + 1) * (int)<N> / 11;
+                    printf(" %.17g", (double)lv_host_buf[lv_spread_idx]);
+                }
+                printf("\n");
+            }
             printf("=== END LASSI-VERIFY PASSTHROUGH [label] ===\n");
             free(lv_host_buf);
         }
@@ -147,7 +175,10 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
     content_prompt = content_prompt + prompts.get_codeknowledge("passthrough_catalog")
 
     content_prompt = content_prompt + "\n\n----\n\n"
-    content_prompt = content_prompt + " [BEGIN CODE ANALYSIS]\n" + code_analysis + "\n[/END CODE ANALYSIS]\n\n"
+    if code_description:
+        content_prompt = content_prompt + " [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description + "\n[/END SOURCE CODE DESCRIPTION AND ANALYSIS]\n\n"
+    if code_analysis and code_analysis != "None":
+        content_prompt = content_prompt + " [BEGIN CODE ANALYSIS]\n" + code_analysis + "\n[/END CODE ANALYSIS]\n\n"
     content_prompt = content_prompt + " [BEGIN SOURCE CODE]\n" + source_code + "\n[/END SOURCE CODE]\n"
 
     print("\n----- " + color.BOLD + color.PURPLE + "STARTING CODE INSERT - Passthrough Data Dump Blocks" + color.END + " -----\n")
@@ -190,6 +221,7 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
     if match:
         extracted_code = match.group(1)
         extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)  # Strip language specifier (e.g. cpp\n)
+        extracted_code = _strip_prompt_tags(extracted_code)             # Remove any echoed prompt wrapper tags
     else:
         extracted_code = ""
 
@@ -300,13 +332,14 @@ adapted to PROGRAM B's specific code structure.
     if match:
         extracted_code = match.group(1)
         extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
+        extracted_code = _strip_prompt_tags(extracted_code)  # Remove any echoed prompt wrapper tags
     else:
         extracted_code = ""
 
     return extracted_code
 
 
-def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False):
+def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False, code_description=None):
 
     # Append critical instruction to repsond with complete code
     content_prompt = """
@@ -444,10 +477,13 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
 
     """
 
-    content_prompt = content_prompt + " [BEGIN CODE ANALYSIS]\n" + code_analysis + "\n[/END CODE ANALYSIS]"
+    if code_description:
+        content_prompt = content_prompt + " [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description + "\n[/END SOURCE CODE DESCRIPTION AND ANALYSIS]\n"
+    if code_analysis and code_analysis != "None":
+        content_prompt = content_prompt + " [BEGIN CODE ANALYSIS]\n" + code_analysis + "\n[/END CODE ANALYSIS]"
     content_prompt = content_prompt + " [BEGIN SOURCE CODE]\n" + source_code + "\n[/END SOURCE CODE]"
-    
-    
+
+
     print("\n----- " + color.BOLD + color.PURPLE + "STARTING CODE INSERT - Invariant Assertions" + color.END + " -----\n")
 
     # print("\n\nDEBUG input parameter values:")
@@ -492,6 +528,7 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
         # Strip optional language specifier on the first line (e.g. "cpp\n" or "c++\n")
         # LLMs commonly emit ```cpp ... ``` fences; group(1) captures the specifier too.
         extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
+        extracted_code = _strip_prompt_tags(extracted_code)  # Remove any echoed prompt wrapper tags
     else:
         extracted_code = ""
 
@@ -558,7 +595,7 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     )
     # Regex for sample value lines
     sample_pattern = re.compile(
-        r'Sample_(first10|last10):(.*)'
+        r'Sample_(first10|last10|spread10):(.*)'
     )
 
     def extract_blocks(stdout_text):
@@ -939,7 +976,7 @@ def check_tier1_assertions(stdout):
 # =============================================================================
 
 def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, system_prompt,
-                                   display_response, verifyprompt=False):
+                                   display_response, verifyprompt=False, code_description=None):
     """
     Tier 3: Generate a metamorphic contract for the given source code.
 
@@ -962,6 +999,8 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
     )
     content_prompt += prompts.get_codeknowledge("metamorphic_catalog")
     content_prompt += "\n\n----\n\n"
+    if code_description:
+        content_prompt += "[BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description + "\n[END SOURCE CODE DESCRIPTION AND ANALYSIS]\n\n"
     content_prompt += "[BEGIN SOURCE CODE]\n" + source_code + "\n[END SOURCE CODE]\n\n"
     content_prompt += (
         "Following the Instructions section in the catalog above, analyze the source code "
@@ -1017,7 +1056,7 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
 
 def code_insert_metamorphic_variant(source_code, relation, llm_source, model, num_ctx,
                                      system_prompt, display_response,
-                                     template_code=None, verifyprompt=False):
+                                     template_code=None, feedback=None, verifyprompt=False):
     """
     Tier 3: Produce a metamorphic variant of source_code for one relation.
 
@@ -1206,7 +1245,17 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"**Step 2 — Insert METAMORPHIC output blocks** at the observation points above.\n"
         )
 
-    content_prompt = (
+    # --- Feedback prefix (Stage 0 retry only) ---
+    # Prepended when a previous attempt failed so the LLM can correct its mistake.
+    _feedback_prefix = ""
+    if feedback:
+        _feedback_prefix = (
+            "=== PREVIOUS ATTEMPT FEEDBACK ===\n"
+            + feedback + "\n"
+            "=== END PREVIOUS ATTEMPT FEEDBACK ===\n\n"
+        )
+
+    content_prompt = _feedback_prefix + (
         "You are preparing a metamorphic variant of a GPU-accelerated source code for "
         "Tier 3 empirical verification as part of the LASSI-Verify framework.\n\n"
         "Your task: modify the source code below to produce a variant that tests the "
@@ -1294,6 +1343,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         if match:
             extracted_code = match.group(1)
             extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)
+            extracted_code = _strip_prompt_tags(extracted_code)  # Remove any echoed prompt wrapper tags
         else:
             # Fallback: LLM response did not include code fences (common for very long files).
             # Try to extract from the first preprocessor directive or CUDA/C++ keyword.
@@ -1303,6 +1353,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             fallback_match = re.search(fallback_pattern, response_text, re.DOTALL)
             if fallback_match:
                 extracted_code = fallback_match.group(1)
+                extracted_code = _strip_prompt_tags(extracted_code)  # Remove any echoed prompt wrapper tags
                 print(f"\n[WARNING] code_insert_metamorphic_variant: no code fences in LLM response for '{relation_name}'; extracted from first code directive.")
             else:
                 extracted_code = ""
@@ -1365,7 +1416,7 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
         re.DOTALL
     )
     stats_pattern  = re.compile(r'Statistics:\s*min=([^,\s]+),\s*max=([^,\s]+),\s*mean=([^,\s]+)')
-    sample_pattern = re.compile(r'Sample_(first10|last10):(.*)')
+    sample_pattern = re.compile(r'Sample_(first10|last10|spread10):(.*)')
     sum_pattern    = re.compile(r'Sum:\s*([^\s]+)')
     residual_patt  = re.compile(r'Residual:\s*([^\s]+)')
     iter_patt      = re.compile(r'Iteration:\s*(\d+)')
@@ -1959,6 +2010,11 @@ def run_metamorphic_variants(source_code, active_relations, contract,
     results = []
     first_failure_diagnostic = {}
     any_ran = False  # True if at least one variant reached the execute+check step
+    # Maps relation_name → retry entry for Stage 0 second-pass.
+    # Entry is either None (intentional no-retry, e.g. null-factor deferred)
+    # or {"feedback_text": str, "failed_code": str|None}.
+    # Covers both SKIP (code quality issues) and FAIL (math check failure — may be a code bug).
+    _retry_info = {}
 
     for relation in active_relations:
         relation_name = relation.get("name", "unknown")
@@ -1973,6 +2029,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": "null factor: spatial SYMMETRY/SCALING deferred to Phase 3"})
+            _retry_info[relation_name] = None  # Phase 3 deferred — intentional SKIP, no retry
             continue
 
         # --- Determine variant file paths ---
@@ -2008,6 +2065,15 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": "variant insertion failed"})
+            _retry_info[relation_name] = {
+                "feedback_text": (
+                    "Your previous attempt failed to produce valid instrumented code "
+                    "(the LLM response contained no code fences or extractable C++ code). "
+                    "Output the complete modified source wrapped in ```cpp ... ``` fences. "
+                    "Do NOT use placeholder comments or omit any sections."
+                ),
+                "failed_code": None,  # no code was extracted
+            }
             continue
 
         # --- Step 2: Write variant to disk ---
@@ -2025,6 +2091,14 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": "compile failed",
                              "compile_error": compile_err[:300]})
+            _retry_info[relation_name] = {
+                "feedback_text": (
+                    f"Your previous attempt produced code that failed to compile:\n"
+                    f"```\n{compile_err[:400]}\n```\n"
+                    f"Fix the compile error(s) and output the corrected complete source."
+                ),
+                "failed_code": variant_code,  # compiled but failed — show LLM the actual code
+            }
             continue
 
         # --- Step 4: Execute (lightweight — no power measurement, no wait time) ---
@@ -2052,12 +2126,27 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": "execution timeout"})
+            _retry_info[relation_name] = {
+                "feedback_text": (
+                    "Your previous attempt timed out during execution (>120s). "
+                    "Check for infinite loops, incorrect cudaDeviceSynchronize placement, "
+                    "or unbounded memory access patterns in the instrumentation."
+                ),
+                "failed_code": variant_code,
+            }
             continue
         except Exception as e:
             print(f"  [Tier 3] Execution ERROR for '{relation_name}': {e} — SKIP")
             relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": f"execution error: {e}"})
+            _retry_info[relation_name] = {
+                "feedback_text": (
+                    f"Your previous attempt failed at runtime: {e}. "
+                    f"Fix the error and output the corrected complete source."
+                ),
+                "failed_code": variant_code,
+            }
             continue
 
         # --- Step 5: Check metamorphic relation ---
@@ -2085,7 +2174,164 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             first_failure_diagnostic = diagnostic
             if code_version is not None:
                 break  # main loop: fail-fast, stop testing further relations
-            # Stage 0: record failure, continue to next relation
+            # Stage 0: record failure, store retry info with full diagnostic, continue
+            if code_version is None:
+                _diag_summary = diagnostic.get("summary", "No summary available.")
+                # Heuristic: if actual ≈ 2× expected, the transformation was applied twice
+                # (aliased pointer double-scaling, e.g. data[] + wall[][] in pathfinder).
+                _hint = ""
+                for _f in diagnostic.get("failures", []):
+                    _av = _f.get("actual_variant")
+                    _ev = _f.get("expected_variant")
+                    if _av is not None and _ev is not None:
+                        try:
+                            _ratio = abs(float(_av)) / abs(float(_ev)) if float(_ev) != 0 else None
+                        except (TypeError, ZeroDivisionError):
+                            _ratio = None
+                        if _ratio is not None and 1.8 < _ratio < 2.2:
+                            _hint = (
+                                "\nNote: actual_variant ≈ 2× expected_variant on at least one statistic. "
+                                "This pattern typically indicates a double-transformation bug where two "
+                                "variables alias the same memory (e.g., `wall[n] = data + cols*n`). "
+                                "Transforming both `data[]` and `wall[][]` scales the same elements twice. "
+                                "Fix: apply the transformation ONCE — either loop over the flat `data[]` "
+                                "array OR iterate via `wall[][]`, but NOT both."
+                            )
+                            break
+                _retry_info[relation_name] = {
+                    "feedback_text": (
+                        f"Your previous attempt FAILED the metamorphic check:\n"
+                        f"{_diag_summary}{_hint}\n\n"
+                        "Review the variant code carefully for: aliased-buffer double-transformation, "
+                        "incorrect observation point placement, or wrong scaling scope."
+                    ),
+                    "failed_code": variant_code,
+                }
+
+    # --- Stage 0 retry: give SKIP/FAIL relations one more attempt with targeted feedback ---
+    # Covers SKIP (code quality: insertion failure, compile error, execute error) AND FAIL
+    # (math check failure that may be caused by a code bug, e.g. aliased-buffer double-scaling).
+    # Only runs during Stage 0 (code_version is None). Main loop uses pre-filtered relations
+    # (all PASS at Stage 0) — failures there are generated-code issues, not Stage 0 filter bugs.
+    # Single retry per relation (user requirement: avoid endless retrying on bad math).
+    if code_version is None:
+        for relation in active_relations:
+            if relation.get("source_status") not in ("SKIP", "FAIL"):
+                continue
+
+            relation_name = relation.get("name", "unknown")
+            relation_type = relation.get("type", "UNKNOWN")
+
+            # Null-factor SYMMETRY/SCALING: Phase 3 deferred — no variant code was generated,
+            # no code-quality feedback exists, and the skip is intentional. No retry.
+            _retry_entry = _retry_info.get(relation_name)
+            if _retry_entry is None:
+                continue
+
+            # Build combined feedback: diagnostic text + the actual failed code (if any)
+            _feedback_text = _retry_entry["feedback_text"]
+            _failed_code = _retry_entry.get("failed_code")
+            if _failed_code:
+                combined_feedback = (
+                    _feedback_text
+                    + "\n\n[PREVIOUS ATTEMPT CODE — review this carefully for the issue described above:]\n"
+                    "```cpp\n" + _failed_code + "\n```"
+                )
+            else:
+                combined_feedback = _feedback_text
+
+            print(f"\n----- Tier 3 Stage 0 retry: '{relation_name}' ({relation_type}) with feedback -----")
+
+            # source_variant_path may not exist (insertion failed) or contain bad code (compile
+            # failed) — always use template_code=None for Stage 0 retries (no valid reference yet).
+            source_variant_path = f"{variant_dir}/{file_name}_mt_{relation_name}_source.cu"
+            variant_path = source_variant_path
+
+            variant_code = code_insert_metamorphic_variant(
+                source_code, relation,
+                llm_source, model, num_ctx, system_prompt,
+                display_response,
+                template_code=None,
+                feedback=combined_feedback,
+                verifyprompt=verifyprompt
+            )
+
+            # Helper: replace the first-pass result entry for this relation
+            def _replace_result(new_entry, _results=results):
+                for i, r in enumerate(_results):
+                    if r["name"] == new_entry["name"]:
+                        _results[i] = new_entry
+                        return
+                _results.append(new_entry)
+
+            if not variant_code:
+                print(f"  [Tier 3 retry] Variant insertion FAILED again for '{relation_name}' — remains SKIP")
+                _replace_result({"name": relation_name, "verdict": "SKIP",
+                                  "reason": "variant insertion failed (retry)"})
+                continue
+
+            # Write, compile, execute, check — same flow as first pass
+            with open(variant_path, 'w') as _vf:
+                _vf.write(variant_code)
+            print(f"  [Tier 3 retry] Variant written to {variant_path}")
+
+            _compile_err, _variant_exe = lassi.code_manager.compile_code(
+                variant_path, target_lang, code_compiler, code_compiler_kwds
+            )
+            if _compile_err:
+                print(f"  [Tier 3 retry] Compile FAILED again for '{relation_name}' — remains SKIP")
+                relation["source_status"] = "SKIP"
+                _replace_result({"name": relation_name, "verdict": "SKIP",
+                                  "reason": "compile failed (retry)",
+                                  "compile_error": _compile_err[:300]})
+                continue
+
+            any_ran = True
+            try:
+                _exe_abs = os.path.abspath(_variant_exe)
+                _exe_dir = os.path.dirname(_exe_abs)
+                _exe_base = os.path.basename(_exe_abs)
+                _result = subprocess.run(
+                    ["./" + _exe_base] + list(exe_input_parameters),
+                    cwd=_exe_dir,
+                    capture_output=True, text=True, timeout=120
+                )
+                _variant_stdout = _result.stdout
+                print(f"\n----- < BEGIN: Tier 3 retry variant stdout > -----\n")
+                print(_variant_stdout)
+                print(f"----- < END: Tier 3 retry variant stdout > -----\n")
+                if _result.returncode != 0:
+                    print(f"  [Tier 3 retry] Execution warning: return code {_result.returncode}")
+                    if _result.stderr:
+                        print(f"  stderr: {_result.stderr[:400]}")
+            except subprocess.TimeoutExpired:
+                print(f"  [Tier 3 retry] Execution TIMEOUT for '{relation_name}' — remains SKIP")
+                relation["source_status"] = "SKIP"
+                _replace_result({"name": relation_name, "verdict": "SKIP",
+                                  "reason": "execution timeout (retry)"})
+                continue
+            except Exception as _e:
+                print(f"  [Tier 3 retry] Execution ERROR for '{relation_name}': {_e} — remains SKIP")
+                relation["source_status"] = "SKIP"
+                _replace_result({"name": relation_name, "verdict": "SKIP",
+                                  "reason": f"execution error (retry): {_e}"})
+                continue
+
+            _tolerance = relation.get("tolerance", 1e-5)
+            _verdict, _diagnostic = check_metamorphic_relation(
+                _variant_stdout, original_passthrough_stdout, relation, _tolerance
+            )
+            relation["source_status"] = _verdict  # update for Stage 0 filter
+            _replace_result({"name": relation_name, "verdict": _verdict,
+                              "diagnostic": _diagnostic})
+
+            print(f"\n----- Tier 3 retry [{relation_name}]: {_verdict} -----")
+            if _diagnostic.get("summary"):
+                print(_diagnostic["summary"])
+
+            # Track first failure (no fail-fast in Stage 0 — evaluate all independently)
+            if _verdict == "FAIL" and not first_failure_diagnostic:
+                first_failure_diagnostic = _diagnostic
 
     # --- Determine overall verdict ---
     verdicts = [r["verdict"] for r in results]

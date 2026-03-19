@@ -64,6 +64,7 @@ Elements: <N>
 Statistics: min=<val>, max=<val>, mean=<val>
 Sample_first10: <v0> <v1> <v2> <v3> <v4> <v5> <v6> <v7> <v8> <v9>
 Sample_last10: <vN-10> <vN-9> <vN-8> <vN-7> <vN-6> <vN-5> <vN-4> <vN-3> <vN-2> <vN-1>
+Sample_spread10: <v[N/11]> <v[2N/11]> ... <v[10N/11]>
 === END LASSI-VERIFY PASSTHROUGH [label] ===
 ```
 
@@ -74,6 +75,13 @@ difference — making `sum` an unreliable correctness criterion. Every statistic
 is checked by the comparison parser; including an unchecked or unreliable field would be
 misleading. Use `min`, `max`, `mean`, and samples — these provide sufficient correctness
 evidence without N-scaling artifacts.
+
+**Why `Sample_spread10`:** `Sample_first10` covers indices 0–9 and `Sample_last10` covers
+indices N-10 to N-1. For row-major GPU output buffers, these elements are often boundary
+cells that remain unchanged even when interior computation is wrong. `Sample_spread10`
+samples 10 elements at evenly-spaced interior indices `(k+1)*N/11` for k=0..9, giving
+guaranteed interior coverage independent of array layout. All three sample fields are checked
+element-wise by the Tier 2 deterministic parser.
 
 **Label naming convention:** Use descriptive labels that identify the observation point.
 
@@ -204,6 +212,19 @@ excessive passthrough output increases comparison cost and can obscure meaningfu
             printf(" %.17g", lv_host_buf[lv_i]);
         printf("\n");
     }
+
+    // Sample_spread10: 10 evenly-spaced interior elements at indices (k+1)*N/11.
+    // Covers interior of the buffer regardless of array layout, catching bugs
+    // that Sample_first10/last10 miss when boundary elements are unchanged.
+    if (N > 10) {
+        printf("Sample_spread10:");
+        for (int lv_k = 0; lv_k < 10; lv_k++) {
+            int lv_spread_idx = (lv_k + 1) * N / 11;
+            printf(" %.17g", lv_host_buf[lv_spread_idx]);
+        }
+        printf("\n");
+    }
+
     printf("=== END LASSI-VERIFY PASSTHROUGH [final_solution] ===\n");
     free(lv_host_buf);
 }
@@ -392,8 +413,8 @@ for (int seg_size : seg_sizes) {
 2. **Block scope:** Wrap each passthrough block in `{ }` to limit local variable scope.
 
 3. **Output order:** Always print the header line (`=== BEGIN ...`), then Buffer/Type/Elements,
-   then Statistics, then Sample_first10, then Sample_last10 (if N > 10), then the footer.
-   Consistent ordering is required for the deterministic parser.
+   then Statistics, then Sample_first10, then Sample_last10 (if N > 10), then Sample_spread10
+   (if N > 10), then the footer. Consistent ordering is required for the deterministic parser.
 
 4. **HIP adaptation:** Replace `cudaMemcpy`/`cudaMemcpyDeviceToHost` with
    `hipMemcpy`/`hipMemcpyDeviceToHost`. All other printf logic is identical.
