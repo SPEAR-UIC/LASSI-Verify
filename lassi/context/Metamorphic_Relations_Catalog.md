@@ -144,6 +144,9 @@ add more simply because they appear in the catalog.
 - **Stencil / CFD**: CONSERVATION (flux balance) → SYMMETRY → ROTATION (if isotropic)
 - **Reduction kernel** (sum, dot product, norm): SCALING → CONSERVATION (decomposition) → PERMUTATIVE
 - **Particle / N-body**: CONSERVATION (energy) → PERMUTATIVE (particle index) → SCALING
+- **Dynamic programming / path algorithms** (shortest path, DP table fill, wavefront, graph BFS/DFS): PERMUTATIVE (row/column index permutation) → MONOTONICITY (result non-decreasing with iterations) — **SCALING IS NOT APPLICABLE** (see below)
+- **Sorting / ranking / selection**: PERMUTATIVE (input permutation → permuted output) — SCALING IS NOT APPLICABLE (sort of 2×input is NOT 2× sort of input in index rank)
+- **Thresholding / clamping / activation**: SCALING IS NOT APPLICABLE for any input scale that crosses a threshold; CONSERVATION may apply if the operation conserves sum under special conditions
 
 ### Analysis Question 2: Is the algorithm linear or nonlinear?
 
@@ -152,6 +155,22 @@ add more simply because they appear in the catalog.
   to a residual metric or intermediate buffer
 - **Iterative with fixed boundary conditions**: SCALING applies to the source term ONLY if BCs are
   also scaled or are homogeneous (zero)
+
+**⚠️ CRITICAL — MIN/MAX operations always make SCALING inapplicable to the final output:**
+If the kernel uses `min()`, `max()`, `fmin()`, `fmax()`, `__min()`, `__max()`, conditional
+thresholds, or any comparison-based selection, the computation is non-linear and SCALING is
+**always wrong** for the output. Do NOT propose SCALING when you see these operations.
+
+Why: `min(α×a, α×b) = α×min(a, b)` holds only when α > 0. But in a multi-iteration
+dynamic programming context, the intermediate state `min(a, b)` is the INPUT to the next
+iteration — so `f_N(α×x) ≠ α×f_N(x)` in general for N > 1 iteration (the min-based
+path selection at each step is non-linear in the accumulated costs).
+
+**If you see any of these patterns, eliminate SCALING immediately:**
+- `min(...)`, `max(...)`, `fmin(...)`, `fmax(...)` in the kernel
+- `if (a < b)` selection to write output (same as `min` semantically)
+- Accumulated values that represent accumulated path costs, shortest distances, or minimum-weight sums
+- The kernel accumulates values with `+` AND selects with `min/max` — this is a shortest-path/DP pattern
 
 ### Analysis Question 3: Are there physical conservation laws?
 
@@ -946,6 +965,30 @@ Priority order:
 1. **SCALING** (3.1): scaling input by alpha scales scalar output by alpha (or alpha² for squared norms)
 2. **CONSERVATION** (1.3): partial sum decomposition (no extra run if passthrough covers full array)
 3. **PERMUTATIVE** (4.3): shuffling input produces same scalar result (generous FP tolerance)
+
+### Dynamic Programming / Shortest Path / Wavefront (e.g., pathfinder, BFS distance, edit distance)
+
+**⚠️ SCALING is NEVER applicable to this class.** The accumulated result (minimum path cost,
+shortest distance, edit distance) is computed via `min()` or `max()` at every step, making the
+output non-linear in the input. Scaling the input grid by 2.0 does NOT multiply the output by 2.0
+when `min()` is applied — it would only hold trivially if no computation occurred (identity function).
+If SCALING holds perfectly (Z_stat ≈ 2.0 × Y_stat) for this class, it is strong evidence that
+the passthrough is capturing pre-computation data (the initial grid values) rather than the
+computed result. **Treat a perfectly-satisfied SCALING relation for a DP/path algorithm as a
+red flag indicating a passthrough placement error, not a correct verification result.**
+
+Priority order:
+1. **PERMUTATIVE** (4.1): permuting input rows/columns (and corresponding grid values) should produce
+   the permuted output. For pathfinder (ROWS×COLS grid), swapping two columns of the input grid and
+   the same two columns of the output is an equivariance relation.
+2. **MONOTONICITY** (6.1): for shortest-path/DP with non-negative costs, the result accumulated over
+   more iterations is non-decreasing (each additional row adds at least 0 to the minimum path cost).
+   Use MONOTONICITY as a fallback only — it is the weakest available relation.
+3. **CONSERVATION**: rarely applicable to path algorithms unless the algorithm has an explicit
+   global invariant (e.g., total cost is bounded). Skip unless you can identify a concrete law.
+
+**Do NOT propose SCALING or SYMMETRY** for DP/path algorithms — they do not hold for the
+final computed output, and if they appear to hold, the passthrough is measuring the wrong state.
 
 ---
 

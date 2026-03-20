@@ -1461,6 +1461,15 @@ def auto_code_llmgeneration_pipeline(prompts,
                         current_sc_trigger = None  # exhausted → next iteration is fresh
                         valid_code_flag = "INVALID"
                         compile_result = "energy_efficiency"  # drive fresh generation next iteration
+                        # CRITICAL: must append to all history arrays before continuing.
+                        # code_blocks.append() ran at the keeper block (above); if we continue
+                        # without appending here, code_blocks grows but history arrays do not —
+                        # causing tracking_best_version (= len(code_blocks)-1) to exceed the
+                        # history array bounds (IndexError) on any subsequent win.
+                        valid_code_history.append(valid_code_flag)
+                        energy_history.append(round(total_energy_joules_refactor, 2))
+                        power_history.append(round(float(ave_power_refactor), 2))
+                        runtime_history.append(round(float(duration_refactor), 4))
                         continue
 
             # --- TIER 2: Empirical Equivalence Check (fail-fast before judge) ---
@@ -2074,6 +2083,31 @@ def auto_code_llmgeneration_pipeline(prompts,
             print(" Best ave power over Base LLM in refactored code, version: " + str(smallest_index) + "\n" )
 
 
+    # --- Post-loop attempt-log cleanup (Issue C) ---
+    # If the while loop exits while a Tier 2/3 self-correction is in progress
+    # (global self_correction_verify_counter exceeded mid-retry), the most recently
+    # processed code_block_index has only intermediate (is_final_attempt=False) rows —
+    # the while condition failed after `continue`, before the judge block could log
+    # is_final_attempt=True.  Promote the last intermediate row to final so that:
+    #   (a) every code_block_index has exactly one is_final_attempt=True row in the CSV, and
+    #   (b) attempt_log_buffer-based counters (tier2_pass_count, tier2_fail_total, etc.)
+    #       correctly include this code rather than silently under-counting it.
+    if attempt_log_buffer:
+        _all_cb_indices = sorted(set(r["code_block_index"] for r in attempt_log_buffer))
+        for _cb_i in _all_cb_indices:
+            if not any(r["code_block_index"] == _cb_i and r.get("is_final_attempt", False)
+                       for r in attempt_log_buffer):
+                # Promote last intermediate row to final in-place (all Tier verdict fields
+                # are already correct — this row captured the run that caused the exit).
+                for _r in reversed(attempt_log_buffer):
+                    if _r["code_block_index"] == _cb_i:
+                        _r["is_final_attempt"] = True
+                        _r["final_verdict"] = "INVALID"
+                        _r["override_applied"] = "global_sc_budget_exhausted"
+                        print(f"[Post-loop cleanup] cb{_cb_i}: promoted last intermediate row "
+                              f"to final (global SC budget exhausted mid-retry).")
+                        break
+
     # ============================================================
     # POST-LOOP: Best Clean Run
     # Strip Tier 1+2 instrumentation from the best LASSI-generated code, recompile,
@@ -2274,13 +2308,19 @@ def auto_code_llmgeneration_pipeline(prompts,
                 optimization_list_text = "None"
         experiment_data["lassiee_optimization_methods"] = str(optimization_list_text)
         # Table 1 ★ per-type self-correction counts (recompute total to fix historic undercounting)
+        # Issue B fix: tier2_selfcorrections recomputed from attempt_log_buffer (count rows whose
+        # self_correction_trigger starts with "tier2_fail" — these are actual generated SC attempts).
+        # The in-loop tier2_sc_count overcounts by 1 when the global SC budget is exhausted mid-retry:
+        # the counter increments before `continue`, but the while condition fails so no SC is generated.
+        _tier2_sc_final = sum(1 for r in attempt_log_buffer
+                              if str(r.get("self_correction_trigger", "")).startswith("tier2_fail"))
         experiment_data["compile_selfcorrections"] = compile_sc_count
         experiment_data["execute_selfcorrections"] = execute_sc_count
         experiment_data["tier1_selfcorrections"] = tier1_sc_count
-        experiment_data["tier2_selfcorrections"] = tier2_sc_count
+        experiment_data["tier2_selfcorrections"] = _tier2_sc_final
         experiment_data["tier3_selfcorrections"] = tier3_sc_count
         experiment_data["total_selfcorrections"] = (compile_sc_count + execute_sc_count +
-                                                     tier1_sc_count + tier2_sc_count + tier3_sc_count)
+                                                     tier1_sc_count + _tier2_sc_final + tier3_sc_count)
         experiment_data["global_counter_at_end"] = self_correction_verify_counter
         experiment_data["total_code_versions"] = fresh_generation_count  # all fresh LASSI code generations started, regardless of outcome
         experiment_data["total_code_attempts"] = len(attempt_log_buffer)
@@ -2292,18 +2332,29 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Computed outside the yes_power_feedback block so they are always recorded.
     tier2_results = verification_log.get("tier2_results", [])
     discrepancies = verification_log.get("judge_discrepancies", [])
-    experiment_data["tier2_pass_count"] = verification_log.get("tier2_pass_count", 0)
-    # tier2_fail_total: number of codes where the Tier 2 per-code budget was exhausted (INVALID outcome).
-    # Counts only final-attempt rows with a FAIL verdict — symmetric with tier2_pass_count, which counts
-    # codes whose final T2 verdict was PASS. Intermediate retry FAILs are captured by tier2_selfcorrections.
+    # All four Tier 2/3 PASS/FAIL counts use attempt_log_buffer with is_final_attempt=True filter.
+    # This ensures consistency: only the final verdict for each generated code is counted, not
+    # intermediate self-correction attempts that passed Tier 2 but then failed Tier 3 (or vice versa).
+    # Issue A fix: tier2_pass_count was previously incremented in-loop via verification_log, which
+    # counted any T2 PASS even if that attempt was later retried (e.g., passed T2, failed T3, looped).
+    # Issue D fix: tier3_fail_total previously lacked the is_final_attempt filter.
+    experiment_data["tier2_pass_count"] = sum(1 for r in attempt_log_buffer
+                                              if str(r.get("tier2_verdict", "")).startswith("PASS")
+                                              and r.get("is_final_attempt", False))
+    # tier2_fail_total: final-attempt rows whose Tier 2 verdict is FAIL (per-code budget exhausted).
+    # Intermediate retry FAILs are captured by tier2_selfcorrections.
     experiment_data["tier2_fail_total"] = sum(1 for r in attempt_log_buffer
                                               if str(r.get("tier2_verdict", "")).startswith("FAIL")
                                               and r.get("is_final_attempt", False))
     experiment_data["judge_false_positives"] = sum(1 for d in discrepancies if d.get("type") == "false_positive")
     experiment_data["judge_false_negatives"] = sum(1 for d in discrepancies if d.get("type") == "false_negative")
     tier3_results_vlog = verification_log.get("tier3_results", [])
-    experiment_data["tier3_pass_count"] = verification_log.get("tier3_pass_count", 0)
-    experiment_data["tier3_fail_total"] = sum(1 for r in attempt_log_buffer if str(r.get("tier3_verdict", "")).startswith("FAIL"))
+    experiment_data["tier3_pass_count"] = sum(1 for r in attempt_log_buffer
+                                              if str(r.get("tier3_verdict", "")).startswith("PASS")
+                                              and r.get("is_final_attempt", False))
+    experiment_data["tier3_fail_total"] = sum(1 for r in attempt_log_buffer
+                                              if str(r.get("tier3_verdict", "")).startswith("FAIL")
+                                              and r.get("is_final_attempt", False))
     experiment_data["tier3_active_relations"] = ",".join(verification_log.get("tier3_active_relations", []))
 
     # --- Table 2 ★ attempt log: mark best code row, then write to CSV ---

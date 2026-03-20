@@ -125,6 +125,7 @@ The pipeline parses `LASSI-VERIFY ASSERTIONS [label]: PASS` and `LASSI-VERIFY AS
 - **NEVER place assertion blocks inside solver loops or compute loops** — place them BEFORE and AFTER loops at observation points (function entry, pre-H→D transfer, post-D→H transfer, function exit). One print per block per program execution is the target — not one print per loop iteration.
 - **Type 2 sentinel (`[tier1_complete]`) must appear ONCE, AFTER all Type 1 blocks, OUTSIDE any loops**
 - LASSI-VERIFY assertion blocks are HOST-SIDE ONLY — never in `__global__` kernel functions
+- **NEVER modify `__global__` kernel function signatures or bodies.** Do not add, remove, or rename parameters. Do not rewrite, simplify, or replace the kernel body in any way. If you need data from inside the kernel, add a D→H copy in host code after the kernel completes and validate there.
 - Code runs to completion — never use `assert()`, `exit()`, or `abort()`
 
 ### Pattern 1: Single-condition check
@@ -218,8 +219,8 @@ Identify:
 ### Step 5: Preserve Original Code
 - Insert assertions around original code
 - Do NOT modify the original algorithm
-- Do NOT change kernel implementations
-- Only ADD assertion checks
+- Do NOT change kernel implementations — this means **zero changes** to `__global__` function signatures (parameters), bodies (logic), or call sites. Any modification to a kernel during assertion insertion corrupts the ground-truth spec and invalidates all downstream Tier 2 comparisons.
+- Only ADD assertion checks in host code
 
 ---
 
@@ -295,6 +296,32 @@ __global__ void bad_kernel(double* data, int N) {
     assert(shared_data[0] == data[0]); // IMPLEMENTATION-SPECIFIC
 }
 ```
+
+### ❌ WRONG: Modifying Kernel Signatures or Bodies
+```cpp
+// BAD — adds a new outputBuffer parameter to capture debug data, then rewrites
+// the kernel body to accommodate it, discarding the original computation.
+__global__ void pathfinder(const int* gpuWall, const int* gpuSrc,
+                            int* gpuResult, int* outputBuffer,  // ← NEW PARAM ADDED
+                            const int iteration, const int theHalo,
+                            const int borderCols, const int cols, const int t) {
+    (void)gpuWall;      // ← All original DP parameters discarded
+    (void)iteration;
+    (void)theHalo;
+    (void)borderCols;
+    (void)t;
+    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (global_idx < cols) {
+        gpuResult[global_idx] = gpuSrc[global_idx];  // ← Entire DP replaced with copy
+    }
+    // ... debug buffer write added here ...
+}
+// HOST CODE: kernel call site must also be updated to pass the new parameter,
+// which forces a full rewrite and commonly causes the LLM to simplify the host loop too.
+```
+**WHY THIS IS CATASTROPHIC:** When the kernel signature changes, the LLM must rewrite both the kernel and its call site(s). During that rewrite, it frequently simplifies or discards the core computation. The Tier 1 instrumented SOURCE_verify then produces wrong output (e.g., initial data values instead of computed DP results), poisoning the Tier 2 spec. Every generated code that computes the correct answer will then FAIL Tier 2 because it disagrees with the corrupted spec — the pipeline cannot make forward progress. This is an undetectable silent corruption: all Tier 1 assertions still PASS because the stub produces trivially valid-looking values.
+
+**CORRECT:** Leave the kernel signature and body completely untouched. If you need to inspect a value that is computed inside the kernel, copy the relevant output buffer from device to host after the kernel completes and validate it in a host-side assertion block.
 
 ### ✅ CORRECT Alternatives for Each Case:
 

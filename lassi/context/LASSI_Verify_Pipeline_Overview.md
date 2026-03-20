@@ -237,7 +237,7 @@ Source file (.cu)
 
 **Block format (in C++ source, printed to stdout):**
 ```
-=== BEGIN LASSI-VERIFY PASSTHROUGH [label] (do not edit or delete this block) >>>
+=== BEGIN LASSI-VERIFY PASSTHROUGH [label] (VERIFICATION BLOCK — do not rename, edit, or delete this block; this [label] must remain character-for-character identical) >>>
 Buffer: <buffer_name>
 Type: <dtype_name>
 Elements: <N>

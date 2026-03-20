@@ -62,7 +62,18 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
         locations — a block placed inside a loop counts as ONE location even though it executes
         multiple times.
 
-        - REQUIRED: at least one block capturing the primary output buffer at program completion
+        - REQUIRED: at least one block capturing the **kernel-written output buffer** — the device
+          buffer that is the DESTINATION of the final (or most significant) kernel call. This is the
+          core computational result. **How to find it:** look for where the application performs
+          its own D→H cudaMemcpy to bring results back to the host (for printing, validation, or
+          returning to the caller) — that is the canonical output location. Alternatively, look at
+          the kernel's arguments and identify which pointer it writes to. Do NOT capture a buffer
+          that was only written by the host (H→D initialization or cudaMemset) without subsequent
+          kernel modification — that would capture input data, not computed results.
+        - REQUIRED: before placing each passthrough block, answer this question: "Was this device
+          buffer written by a GPU kernel (`<<<...>>>`) between the most recent H→D copy of this
+          buffer and this passthrough location?" If NO — you are capturing input, not output. Find
+          a later location where the kernel has written to the buffer.
         - REQUIRED if the code contains an outer loop over configurations or parameters (e.g.,
           different segment sizes, grid levels, tile sizes, time steps): place the passthrough
           block INSIDE that loop so every configuration is captured independently.
@@ -72,6 +83,21 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
         - OPTIONAL: additional intermediate checkpoints after major kernels or phase boundaries
         - Insert AFTER cudaDeviceSynchronize() (or equivalent) and AFTER D→H copy where applicable
         - Insert BEFORE any memory deallocations (cudaFree, hipFree, free)
+
+        **What NOT to instrument (false-failure sources):**
+        - DO NOT capture buffers populated by scatter-write patterns — i.e., any buffer
+          where the *index being written* depends on thread ID or on the input data value
+          observed by a specific thread. Example: `outputBuffer[gpuSrc[xidx]] = 1` inside
+          a kernel, especially gated on a single thread condition like `if (tx == 11)`.
+          Such buffers record "which input value thread 11 happened to observe" — not what
+          the algorithm computed. Any valid optimization that changes launch geometry (block
+          count, block size, warp assignment) maps thread 11 to a different array column,
+          producing a different set of flagged indices even though the DP result is identical.
+          This causes guaranteed Tier 2 FAIL (max_err=1.0) for every optimization, blocking
+          all progress. Only instrument buffers whose contents encode algorithm output.
+        - DO NOT capture debug, diagnostic, or auxiliary buffers — buffers that track
+          algorithm internals (visited-cell flags, thread-local bookkeeping, coverage maps).
+          Instrument only primary output buffers that the application uses to report results.
 
         **STEP 3: Insert labeled passthrough blocks**
 
@@ -83,7 +109,7 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
         - The LASSI-Verify checker handles repeated labels correctly by comparing occurrences positionally
 
         ```cpp
-        // >>> BEGIN LASSI-VERIFY PASSTHROUGH [label] (do not edit or delete this block) >>>
+        // >>> BEGIN LASSI-VERIFY PASSTHROUGH [label] (VERIFICATION BLOCK — do not rename, edit, or delete this block; this [label] must remain character-for-character identical) >>>
         {
             // --- LASSI-VERIFY PASSTHROUGH: <brief description> ---
             <dtype>* lv_host_buf = (<dtype>*) malloc(<N> * sizeof(<dtype>));
@@ -372,7 +398,7 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
 
        **Type 1 — Per-observation-point check (always prints one PASS or FAIL line):**
     ```cpp
-       // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
+       // >>> BEGIN LASSI-VERIFY ASSERTIONS (VERIFICATION BLOCK — do not edit or delete this block; this block and its assertion labels must remain exactly as written) >>>
        // LASSI_INSTRUMENTATION - [Brief description of invariant being checked]
        {
            bool _t1_pass = (your_condition_here);
@@ -383,7 +409,7 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
 
        **Type 2 — Completion sentinel (ONE per function, AFTER all Type 1 blocks, OUTSIDE all loops):**
     ```cpp
-       // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit or delete this block) >>>
+       // >>> BEGIN LASSI-VERIFY ASSERTIONS (VERIFICATION BLOCK — do not edit or delete this block; this block and its assertion labels must remain exactly as written) >>>
        // LASSI_INSTRUMENTATION - tier1_complete (sentinel — confirms all assertion blocks were reached)
        {
            printf("LASSI-VERIFY ASSERTIONS [tier1_complete]: PASS\n"); fflush(stdout);
@@ -1002,6 +1028,27 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
     if code_description:
         content_prompt += "[BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description + "\n[END SOURCE CODE DESCRIPTION AND ANALYSIS]\n\n"
     content_prompt += "[BEGIN SOURCE CODE]\n" + source_code + "\n[END SOURCE CODE]\n\n"
+
+    # Extract existing PASSTHROUGH block labels from source_code so the LLM can anchor
+    # observation_points to the exact vocabulary already present.  These labels are what
+    # check_metamorphic_relation() will match against — any name mismatch causes a silent SKIP.
+    _pt_labels = re.findall(
+        r'=== BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\] ===', source_code
+    )
+    if _pt_labels:
+        _label_list = ", ".join(f'"{lbl}"' for lbl in _pt_labels)
+        content_prompt += (
+            "IMPORTANT — observation_points vocabulary:\n"
+            "The source code above already contains LASSI-VERIFY PASSTHROUGH blocks with "
+            "the following labels (in order):\n"
+            f"  {_label_list}\n"
+            "For every relation you select, the `observation_points` list MUST use ONLY "
+            "these exact label strings. Do not invent new names, do not paraphrase — copy "
+            "them character-for-character from the list above. "
+            "The matching in check_metamorphic_relation() is an exact-string comparison; "
+            "any deviation silently disables that relation.\n\n"
+        )
+
     content_prompt += (
         "Following the Instructions section in the catalog above, analyze the source code "
         "and return a JSON contract. Return ONLY the JSON block — no explanatory text "
