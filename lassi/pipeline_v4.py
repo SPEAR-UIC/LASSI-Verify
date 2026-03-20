@@ -564,6 +564,49 @@ def auto_code_llmgeneration_pipeline(prompts,
     #   [1] = SOURCE_verify stdout (Tier 2 reference)
     passthrough_outputs = [source_orig_stdout, source_verify_stdout]
 
+    # --- Stage 0 SOURCE_verify self-check ---
+    # LASSI-Verify uses SOURCE_verify as the correctness specification: generated codes must
+    # match its observable behavior. If SOURCE_verify *itself* fails its own verification
+    # blocks, the specification is corrupted and every generated code will fail against it.
+    # Terminating early prevents wasting the entire trial budget on an invalid spec.
+    # SKIP results (e.g., Tier 3 relations filtered inactive) are acceptable — only FAIL is fatal.
+    if run_tier2:
+        # Tier 1: check that SOURCE_verify's own assertion blocks all PASS.
+        _t1_verdict, _t1_diagnostic = lassi.verify.check_tier1_assertions(source_verify_stdout)
+        if _t1_verdict == "FAIL":
+            print(color.RED + color.BOLD +
+                  "\n[STAGE 0 ABORT] SOURCE_verify FAILED its own Tier 1 invariant assertions — "
+                  "instrumentation error; the trial specification is invalid. Aborting trial." +
+                  color.END)
+            print("Failing assertions:", _t1_diagnostic)
+            verification_log["stage0_abort_reason"] = f"tier1_fail: {_t1_diagnostic}"
+            return False
+        # Tier 2: check that SOURCE_verify's passthrough blocks contain no NaN/Inf statistics.
+        # NaN occurs when code_insert_passthrough placed a block before the GPU kernel wrote
+        # to the device buffer. Every generated code would then fail Tier 2 with inf error.
+        _block_pattern = re.compile(
+            r'=== BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\] ===\n(.*?)\n=== END LASSI-VERIFY PASSTHROUGH \[[^\]]+\] ===',
+            re.DOTALL)
+        _stats_pattern = re.compile(
+            r'Statistics:\s*min=([^,\s]+),\s*max=([^,\s]+),\s*mean=([^,\s]+)')
+        _nan_labels = []
+        for _blk_match in _block_pattern.finditer(source_verify_stdout):
+            _blk_label = _blk_match.group(1)
+            _blk_body  = _blk_match.group(2)
+            for _stat_match in _stats_pattern.finditer(_blk_body):
+                _vals = [_stat_match.group(1), _stat_match.group(2), _stat_match.group(3)]
+                if any("nan" in v.lower() or "inf" in v.lower() for v in _vals):
+                    _nan_labels.append(_blk_label)
+                    break
+        if _nan_labels:
+            print(color.RED + color.BOLD +
+                  "\n[STAGE 0 ABORT] SOURCE_verify passthrough blocks contain NaN/Inf statistics — "
+                  "instrumentation placed before kernel write; the Tier 2 spec is invalid. Aborting trial." +
+                  color.END)
+            print("Affected labels:", _nan_labels)
+            verification_log["stage0_abort_reason"] = f"tier2_nan_spec: {_nan_labels}"
+            return False
+
     # --- Tier 3: Generate metamorphic contract and filter active relations (Stage 0) ---
     # run_metamorphic_variants is called here with SOURCE_verify to determine which
     # relations are applicable to this computation. Relations that fail for SOURCE_verify
