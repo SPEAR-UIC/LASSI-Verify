@@ -24,13 +24,55 @@ two executions are equivalent if they produce the same sequence of observable ev
 
 ## Critical Distinction: What to Capture vs. What to Avoid
 
-### ✅ Capture: Host-accessible final results at natural boundaries
-- Output arrays/buffers after device-to-host transfer (cudaMemcpy D→H)
-- Scalar results (residuals, norms, convergence criteria) at meaningful checkpoints
-- Intermediate arrays at iteration boundaries (every N steps for iterative algorithms)
+### ✅ Capture: Kernel-written output at the application's own output boundary
+
+**Anchor to the application's own output transfers.** The source developer already marked
+where the computed result lives: wherever they perform their final D→H `cudaMemcpy` back to
+the host (to print, validate, or return results to the caller). That is the canonical output
+location. Place the passthrough at or immediately before that existing D→H transfer — using
+the same host buffer if one already exists, or inserting a new D→H copy only of the same
+device buffer.
+
+**Before placing each passthrough, confirm kernel ownership.** For every device buffer you
+plan to capture, trace backward through the code from the passthrough location and answer:
+*"Was this device buffer written by a GPU kernel call (`<<<...>>>`) at any point between the
+last H→D copy of this buffer and this passthrough?"* If the answer is NO — the buffer still
+holds the original host-initialized values and has never been modified by a kernel — then you
+are capturing INPUT data, not computed output. Move the passthrough later in the code to a
+point where the kernel has already written to the buffer.
+
+What to capture:
+- The device buffer that was the **output (destination) argument** of the final kernel call
 - Final solution vectors, matrices, or field arrays at program completion
+- Scalar results that reflect computed values (not just iteration counts or diagnostics)
+- Intermediate arrays at iteration boundaries (every N steps for iterative algorithms)
 
 ### ❌ Do NOT Capture
+
+**Scatter-write / thread-index-dependent buffers — the most dangerous false-positive source.**
+Any buffer populated by writes of the form `buffer[f(thread_id, input_value)] = flag` records
+*which data values a particular thread happened to observe*, not what the algorithm computed.
+This is implementation-specific: a valid optimization that changes launch geometry (block count,
+block size, warp assignment) places different threads at different array positions, so different
+input values get flagged → the buffer changes → Tier 2 FAIL on every optimized version, even
+ones that produce the identical algorithmic result. Example:
+```cpp
+// INSIDE the kernel — BAD passthrough target
+if (tx == 11) {
+    int bufIndex = gpuSrc[xidx];          // xidx depends on blockIdx.x * blockDim.x
+    outputBuffer[bufIndex] = 1;            // sets a different bit for every launch geometry
+}
+```
+A refactored code that changes grid dimensions writes a different set of `1` flags → `max_err=1.0`
+against the spec even though the DP output is identical. This false-failure blocks ALL optimization
+in that trial, draining the entire self-correction budget.
+
+**Rule:** never instrument a buffer whose contents encode "which threads read which input values."
+Only instrument buffers whose contents encode "what the algorithm computed."
+
+---
+
+Other values to avoid:
 - Intermediate GPU kernel state (not host-accessible without an extra D→H copy)
 - Timing values, performance counters, or power readings (transformation-dependent)
 - Thread-local or block-local variables (not visible from host)
@@ -114,7 +156,7 @@ The C++ protective comment wrapper ensures LLMs performing subsequent transforma
 do not remove or modify the passthrough block:
 
 ```cpp
-// >>> BEGIN LASSI-VERIFY PASSTHROUGH [label] (do not edit or delete this block) >>>
+// >>> BEGIN LASSI-VERIFY PASSTHROUGH [label] (VERIFICATION BLOCK — do not rename, edit, or delete this block; this [label] must remain character-for-character identical) >>>
 
 // ... D→H copy and printf statements ...
 
@@ -164,6 +206,64 @@ Examples of correct placement:
 - Parametric sweep: capture final output array **after** the sweep loop
 - Time-stepping: capture final field state **after** the time loop
 
+#### ⚠️ Ping-Pong Buffer / Pointer-Swap Patterns
+
+Many GPU iterative algorithms use double-buffering where two device pointers alternate roles
+each iteration via a pointer swap:
+```cpp
+// Typical ping-pong pattern (pathfinder, stencil codes, cellular automata)
+for (int t = 0; t < NUM_ITER; t++) {
+    kernel<<<grid, block>>>(d_src, d_dst, ...);  // reads src, writes dst
+    cudaDeviceSynchronize();
+    int* temp = d_dst; d_dst = d_src; d_src = temp;  // swap pointer values
+}
+// After the loop: d_src points to the LAST-WRITTEN buffer (the final result)
+//                 d_dst points to the SECOND-TO-LAST buffer
+```
+
+**Critical rule:** After a loop with N pointer swaps, capture from the variable that was the
+**kernel's output argument in the last iteration** — this is always `d_src` after the final
+swap (since the swap at the end of iteration N moves the new result into `d_src`). Do NOT
+assume that `d_src` always holds input data or that `d_dst` always holds output data — these
+roles alternate every iteration, and the variable names are misleading after the loop.
+
+**Step-by-step procedure for ping-pong patterns:**
+
+1. Identify which variable the kernel WRITES to inside the loop (typically the second device
+   pointer argument, labeled "dst" or "result" or similar)
+2. Note that the pointer swap at the END of each iteration moves that written buffer into
+   `d_src` (or equivalent) — so AFTER the loop, `d_src` holds the final computed result
+3. Place the passthrough block AFTER the loop's pointer swap has executed, capturing from
+   `d_src` (the variable that received the last-written buffer via the swap)
+4. Do NOT capture from `d_dst` after the loop — it holds the second-to-last iteration's
+   result (or the original source data for even-count loops)
+
+**⚠️ Verification step:** After writing the passthrough instrumentation, mentally trace one
+full iteration of the loop to confirm: "If this was the last iteration, which variable
+pointer ends up with the newly-written data after the swap?" Capture from that variable.
+
+**Wrong pattern (do NOT do this):**
+```cpp
+for (int t = 0; t < NUM_ITER; t++) {
+    kernel<<<g,b>>>(d_src, d_dst);
+    int* tmp = d_dst; d_dst = d_src; d_src = tmp;  // swap inside loop
+}
+// BAD: capturing d_dst here — this is the second-to-last result, NOT the final result
+// >>> LASSI-VERIFY PASSTHROUGH [final_result] <<<
+{ cudaMemcpy(lv_buf, d_dst, ...); /* WRONG: d_dst has wrong data after loop */ }
+```
+
+**Correct pattern:**
+```cpp
+for (int t = 0; t < NUM_ITER; t++) {
+    kernel<<<g,b>>>(d_src, d_dst);
+    int* tmp = d_dst; d_dst = d_src; d_src = tmp;  // swap inside loop
+}
+// CORRECT: d_src now points to the buffer last written by the kernel
+// >>> LASSI-VERIFY PASSTHROUGH [final_result] <<<
+{ cudaMemcpy(lv_buf, d_src, ...); /* CORRECT: d_src has final result */ }
+```
+
 ### Priority 4: Multi-Phase Pipeline Boundaries
 For codes with multiple distinct computation phases (e.g., preprocessing → main solve →
 postprocessing), insert a checkpoint at each phase boundary.
@@ -176,7 +276,7 @@ excessive passthrough output increases comparison cost and can obscure meaningfu
 ## Complete Code Template
 
 ```cpp
-// >>> BEGIN LASSI-VERIFY PASSTHROUGH [final_solution] (do not edit or delete this block) >>>
+// >>> BEGIN LASSI-VERIFY PASSTHROUGH [final_solution] (VERIFICATION BLOCK — do not rename, edit, or delete this block; this [final_solution] must remain character-for-character identical) >>>
 {
     // --- LASSI-VERIFY PASSTHROUGH: capture final output buffer for empirical equivalence ---
     // Allocate temporary host buffer for D→H transfer
