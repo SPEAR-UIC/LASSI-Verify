@@ -1,0 +1,49 @@
+***** EXPERIMENT CONFIGURATION SUMMARY *****
+
+Date-time: 07-25-2025_t02_54_57
+Application: jacobi
+
+EE Refactoring: CUDA_ee
+
+LLM Source: argo
+Model: claudesonnet4
+Model coder: claudesonnet4
+Model judge: gpt4o
+System Prompt Index: CUDA
+Code file template: generated_codes/argo_claudesonnet4/promptset_CUDA/jacobi-cuda_main_ee_refactorcode_CUDA_exp_mtdTEST_o4mini_miniapp_argo_ee_mdock
+
+LLM System Prompt: 
+
+You are an expert C++/CUDA engineer. Your goal is to refactor provided CUDA C++ code for energy efficiency by reducing GPU and CPU power consumption without losing any functionality of the original code. You must also carefully read and incorporate the best practices from the provided background documents. You always surround your generated code with the three characters ```.
+
+Power measurement: True
+
+----- PIPELINE METRICS -----
+Experiment date-time: 07-25-2025_t02_54_57
+Time (sec): 1419.68 | 23.66 (min)
+Code Error Self-correction iteration count: 0
+Energy Efficiency Self-improvement iteration count: 11
+
+
+----- ENERGY EFFICIENCY METRICS -----
+Best refactored code version: 8
+LLM Judge Validation Result: VALID
+Total Energy (J):   Idle: 281.55  Source code: 1247.58  Base LLM code: 17.45  Best Refactored code: 817.46
+Average Power (W):   Idle: 33.16  Source code: 146.95  Base LLM code: 6.35  Best Refactored code: 136.93
+Runtime (s):   Idle: 8.49  Source code: 8.49  Base LLM code: 2.76  Best Refactored code: 5.98
+
+
+----- SOURCE: EXECUTION OUTPUT -----
+Error after iteration 0 = 0.00276205
+Error after iteration 1000 = 1.38643e-05
+Average execution time per iteration: 0.00421613 (s)
+PASS
+Total elapsed time: 8.389 seconds
+
+
+
+----- GENERATED: EXECUTION OUTPUT -----
+Error after iteration 1000 = 1.38746e-05
+Average execution time per iteration: 0.00254366 (s)
+PASS
+Total elapsed time: 5.773 seconds

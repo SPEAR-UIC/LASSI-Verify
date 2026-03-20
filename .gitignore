@@ -1,0 +1,31 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# LASSI-Verify generated experiment data (generated codes, metadata, power CSVs)
+generated_codes/
+
+# Planning docs (local only, not for repo)
+planning/
+
+# Experiment result CSV files
+*.csv
+
+# Compiled/binary artifacts in source_codes and test_codes
+source_codes/**/*-cuda_main
+source_codes/**/*-cuda_main_verify
+test_codes/**/*-cuda_main
+test_codes/**/*-cuda_main_verify
+
+# Runtime-generated instrumented source files (created by pipeline_v4.py verify stage)
+*_verify.cu
+
+# Tier 3 metamorphic testing variant files (compiled/run at runtime, not tracked)
+*_mt_*.cu
+
+# Best clean run — uninstrumented best LASSI code (generated at pipeline end, not tracked)
+*_best_clean.cu
