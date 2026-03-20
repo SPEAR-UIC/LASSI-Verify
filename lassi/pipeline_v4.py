@@ -580,6 +580,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                   color.END)
             print("Failing assertions:", _t1_diagnostic)
             verification_log["stage0_abort_reason"] = f"tier1_fail: {_t1_diagnostic}"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            lassi.monitor.save_log(_abort_monitor_log_path)
             return False
         # Tier 2: check that SOURCE_verify's passthrough blocks contain no NaN/Inf statistics.
         # NaN occurs when code_insert_passthrough placed a block before the GPU kernel wrote
@@ -605,6 +608,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                   color.END)
             print("Affected labels:", _nan_labels)
             verification_log["stage0_abort_reason"] = f"tier2_nan_spec: {_nan_labels}"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            lassi.monitor.save_log(_abort_monitor_log_path)
             return False
 
     # --- Tier 3: Generate metamorphic contract and filter active relations (Stage 0) ---
