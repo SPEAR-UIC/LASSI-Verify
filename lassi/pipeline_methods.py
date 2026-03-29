@@ -178,7 +178,7 @@ def test_source_code(app_name, experiment_data_directory,
     
     if compile_result != "":
         print("\n\nFailed compile result: " + str(compile_result))
-        return False
+        return "COMPILE_ERROR"
     if yes_execute:
         print("\nTest executing the compiled original source code: " + str(execute_file))
         exe_file_path = execute_file  # directory + "/" + execute_file
@@ -190,7 +190,7 @@ def test_source_code(app_name, experiment_data_directory,
         sourcecode_total_energy_joules = total_energy_joules
         sourcecode_ave_power = ave_power
         if execute_result != "0":
-            return False
+            return "EXECUTE_ERROR"
         idle_energy_joules = 0
         idle_ave_power = 0
         idle_std_power = 0
@@ -320,18 +320,39 @@ def generate_refactoring_plan(source_lang,
                               display_response,
                               few_shot_learning=False,
                               verifyprompt=False,
-                              power_measure=True):   # power_measure=False selects runtime optimization prompts
+                              power_measure=True,    # power_measure=False selects runtime optimization prompts
                                                      # NOTE: when power_measure=False, total_energy_joules holds the
                                                      # runtime duration value (passed from runtime_history at call sites)
+                              last_good_refactoring_plan=""):  # Plan from the most recent winning iteration;
+                                                               # strategies in it are already applied to the CODE TO REFACTOR.
 
     # Prompt structure: GOAL - RETURN FORMAT - WARNINGS - CONTEXT
     plan_key = source_lang + "_refactorplan" if power_measure else source_lang + "_refactorplan_runtime"
     refactoring_plan_instructions = prompts.get_code_ee_refactoring_prompt(plan_key)
-    
+
     # Prepend the Context:
     refactoring_plan_instructions = refactoring_plan_instructions + "\n\n" + context_prompt
-    
-    # Append previous failed plans (if available)
+
+    # Inject the most recent winning plan as "already-applied" context (if available).
+    # These optimizations are already embedded in the CODE TO REFACTOR below, so the LLM
+    # should build beyond them rather than re-propose the same strategies.
+    if last_good_refactoring_plan:
+        if power_measure:
+            good_plan_context = ("The following refactoring plan was previously used and produced a code that "
+                                 "successfully improved energy efficiency. The optimizations it describes are already "
+                                 "applied in the CODE TO REFACTOR below. Do NOT re-propose these same strategies. "
+                                 "Instead, identify complementary or orthogonal optimizations that go further.")
+        else:
+            good_plan_context = ("The following refactoring plan was previously used and produced a code that "
+                                 "successfully reduced wall-clock execution time. The optimizations it describes are already "
+                                 "applied in the CODE TO REFACTOR below. Do NOT re-propose these same strategies. "
+                                 "Instead, identify complementary or orthogonal optimizations that go further.")
+        refactoring_plan_instructions = (refactoring_plan_instructions + "\n\n" + good_plan_context
+                                         + "\n[PREVIOUSLY SUCCESSFUL PLAN — ALREADY APPLIED]\n" + last_good_refactoring_plan)
+
+    # Append previous failed plans (if available).
+    # These are plans tried against the current best code that did not improve the metric.
+    # Reset when tracking_best_version advances so only plans relevant to the current code are included.
     if len(prior_refactoring_plans) > 0:
         if power_measure:
             failed_plan_context = "For reference to your refactoring plan, the following plans were previously used that did not result in a successful outcome of code that was functionally equivalent to the source code and reduced energy consumption during runtime. Based on these previous plans, try to not repeat specific ideas that may have been unsuccessful."

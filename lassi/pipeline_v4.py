@@ -11,6 +11,7 @@ For focus, we will not do the base LLM + self-correction. Just base LLM then LAS
 """
 
 import os
+import sys
 import csv
 import json
 import re
@@ -214,6 +215,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                                      run_llm_judge=True,     # Enable LLM-as-a-judge functional equivalence check (pre-Tier-1/2 stop-gap; disable for pure three-tier mode)
                                      run_tier3=False,        # Enable Tier 3 metamorphic testing
                                      tier3_tolerance=1e-5,   # Default relative tolerance for metamorphic relation checks (slightly looser than Tier 2 to account for two independently-accumulated FP runs)
+                                     verify_zeroshot=True,   # Enable empirical Tier 1/2/3 verification of the zero-shot code (single attempt, fail-fast, no retries; results recorded separately from LLM judge)
                                      attempt_log_file_path=None  # Path to per-attempt CSV (Table 2 ★); None = skip writing
                                     ):
 
@@ -283,7 +285,13 @@ def auto_code_llmgeneration_pipeline(prompts,
     runtime_history = []
     valid_code_history = []
     code_blocks = []  # Collection of all codes generated
-    bad_refactor_plans = []  # Collection of refactoring plan texts that did not result in 'good' code.
+    bad_refactor_plans = []         # Plans tried against the current best code that did not improve the metric.
+                                    # Reset when tracking_best_version advances so only plans relevant to the
+                                    # current best code are included in the next plan generation prompt.
+    last_good_refactoring_plan = "" # Plan from the most recent winning iteration. The optimizations it describes
+                                    # are already applied to the current best code (code_blocks[tracking_best_version]).
+                                    # Injected into generate_refactoring_plan() to steer the LLM toward
+                                    # complementary/orthogonal strategies rather than re-proposing applied ones.
     iteration_log = {}  # initiate the iteration log for each code version
     verification_log = {}  # iniiate a dict log for code verifications
     # iteration_log[version] = {"self_correction": 0, "energy_refactor": 0, "LLM_temperature": 0}
@@ -299,6 +307,10 @@ def auto_code_llmgeneration_pipeline(prompts,
     current_generation_type = "lassi_fresh"   # Generation type for the current attempt (set at top of each while iteration)
     zeroshot_compile_status = "skipped"       # Compile status for zero-shot code; updated when zero-shot runs
     zeroshot_execute_status = "skipped"       # Execute status for zero-shot code
+    zs_tier1_verdict = "SKIP"                 # Zero-shot Tier 1 empirical verdict (set after verify_zeroshot block)
+    zs_tier2_verdict = "SKIP"                 # Zero-shot Tier 2 empirical verdict
+    zs_tier3_verdict = "SKIP"                 # Zero-shot Tier 3 empirical verdict
+    zs_empirical_verdict = "SKIP"             # Overall zero-shot empirical verdict (PASS if all active tiers pass)
     best_refactored_code_dict = {}
     best_refactored_code_judge = ""
     best_refactoring_plan = ""
@@ -487,6 +499,12 @@ def auto_code_llmgeneration_pipeline(prompts,
     verification_log["tier3_active_relations"] = []  # populated after Stage 0 source variant filter
     verification_log["tier3_results"] = []           # per-iteration list of {code_version, verdict, results}
     verification_log["tier3_pass_count"] = 0
+    # Zero-shot empirical verification log fields (populated after verify_zeroshot block)
+    verification_log["verify_zeroshot"] = verify_zeroshot
+    verification_log["zeroshot_tier1_verdict"] = "SKIP"
+    verification_log["zeroshot_tier2_verdict"] = "SKIP"
+    verification_log["zeroshot_tier3_verdict"] = "SKIP"
+    verification_log["zeroshot_empirical_verdict"] = "SKIP"
 
 
     # -----------------------------------------------------------
@@ -509,6 +527,14 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     input_content_llmjudge_dict["source_code"] = input_code
 
+    # Abort if Tier 1 produced no assertion labels — cannot verify without Tier 1 coverage.
+    _t1_labels = re.findall(r'LASSI-VERIFY ASSERTION', input_code)
+    if not _t1_labels:
+        print(color.RED + color.BOLD +
+              "\n[ABORT] Tier 1: code_insert_asserts() produced no assertion blocks in SOURCE_verify. "
+              "Cannot run LASSI-Verify without Tier 1 coverage. Exiting pipeline." + color.END)
+        return False
+
     # --- Tier 2: Insert passthrough data dump blocks into the already-asserted code ---
     # code_insert_passthrough() is called on the Tier-1-instrumented code so both assertion
     # blocks and passthrough blocks appear in SOURCE_verify and are carried through all
@@ -525,8 +551,10 @@ def auto_code_llmgeneration_pipeline(prompts,
             input_content_llmjudge_dict["source_code"] = input_code
             print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify -----")
         else:
-            print(f"\n----- LASSI-Verify Tier 2: passthrough insertion returned empty — Tier 2 will be SKIPPED -----")
-            run_tier2 = False  # Disable Tier 2 for this run if insertion failed
+            print(color.RED + color.BOLD +
+                  "\n[ABORT] Tier 2: code_insert_passthrough() returned empty — cannot run "
+                  "LASSI-Verify without Tier 2 coverage. Exiting pipeline." + color.END)
+            return False
 
     # Write the instrumented source to disk so test_source_code compiles and runs it —
     # not the original .cu file. This gives true SOURCE_verify metrics that include
@@ -543,13 +571,30 @@ def auto_code_llmgeneration_pipeline(prompts,
     """Run the instrumented source code to capture SOURCE_verify baseline metrics.
     Compiles and executes verify_source_file_path (the assertion-instrumented .cu file),
     so history[1] reflects the true overhead of the invariant assertion instrumentation."""
-    (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
-     energy_history, power_history, runtime_history, valid_code_history,
-     source_verify_stdout) = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
+    _source_verify_result = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
                                                                                             exe_input_parameters, code_compiler, code_compiler_kwds,
                                                                                             yes_execute, power_measure, input_content_llmjudge_dict,
                                                                                             energy_history, power_history, runtime_history, valid_code_history
                                                                                            )
+    if _source_verify_result in ("COMPILE_ERROR", "EXECUTE_ERROR"):
+        _abort_reason = _source_verify_result
+        if _abort_reason == "COMPILE_ERROR":
+            _abort_msg = ("SOURCE_verify failed to compile — Tier 1/2 instrumentation "
+                          "introduced a syntax error.")
+        else:
+            _abort_msg = ("SOURCE_verify failed to execute (runtime error / segfault) — "
+                          "Tier 1/2 instrumentation caused a crash.")
+        print(color.RED + color.BOLD + "\n[STAGE 0 ABORT] " + _abort_msg +
+              " Aborting trial." + color.END)
+        verification_log["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
+        _abort_monitor_log_path = os.path.join(experiment_data_directory,
+            "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+        sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
+        lassi.monitor.save_log(_abort_monitor_log_path)
+        return False
+    (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
+     energy_history, power_history, runtime_history, valid_code_history,
+     source_verify_stdout) = _source_verify_result
     valid_code_history[-1] = "SOURCE_verify"  # Override "SOURCE" label from test_source_code
     experiment_data["source_verify_runtime_s"] = runtime_history[1]   # Wall-clock time of instrumented source (Table 1 ★)
 
@@ -582,6 +627,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             verification_log["stage0_abort_reason"] = f"tier1_fail: {_t1_diagnostic}"
             _abort_monitor_log_path = os.path.join(experiment_data_directory,
                 "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
             lassi.monitor.save_log(_abort_monitor_log_path)
             return False
         # Tier 2: check that SOURCE_verify's passthrough blocks contain no NaN/Inf statistics.
@@ -610,6 +656,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             verification_log["stage0_abort_reason"] = f"tier2_nan_spec: {_nan_labels}"
             _abort_monitor_log_path = os.path.join(experiment_data_directory,
                 "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
             lassi.monitor.save_log(_abort_monitor_log_path)
             return False
 
@@ -619,16 +666,35 @@ def auto_code_llmgeneration_pipeline(prompts,
     # are marked inactive and silently skipped for all generated codes in the main loop.
     # This achieves zero false positives from inapplicable MRs (mechanizes the manual
     # MR validation step identified as future work in Li et al. 2025, Directions 2-3).
+    # Retries up to TIER3_CONTRACT_MAX_ATTEMPTS times if all relations fail the source filter.
+    # On each retry, the LLM receives a list of failed relations with failure reasons,
+    # so it can propose categorically different relations rather than repeating ones that
+    # don't hold at solver tolerance. If no active relations after all attempts, abort.
+    TIER3_CONTRACT_MAX_ATTEMPTS = 3
     if run_tier3 and run_tier2:  # Tier 3 requires Tier 2 passthrough baseline
-        print(f"\n----- LASSI-Verify Tier 3: generating metamorphic contract -----")
-        tier3_contract = lassi.verify.generate_metamorphic_contract(
-            input_code,  # SOURCE_verify (Tier 1 + Tier 2 instrumented)
-            llm_source, model, num_ctx, system_prompt, display_response,
-            verifyprompt=verifyprompt,
-            code_description=llm_code_description_response
-        )
-        if tier3_contract and tier3_contract.get("relations"):
-            print(f"\n----- LASSI-Verify Tier 3: running SOURCE_verify metamorphic variants (filter) -----")
+        tier3_feedback = None   # None on first attempt; populated with failed-relation list on retries
+        for _t3_attempt in range(1, TIER3_CONTRACT_MAX_ATTEMPTS + 1):
+            print(f"\n----- LASSI-Verify Tier 3: generating metamorphic contract "
+                  f"(attempt {_t3_attempt}/{TIER3_CONTRACT_MAX_ATTEMPTS}) -----")
+            tier3_contract = lassi.verify.generate_metamorphic_contract(
+                input_code,  # SOURCE_verify (Tier 1 + Tier 2 instrumented)
+                llm_source, model, num_ctx, system_prompt, display_response,
+                verifyprompt=verifyprompt,
+                code_description=llm_code_description_response,
+                feedback=tier3_feedback
+            )
+            if not (tier3_contract and tier3_contract.get("relations")):
+                print(f"\n----- LASSI-Verify Tier 3: contract generation failed (attempt {_t3_attempt}) — "
+                      f"{'aborting pipeline' if _t3_attempt == TIER3_CONTRACT_MAX_ATTEMPTS else 'retrying'} -----")
+                if _t3_attempt == TIER3_CONTRACT_MAX_ATTEMPTS:
+                    print(color.RED + color.BOLD +
+                          f"\n[ABORT] Tier 3 contract generation failed after {TIER3_CONTRACT_MAX_ATTEMPTS} attempts. "
+                          f"Cannot run LASSI-Verify without Tier 3 coverage. Exiting pipeline." + color.END)
+                    return False
+                continue  # retry without feedback (no relations to report)
+
+            print(f"\n----- LASSI-Verify Tier 3: running SOURCE_verify metamorphic variants "
+                  f"(filter, attempt {_t3_attempt}/{TIER3_CONTRACT_MAX_ATTEMPTS}) -----")
             _, filter_results, _ = lassi.verify.run_metamorphic_variants(
                 input_code,                 # SOURCE_verify code
                 tier3_contract["relations"],
@@ -642,8 +708,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                 experiment_data_directory=experiment_data_directory,
                 verifyprompt=verifyprompt
             )
-            # Mark relations active/inactive based on source filter results.
-            # "PASS" → relation is applicable; "FAIL" or "SKIP" → filter inactive.
+
+            # Partition relations into active/inactive based on source filter.
+            # Only "PASS" is active — "FAIL" and "SKIP" both mean the relation
+            # is not validated for this computation and must not be applied.
             tier3_active_relations = [
                 r for r in tier3_contract["relations"]
                 if r.get("source_status") == "PASS"
@@ -655,12 +723,30 @@ def auto_code_llmgeneration_pipeline(prompts,
             ]
             n_total  = len(tier3_contract["relations"])
             n_active = len(tier3_active_relations)
-            print(f"\n----- LASSI-Verify Tier 3: {n_active}/{n_total} relations active after source filter -----")
-            if n_active == 0:
-                print(f"      (All relations failed or skipped for SOURCE_verify — Tier 3 will be SKIP for all generated codes)")
-        else:
-            print(f"\n----- LASSI-Verify Tier 3: contract generation failed — Tier 3 disabled -----")
-            run_tier3 = False  # Disable Tier 3 for this run
+            print(f"\n----- LASSI-Verify Tier 3: {n_active}/{n_total} relations active "
+                  f"after source filter (attempt {_t3_attempt}/{TIER3_CONTRACT_MAX_ATTEMPTS}) -----")
+
+            if n_active > 0:
+                break  # success — at least one active relation
+
+            # All relations failed — build feedback for next attempt
+            if _t3_attempt < TIER3_CONTRACT_MAX_ATTEMPTS:
+                tier3_feedback = [
+                    (r["name"],
+                     r.get("description", "(no description)"),
+                     f"source_status={r.get('source_status', 'unknown')}")
+                    for r in tier3_contract["relations"]
+                ]
+                print(f"      All {n_total} relation(s) failed source filter — retrying with failure feedback.")
+            else:
+                # Final attempt also produced zero active relations — abort
+                print(color.RED + color.BOLD +
+                      f"\n[ABORT] Tier 3: no active relations after {TIER3_CONTRACT_MAX_ATTEMPTS} attempts. "
+                      f"Cannot run LASSI-Verify without Tier 3 coverage. Exiting pipeline." + color.END)
+                verification_log["tier3_contract"] = tier3_contract
+                verification_log["tier3_active_relations"] = []
+                return False
+
         verification_log["tier3_contract"] = tier3_contract
         verification_log["tier3_active_relations"] = [r["name"] for r in tier3_active_relations]
     elif run_tier3 and not run_tier2:
@@ -685,6 +771,13 @@ def auto_code_llmgeneration_pipeline(prompts,
         # Used later to detect whether we're entering a Tier 2 self-correction retry vs. a fresh code.
         compile_result_before_generation = compile_result
 
+        # Reset the compile/execute SC counter at the start of every fresh LASSI code generation
+        # so self_correction_max acts as a per-code limit rather than a global pipeline limit.
+        # SC retries within the same code block (compile/execute errors) do NOT match this condition,
+        # so the counter accumulates correctly until the per-code budget is exhausted.
+        if compile_result_before_generation in ("", "energy_efficiency"):
+            self_correction_counter = 0
+
         # --- Table 2 ★: determine generation type and attempt number for the attempt record ---
         # generation_type and attempt_number track what kind of code generation this iteration performs.
         # Only updated for LASSI codes (not zero_shot); zero-shot is logged separately in Table 1.
@@ -698,8 +791,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # Fresh LASSI code generation — new code_block_index, reset attempt counter
                 current_generation_type = "lassi_fresh"
                 attempt_number = 1
-                # fresh_generation_count is incremented only after code_blocks.append() succeeds below,
-                # so aborted fresh starts (e.g. temperature-max break before LLM call) are not counted.
+                fresh_generation_count += 1  # Table 1 ★: count each fresh LASSI generation request (before compile/execute, excludes zero_shot)
             elif compile_result_before_generation in _tier_retry_map:
                 current_generation_type = _tier_retry_map[compile_result_before_generation]
                 attempt_number += 1
@@ -1074,6 +1166,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     few_shot_learning=few_shot_learning,
                     verifyprompt=verifyprompt,
                     power_measure=power_measure,
+                    last_good_refactoring_plan=last_good_refactoring_plan,
                 )
                 # When tracking_best_version <= 1, the plan was written using original_input_code
                 # (uninstrumented) to help the LLM focus on the algorithm. But the actual code
@@ -1167,6 +1260,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 few_shot_learning=False,
                 verifyprompt=verifyprompt,
                 power_measure=power_measure,
+                last_good_refactoring_plan=last_good_refactoring_plan,
             )
             # Same split as in the iteration block: plan used original_input_code for clean algorithm
             # analysis, but the actual code to refactor must be code_blocks[1] (SOURCE_verify with
@@ -1356,8 +1450,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                     file.write(code_block)
                 file.close()
                 code_blocks.append(code_block)  # save this code in our code collection list
-                if current_generation_type == "lassi_fresh":
-                    fresh_generation_count += 1  # Table 1 ★: count only after code is confirmed produced
                 input_content_llmjudge_dict["refactored_code"] = code_block
                 input_content_llmjudge_dict["refactored_stdout"] = exe_output_generated
                 input_content_llmjudge_dict["refactored_metrics"] = metrics_results_string
@@ -1433,8 +1525,10 @@ def auto_code_llmgeneration_pipeline(prompts,
             # All assertions are checked before deciding (code runs to completion), giving the
             # LLM full visibility into every violated invariant — not just the first one.
             # Applies only to LASSI-generated codes (zero_shot has no assertion blocks).
-            # Reset per-code counter on fresh code; preserve across tier1_failure retries.
-            if compile_result_before_generation != "tier1_failure":
+            # Reset per-code counter only at fresh code generation — not on compile/execute errors
+            # that occur during or after a T1 SC chain (those must preserve the counter so the
+            # per-code budget is not silently refilled by a mid-chain compile SC).
+            if compile_result_before_generation in ("", "energy_efficiency", "tier2_failure", "tier3_failure"):
                 self_correction_tier1_counter_code = 0
             tier1_verdict = "SKIP"
             tier1_diagnostic = {}
@@ -1446,11 +1540,14 @@ def auto_code_llmgeneration_pipeline(prompts,
                         print(f"\n----- LASSI-Verify Tier 1: PASS (sentinel only — 0 assertion blocks found; LASSI-VERIFY blocks may have been stripped by LLM) -----")
                     else:
                         print(f"\n----- LASSI-Verify Tier 1: PASS ({tier1_diagnostic['pass_count']} assertion(s)) -----")
-                elif tier1_verdict == "SKIP":
-                    print(f"\n----- LASSI-Verify Tier 1: SKIP (no assertion blocks found in stdout) -----")
-                elif tier1_verdict == "FAIL":
-                    print(f"\n----- LASSI-Verify Tier 1: FAIL — {tier1_diagnostic['fail_count']} assertion(s) violated -----")
-                    print(tier1_diagnostic["summary"])
+                elif tier1_verdict in ("FAIL", "SKIP"):
+                    if tier1_verdict == "SKIP":
+                        # Sentinel not printed: code exited early or LLM stripped assertion blocks.
+                        # Treat as FAIL — T2 cannot diagnose or fix missing instrumentation.
+                        print(f"\n----- LASSI-Verify Tier 1: SKIP (sentinel not found) — treating as FAIL -----")
+                    else:
+                        print(f"\n----- LASSI-Verify Tier 1: FAIL — {tier1_diagnostic['fail_count']} assertion(s) violated -----")
+                        print(tier1_diagnostic["summary"])
                     # Note: Tier 1 does NOT increment self_correction_verify_counter (the global Tier 2+3 safety net).
                     # Tier 1 has its own per-code budget (self_correction_tier1_counter_code_max) which bounds it.
                     # Including Tier 1 in the global counter causes early termination on hard kernels with
@@ -1476,8 +1573,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier3_verdict="SKIP", tier3_diagnostic={},
                             judge_verdict=None, final_verdict=None, override_applied=None,
                         ))
-                        current_sc_trigger = ("tier1_fail:" + tier1_diagnostic["failing_labels"][0]
-                                              if tier1_diagnostic.get("failing_labels") else "tier1_fail:unknown")
+                        current_sc_trigger = ("tier1_skip:sentinel_missing" if tier1_verdict == "SKIP"
+                                              else ("tier1_fail:" + tier1_diagnostic["failing_labels"][0]
+                                                    if tier1_diagnostic.get("failing_labels") else "tier1_fail:unknown"))
                         code_version -= 1  # roll back: pop removes the code so code_version must stay in sync
                         code_blocks.pop()
                         compile_result = "tier1_failure"
@@ -1527,8 +1625,11 @@ def auto_code_llmgeneration_pipeline(prompts,
             # return SKIP — which is the correct behavior for the zero-shot path.
             # Reset per-code Tier 2 self-correction counter when processing a fresh code.
             # A Tier 2 retry enters here with compile_result_before_generation == "tier2_failure";
-            # anything else (initial, win, INVALID/no-improvement) means a fresh code.
-            if compile_result_before_generation not in ("tier2_failure", "tier1_failure"):
+            # anything else means a fresh code block reaching T2 for the first time — including
+            # the lassi_fresh→T1 FAIL→T1 SC→T1 PASS→T2 path (compile_result_before_generation
+            # == "tier1_failure" on that final T1 SC iteration). "tier1_failure" must NOT suppress
+            # the reset: the T2 per-code counter must start at 0 regardless of prior T1 retries.
+            if compile_result_before_generation != "tier2_failure":
                 self_correction_verify_counter_code = 0
                 tier2_exhausted = False  # defensive reset: ensure no stale exhausted state from prior iteration
             tier2_verdict = "SKIP"
@@ -1538,8 +1639,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                     spec_stdout=passthrough_spec_output,
                     generated_stdout=exe_output_generated,
                     tolerance=tier2_tolerance,
-                    llm_source=llm_source, model=model, num_ctx=num_ctx,
-                    system_prompt=system_prompt, verifyprompt=verifyprompt
                 )
                 print(f"\n----- LASSI-Verify Tier 2: {tier2_verdict} -----")
                 if tier2_diagnostic.get("failures"):
@@ -1755,6 +1854,159 @@ def auto_code_llmgeneration_pipeline(prompts,
                         )
                 valid_code_flag = "INVALID"
 
+            # --- ZERO-SHOT EMPIRICAL VERIFICATION ---
+            # Run Tier 1 → Tier 2 → Tier 3 on the zero-shot code as additional empirical data.
+            # Each tier starts from the original (uninstrumented) zero-shot code using
+            # code_insert_instrumentation_from_template with a single-tier template derived
+            # from SOURCE_verify: T1 uses SOURCE_verify with T2 blocks stripped; T2 uses
+            # SOURCE_verify with T1 blocks stripped. This avoids T2 insertion messing up T1
+            # blocks and gives each tier a clean start from the original code.
+            # Single attempt only — no retries, no self-correction feedback.
+            # Results are informational only: the LLM judge verdict is NOT overridden.
+            _, _zs_src_ext = os.path.splitext(source_file_path)
+            if verify_zeroshot and zero_shot:
+                print("\n\n----- " + color.BOLD + color.PURPLE +
+                      "ZERO-SHOT EMPIRICAL VERIFICATION (Tier 1 → Tier 2 → Tier 3)" +
+                      color.END + " -----\n")
+                _zs_code = code_blocks[-1]   # uninstrumented zero-shot generated code
+                _sv_code = input_code        # SOURCE_verify (T1+T2 instrumented); code_blocks[1]
+
+                # --- Zero-shot Tier 1 ---
+                print(f"\n----- Zero-Shot Empirical Verify: Tier 1 instrumentation -----")
+                _zs_t1_template = lassi.verify._strip_t2_blocks(_sv_code)  # T1-only template
+                _zs_t1_instr = lassi.verify.code_insert_instrumentation_from_template(
+                    _zs_code, _zs_t1_template,
+                    llm_source, model, num_ctx, system_prompt,
+                    display_response, verifyprompt=verifyprompt,
+                )
+                if not _zs_t1_instr:
+                    print(color.RED + "[Zero-Shot Tier 1] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
+                    zs_tier1_verdict = "INSTRUMENT_ERROR"
+                else:
+                    _zs_t1_path = os.path.join(experiment_data_directory,
+                                                file_name + "_zs_t1_Trial" + str(trial_number) + _zs_src_ext)
+                    with open(_zs_t1_path, 'w') as _f:
+                        _f.write(_zs_t1_instr)
+                    _zs_t1_compile, _zs_t1_exe = lassi.code_manager.compile_code(
+                        _zs_t1_path, target_lang, code_compiler, code_compiler_kwds
+                    )
+                    if _zs_t1_compile != "":
+                        print(color.RED + "[Zero-Shot Tier 1] Compile failed — INSTRUMENT_ERROR." + color.END)
+                        zs_tier1_verdict = "INSTRUMENT_ERROR"
+                    else:
+                        _zs_t1_exec_r, _zs_t1_stdout, *_ = lassi.code_manager.execute_code_selectvendor(
+                            experiment_data_directory, 0, True, trial_number,
+                            directory, _zs_t1_exe, exe_input_parameters,
+                            False, "zs_t1_verify", target_lang, build_script, make_script,
+                            gpu_vendor="auto", wait=5,
+                        )
+                        if _zs_t1_exec_r != "0":
+                            print(color.RED + "[Zero-Shot Tier 1] Execute failed — INSTRUMENT_ERROR." + color.END)
+                            zs_tier1_verdict = "INSTRUMENT_ERROR"
+                        else:
+                            _zs_t1_verdict, _zs_t1_diag = lassi.verify.check_tier1_assertions(_zs_t1_stdout)
+                            zs_tier1_verdict = _zs_t1_verdict
+                            print(f"\n----- Zero-Shot Empirical Verify: Tier 1 → {zs_tier1_verdict} -----")
+                            if _zs_t1_verdict == "FAIL":
+                                print(_zs_t1_diag.get("summary", ""))
+
+                # --- Zero-shot Tier 2 (only if Tier 1 PASS) ---
+                # Instruments T2 passthrough into the original zs_code (not the T1-instrumented code)
+                # so the T2 LLM call cannot inadvertently corrupt the T1 assertion blocks.
+                _zs_t2_stdout = ""
+                _zs_t2_code = ""
+                if run_tier2 and zs_tier1_verdict == "PASS":
+                    print(f"\n----- Zero-Shot Empirical Verify: Tier 2 instrumentation -----")
+                    _zs_t2_template = lassi.verify._strip_t1_blocks(_sv_code)  # T2-only template
+                    _zs_t2_instr = lassi.verify.code_insert_instrumentation_from_template(
+                        _zs_code, _zs_t2_template,
+                        llm_source, model, num_ctx, system_prompt,
+                        display_response, verifyprompt=verifyprompt,
+                    )
+                    if not _zs_t2_instr:
+                        print(color.RED + "[Zero-Shot Tier 2] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
+                        zs_tier2_verdict = "INSTRUMENT_ERROR"
+                    else:
+                        _zs_t2_path = os.path.join(experiment_data_directory,
+                                                    file_name + "_zs_t2_Trial" + str(trial_number) + _zs_src_ext)
+                        with open(_zs_t2_path, 'w') as _f:
+                            _f.write(_zs_t2_instr)
+                        _zs_t2_compile, _zs_t2_exe = lassi.code_manager.compile_code(
+                            _zs_t2_path, target_lang, code_compiler, code_compiler_kwds
+                        )
+                        if _zs_t2_compile != "":
+                            print(color.RED + "[Zero-Shot Tier 2] Compile failed — INSTRUMENT_ERROR." + color.END)
+                            zs_tier2_verdict = "INSTRUMENT_ERROR"
+                        else:
+                            _zs_t2_exec_r, _zs_t2_stdout, *_ = lassi.code_manager.execute_code_selectvendor(
+                                experiment_data_directory, 0, True, trial_number,
+                                directory, _zs_t2_exe, exe_input_parameters,
+                                False, "zs_t2_verify", target_lang, build_script, make_script,
+                                gpu_vendor="auto", wait=5,
+                            )
+                            if _zs_t2_exec_r != "0":
+                                print(color.RED + "[Zero-Shot Tier 2] Execute failed — INSTRUMENT_ERROR." + color.END)
+                                zs_tier2_verdict = "INSTRUMENT_ERROR"
+                            else:
+                                _zs_t2_verdict, _zs_t2_diag = lassi.verify.compare_passthrough_outputs(
+                                    spec_stdout=passthrough_spec_output,
+                                    generated_stdout=_zs_t2_stdout,
+                                    tolerance=tier2_tolerance,
+                                )
+                                zs_tier2_verdict = _zs_t2_verdict
+                                _zs_t2_code = _zs_t2_instr  # save for T3 (only when compile+execute succeeded)
+                                print(f"\n----- Zero-Shot Empirical Verify: Tier 2 → {zs_tier2_verdict} -----")
+                                if _zs_t2_diag.get("failures"):
+                                    print(_zs_t2_diag.get("summary", ""))
+
+                    # --- Zero-shot Tier 3 (only if Tier 2 PASS) ---
+                    # Self-referential: the zero-shot T2 code is tested against itself under
+                    # input transformation, using _zs_t2_stdout as the baseline — same design
+                    # as LASSI-generated codes. file_name is the actual benchmark name (not
+                    # file_name+"_zs") so Stage 0 source-variant templates are found correctly.
+                    # code_version="zs" produces _vzs suffix to distinguish from LASSI variants.
+                    if run_tier3 and tier3_active_relations and zs_tier2_verdict == "PASS":
+                        print(f"\n----- Zero-Shot Empirical Verify: Tier 3 -----")
+                        _zs_t3_verdict, _zs_t3_results, _zs_t3_diag = lassi.verify.run_metamorphic_variants(
+                            _zs_t2_code,
+                            tier3_active_relations,
+                            tier3_contract,
+                            _zs_t2_stdout,
+                            llm_source, model, num_ctx, system_prompt,
+                            display_response,
+                            directory, file_name, code_compiler, code_compiler_kwds,
+                            build_script, make_script, code_build_script,
+                            exe_input_parameters,
+                            experiment_data_directory=experiment_data_directory,
+                            code_version="zs",
+                            verifyprompt=verifyprompt,
+                        )
+                        zs_tier3_verdict = _zs_t3_verdict
+                        print(f"\n----- Zero-Shot Empirical Verify: Tier 3 → {zs_tier3_verdict} -----")
+                        if _zs_t3_diag.get("failures"):
+                            print(_zs_t3_diag.get("summary", ""))
+
+                # Compute overall empirical verdict: PASS only if all active tiers pass.
+                # INSTRUMENT_ERROR on any tier counts as FAIL for the overall verdict.
+                _zs_active_verdicts = [zs_tier1_verdict]
+                if run_tier2:
+                    _zs_active_verdicts.append(zs_tier2_verdict)
+                if run_tier3 and tier3_active_relations and run_tier2:
+                    _zs_active_verdicts.append(zs_tier3_verdict)
+                if all(v == "PASS" for v in _zs_active_verdicts):
+                    zs_empirical_verdict = "PASS"
+                elif any(v in ("FAIL", "INSTRUMENT_ERROR") for v in _zs_active_verdicts):
+                    zs_empirical_verdict = "FAIL"
+                else:
+                    zs_empirical_verdict = "SKIP"  # all SKIPs (e.g., no assertions inserted)
+
+                verification_log["zeroshot_tier1_verdict"] = zs_tier1_verdict
+                verification_log["zeroshot_tier2_verdict"] = zs_tier2_verdict
+                verification_log["zeroshot_tier3_verdict"] = zs_tier3_verdict
+                verification_log["zeroshot_empirical_verdict"] = zs_empirical_verdict
+                print(f"\n----- Zero-Shot Empirical Verdict: {zs_empirical_verdict} "
+                      f"(T1={zs_tier1_verdict}, T2={zs_tier2_verdict}, T3={zs_tier3_verdict}) -----")
+
             # Handle scenario where we might have a bad power measurement
             # (only applies in EE mode; in runtime mode energy is always 0)
             if power_measure and total_energy_joules_refactor == 0:
@@ -1785,14 +2037,17 @@ def auto_code_llmgeneration_pipeline(prompts,
                 code_analysis = "None"
                 tier2_exhausted = False  # reset for next iteration
 
-            # Override 2 (false negative): Tier 1 PASS/SKIP + Tier 2 PASS + Tier 3 PASS/SKIP → VALID even if judge said INVALID.
+            # Override 2 (false negative): Tier 1 PASS/SKIP + Tier 2 PASS + Tier 3 PASS/ok-SKIP → VALID even if judge said INVALID.
             # All active tiers must be satisfied: Tier 2 PASS alone is insufficient if Tier 1 or Tier 3 is active.
             # tier1_verdict == "SKIP" is acceptable (Tier 1 inactive/disabled or no assertions found in output).
-            # tier3_verdict == "SKIP" is acceptable (Tier 3 inactive/disabled/no active relations).
+            # tier3_verdict == "SKIP" is only acceptable when T3 is genuinely inactive (run_tier3=False or no
+            # active relations). When T3 is active, SKIP means a variant compile/execute failure — not "inactive"
+            # — so the code must not be promoted to VALID on T2 PASS alone.
             # Tier 1 exhausted is handled inline (continue before judge); Tier 3 exhausted by Override 3.
             # Only applies to LASSI codes (zero_shot has no instrumentation → SKIP, no override).
+            _t3_ok = (tier3_verdict == "PASS" or not (run_tier3 and tier3_active_relations))
             if (tier1_verdict in ("PASS", "SKIP") and tier2_verdict == "PASS"
-                    and tier3_verdict in ("PASS", "SKIP")
+                    and _t3_ok
                     and valid_code_flag != "VALID" and not zero_shot):
                 _t1_label = (f"Tier 1 {tier1_verdict}" if not zero_shot else "Tier 1 inactive")
                 _t3_label = (f"Tier 3 {tier3_verdict}" if (run_tier3 and tier3_active_relations)
@@ -1829,12 +2084,13 @@ def auto_code_llmgeneration_pipeline(prompts,
                 tier3_exhausted = False  # reset for next iteration
 
             # Table 2 ★ final attempt row — emitted after all overrides have settled valid_code_flag.
-            # Only for LASSI codes (zero_shot has no attempt log rows); compile/execute errors never reach here.
+            # LASSI codes and (now) the zero-shot code each get one row here.
+            # Compile/execute errors use the earlier continue paths and never reach here.
             if not zero_shot:
                 _override_applied = (
-                    "override3_tier3_exhausted" if _tier3_was_exhausted else
-                    "override2_tiers_pass"      if _override2_fired     else
-                    "override1_tier2_exhausted" if _tier2_was_exhausted else
+                    "judge_override_tier3_exhausted" if _tier3_was_exhausted else
+                    "judge_override_tiers_pass"      if _override2_fired     else
+                    "judge_override_tier2_exhausted" if _tier2_was_exhausted else
                     "none"
                 )
                 _cb_idx = len(code_blocks) - 1
@@ -1857,6 +2113,27 @@ def auto_code_llmgeneration_pipeline(prompts,
                     override_applied=_override_applied,
                 ))
                 current_sc_trigger = None  # reset; next fresh generation starts clean
+            elif zero_shot:
+                # Table 2 ★ zero-shot attempt row: tier fields carry the empirical verify verdicts
+                # (zs_tier1/2/3_verdict) from the separate T1/T2 compile+execute runs, or "SKIP"
+                # if verify_zeroshot=False. The zero-shot code has no inline instrumentation so
+                # tier{1,2}_instrumented_labels are empty strings.
+                attempt_log_buffer.append(_build_attempt_record(
+                    app_name=file_name, trial_number=trial_number,
+                    code_block_index=len(code_blocks) - 1, attempt_number=1,
+                    is_final_attempt=True, generation_type="zeroshot",
+                    sc_trigger=None, llm_temperature=code_gen_temp,
+                    compile_status="success", execute_status="success",
+                    runtime_s=duration_refactor, energy_J=total_energy_joules_refactor,
+                    ave_power_W=ave_power_refactor,
+                    tier1_verdict=zs_tier1_verdict, tier1_instrumented_labels="",
+                    tier1_diagnostic={},
+                    tier2_verdict=zs_tier2_verdict, tier2_instrumented_labels="",
+                    tier2_diagnostic={},
+                    tier3_verdict=zs_tier3_verdict, tier3_diagnostic={},
+                    judge_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
+                    override_applied="none",
+                ))
 
             # valid_code_flag can be: (1) "VALID", (2) "INVALID", or (3) "NONE"
             if not zero_shot:
@@ -1906,6 +2183,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                     experiment_data["base_v1_energy_diff"] = round(((total_energy_joules_refactor - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if power_measure and sourcecode_total_energy_joules != 0 else "NA"
                     experiment_data["base_v1_avg_power_diff"] = round(((ave_power_refactor - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if power_measure and sourcecode_ave_power != 0 else "NA"
                     experiment_data["base_v1_runtime_diff"] = round(((duration_refactor - duration) / duration) * 100 ,2) if duration != 0 else "NA"
+                    experiment_data["zeroshot_tier1_verdict"] = zs_tier1_verdict
+                    experiment_data["zeroshot_tier2_verdict"] = zs_tier2_verdict
+                    experiment_data["zeroshot_tier3_verdict"] = zs_tier3_verdict
+                    experiment_data["zeroshot_empirical_verdict"] = zs_empirical_verdict
                     # experiment_data["base_v1_optimization_methods"] = "None"
                 elif stage == "stage2":
                     experiment_data["base_v2_energy_J"] = total_energy_joules_refactor
@@ -1984,6 +2265,11 @@ def auto_code_llmgeneration_pipeline(prompts,
                         # Use len(code_blocks)-1: robust against code_version/code_blocks offset
                         # (code_blocks[0]=SOURCE_orig, [1]=SOURCE_verify, [2+]=generated codes).
                         tracking_best_version = len(code_blocks) - 1
+                        # Record the winning plan and clear stale bad plans.
+                        # bad_refactor_plans were written against the previous best code; once
+                        # tracking_best_version advances they are no longer relevant to the new base.
+                        last_good_refactoring_plan = refactoring_plan
+                        bad_refactor_plans = []
 
                     print("\n\n----- " + color.BOLD + color.BLUE + "COMPARING CURRENT vs PREV VALUES " + color.END + " -----\n")
                     print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
@@ -2312,7 +2598,136 @@ def auto_code_llmgeneration_pipeline(prompts,
     # 0 means LASSI never improved on the source. Distinct from fresh_generation_count (total attempts).
     ee_iterations = energy_efficiency_iteration
     meta_data_file += "Energy Efficiency Self-improvement iteration count: " + str(ee_iterations)  # str(self_correction_power_counter)
-    
+
+    # ----- LASSI-VERIFY EMPIRICAL VERIFICATION SUMMARY -----
+    # Documents the specific tests, labels, and relations identified for each verification tier.
+    # Tier 1/2 assertion and passthrough labels are extracted from code_blocks[1] (SOURCE_verify).
+    # Tier 3 contract and relation details come from verification_log (populated at Stage 0).
+    meta_data_file += "\n\n\n----- LASSI-VERIFY EMPIRICAL VERIFICATION SUMMARY -----\n"
+
+    # --- Tier 1: Invariant Assertion Checking ---
+    meta_data_file += "\n=== Tier 1: Invariant Assertion Checking ===\n"
+    _t1_source_available = len(code_blocks) > 1
+    meta_data_file += "Enabled: " + ("Yes" if _t1_source_available else "No") + "\n"
+    if _t1_source_available:
+        _t1_source = code_blocks[1]  # SOURCE_verify (Tier 1 instrumented)
+        # Extract each ASSERTIONS block; parse label, LASSI_INSTRUMENTATION description, and condition
+        _t1_block_re = re.compile(
+            r'// >>> BEGIN LASSI-VERIFY ASSERTIONS.*?// <<< END LASSI-VERIFY ASSERTIONS <<<',
+            re.DOTALL
+        )
+        _t1_blocks_raw = _t1_block_re.findall(_t1_source)
+        _t1_entries = []
+        for _blk in _t1_blocks_raw:
+            _lbl_m = re.search(r'LASSI-VERIFY ASSERTIONS \[([^\]]+)\]', _blk)
+            _lbl = _lbl_m.group(1) if _lbl_m else "(unknown)"
+            if _lbl == "tier1_complete":
+                continue  # skip sentinel — it is always present and not a substantive test
+            _desc_m = re.search(r'// LASSI_INSTRUMENTATION\s*[-\u2013\u2014]?\s*(.+)', _blk)
+            _desc = _desc_m.group(1).strip() if _desc_m else "(no description)"
+            _cond_m = re.search(r'bool _t1_pass\s*=\s*\((.+?)\);', _blk, re.DOTALL)
+            # Normalize multi-line conditions to a single line for readability
+            _cond = re.sub(r'\s+', ' ', _cond_m.group(1)).strip() if _cond_m else "(condition not extracted)"
+            _t1_entries.append((_lbl, _desc, _cond))
+        meta_data_file += f"Assertion blocks in SOURCE_verify: {len(_t1_entries)}\n"
+        if _t1_entries:
+            meta_data_file += "Assertions (label / invariant description / checked condition):\n"
+            for _lbl, _desc, _cond in _t1_entries:
+                meta_data_file += f"  [{_lbl}]: {_desc}\n"
+                meta_data_file += f"    Condition: {_cond}\n"
+        # Aggregate T1 verdicts across all final-attempt codes (T1 PASS/FAIL are in stdout,
+        # but the attempt log provides structured counts without re-parsing stdout)
+        _t1_final = [r for r in attempt_log_buffer if r.get("is_final_attempt", False)]
+        if _t1_final:
+            _t1_passes = sum(1 for r in _t1_final if r.get("tier1_verdict") == "PASS")
+            _t1_fails  = sum(1 for r in _t1_final if str(r.get("tier1_verdict", "")).startswith("FAIL"))
+            _t1_skips  = sum(1 for r in _t1_final if r.get("tier1_verdict") == "SKIP")
+            meta_data_file += f"Results (final-attempt codes): {_t1_passes} PASS, {_t1_fails} FAIL, {_t1_skips} SKIP\n"
+        _zs_t1 = verification_log.get("zeroshot_tier1_verdict", "SKIP")
+        if _zs_t1 != "SKIP":
+            meta_data_file += f"Zero-shot empirical Tier 1: {_zs_t1}\n"
+
+    # --- Tier 2: Empirical Equivalence Checking ---
+    meta_data_file += "\n=== Tier 2: Empirical Equivalence Checking ===\n"
+    _t2_enabled = verification_log.get("tier2_enabled", False)
+    meta_data_file += "Enabled: " + ("Yes" if _t2_enabled else "No") + "\n"
+    if _t2_enabled:
+        meta_data_file += f"Tolerance (rtol): {verification_log.get('tier2_tolerance', 'N/A')}\n"
+        if len(code_blocks) > 1:
+            # extract_tier2_labels returns a comma-separated string of passthrough block labels
+            _t2_labels_str = lassi.verify.extract_tier2_labels(code_blocks[1])
+            _t2_labels = [_l for _l in _t2_labels_str.split(",") if _l] if _t2_labels_str else []
+            meta_data_file += f"Observation Points (passthrough block labels): {len(_t2_labels)}\n"
+            if _t2_labels:
+                meta_data_file += "  " + ",  ".join(f"[{_l}]" for _l in _t2_labels) + "\n"
+        _t2_results_list = verification_log.get("tier2_results") or []
+        if _t2_results_list:
+            meta_data_file += f"Per-code results:\n"
+            for _t2r in _t2_results_list:
+                _cv = _t2r.get("code_version", "?")
+                _v  = _t2r.get("verdict", "?")
+                _diag = _t2r.get("diagnostic") or {}
+                _summ = str(_diag.get("summary", ""))[:120]
+                meta_data_file += f"  v{_cv}: {_v}"
+                if _summ:
+                    meta_data_file += f" — {_summ}"
+                meta_data_file += "\n"
+        meta_data_file += f"Total: {verification_log.get('tier2_pass_count', 0)} PASS\n"
+        _zs_t2 = verification_log.get("zeroshot_tier2_verdict", "SKIP")
+        if _zs_t2 != "SKIP":
+            meta_data_file += f"Zero-shot empirical Tier 2: {_zs_t2}\n"
+
+    # --- Tier 3: Metamorphic Testing ---
+    meta_data_file += "\n=== Tier 3: Metamorphic Testing ===\n"
+    _t3_enabled = verification_log.get("tier3_enabled", False)
+    meta_data_file += "Enabled: " + ("Yes" if _t3_enabled else "No") + "\n"
+    if _t3_enabled:
+        meta_data_file += f"Tolerance (rtol): {verification_log.get('tier3_tolerance', 'N/A')}\n"
+        _t3_contract = verification_log.get("tier3_contract") or {}
+        _t3_all_relations = _t3_contract.get("relations") or []
+        _t3_active_names  = set(verification_log.get("tier3_active_relations") or [])
+        _t3_active_rels   = [r for r in _t3_all_relations if r.get("name") in _t3_active_names]
+        _t3_inactive_rels = [r for r in _t3_all_relations if r.get("name") not in _t3_active_names]
+        meta_data_file += f"Relations generated: {len(_t3_all_relations)}\n"
+        meta_data_file += f"Active relations (passed source filter): {len(_t3_active_rels)}\n"
+        meta_data_file += f"Inactive relations (filtered at Stage 0): {len(_t3_inactive_rels)}\n"
+        if _t3_contract.get("computation_class"):
+            meta_data_file += f"Computation class: {_t3_contract['computation_class']}\n"
+        if _t3_contract.get("rationale"):
+            meta_data_file += f"Contract rationale: {_t3_contract['rationale']}\n"
+        if _t3_active_rels:
+            meta_data_file += "\nActive Relations:\n"
+            for _r in _t3_active_rels:
+                meta_data_file += f"  [{_r.get('name', '?')}] (type: {_r.get('type', '?')})\n"
+                if _r.get("description"):
+                    meta_data_file += f"    Description: {_r['description']}\n"
+                if _r.get("observation_points"):
+                    meta_data_file += f"    Observation points: {', '.join(_r['observation_points'])}\n"
+                if _r.get("factor") is not None:
+                    meta_data_file += f"    Factor: {_r['factor']}\n"
+        if _t3_inactive_rels:
+            meta_data_file += "\nInactive Relations (filtered at Stage 0):\n"
+            for _r in _t3_inactive_rels:
+                _src_status = _r.get("source_status", "FAIL")
+                meta_data_file += f"  [{_r.get('name', '?')}] (type: {_r.get('type', '?')}) — source_status: {_src_status}\n"
+                if _r.get("description"):
+                    meta_data_file += f"    Description: {_r['description']}\n"
+        _t3_results_list = verification_log.get("tier3_results") or []
+        if _t3_results_list:
+            meta_data_file += f"\nPer-code results:\n"
+            for _t3r in _t3_results_list:
+                _cv = _t3r.get("code_version", "?")
+                _v  = _t3r.get("verdict", "?")
+                meta_data_file += f"  v{_cv}: {_v}\n"
+                for _rr in (_t3r.get("results") or []):
+                    _rn = _rr.get("name", "?")
+                    _rv = _rr.get("verdict", "?")
+                    meta_data_file += f"    [{_rn}]: {_rv}\n"
+        meta_data_file += f"Total: {verification_log.get('tier3_pass_count', 0)} PASS\n"
+        _zs_t3 = verification_log.get("zeroshot_tier3_verdict", "SKIP")
+        if _zs_t3 != "SKIP":
+            meta_data_file += f"Zero-shot empirical Tier 3: {_zs_t3}\n"
+
     if yes_power_feedback:
         
         print("\n\n----- " + color.BOLD + color.BLUE + "SAVING FINAL RESULTS" + color.END + " -----\n")
@@ -2523,8 +2938,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                             spec_stdout=passthrough_spec_output,
                             generated_stdout=_bl_stdout,
                             tolerance=tier2_tolerance,
-                            llm_source=llm_source, model=model, num_ctx=num_ctx,
-                            system_prompt=system_prompt, verifyprompt=verifyprompt
                         )
                         print(f"[Base LLM Verification] Tier 2: {_bl_tier2_verdict}")
                         if _bl_tier2_diag.get("failures"):

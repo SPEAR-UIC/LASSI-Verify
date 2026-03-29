@@ -9,4 +9,6 @@ tiktoken
 aiohttp
 markdown
 numba
+pyyaml
+streamlit
 # jupyterlab

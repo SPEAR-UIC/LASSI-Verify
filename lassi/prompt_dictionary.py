@@ -67,6 +67,13 @@ class PromptDictionary:
                 "Every single line of the input file must appear in your output, in the same order. "
                 "You always surround your generated code with the three characters ```."
             ),
+            "verify_contract": (
+                "You are an expert in scientific computing and formal verification. "
+                "Your task is to analyze the mathematical and physical properties of "
+                "GPU-accelerated scientific code and identify applicable metamorphic relations "
+                "for empirical correctness verification. You always return your analysis as a "
+                "structured JSON block."
+            ),
 
         }
         

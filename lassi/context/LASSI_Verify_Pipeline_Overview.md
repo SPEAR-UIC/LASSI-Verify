@@ -9,7 +9,7 @@
 
 ## What LASSI-Verify Does
 
-LASSI-Verify is an LLM-assisted empirical verification framework for parallel scientific GPU code transformations. Its goal is to determine whether an LLM-generated refactoring of a CUDA kernel (optimized for energy efficiency or runtime) is functionally equivalent to the original source and genuinely better-performing.
+LASSI-Verify is an adaptive empirical verification framework for parallel scientific GPU code transformations. Its goal is to determine whether an LLM-generated refactoring of a CUDA kernel (optimized for energy efficiency or runtime) is functionally equivalent to the original source and genuinely better-performing. The framework is *adaptive* in that verification properties are drawn from structured catalogs and instantiated relative to each specific transformation, while the three-tier architecture and mandatory coverage requirements remain fixed.
 
 It wraps around a multi-iteration LLM self-improvement loop ("LASSI") with three formal-methods-grounded verification tiers that together provide correctness evidence without requiring formal proofs or exhaustive testing.
 
@@ -312,7 +312,7 @@ A **null-factor** relation is one where no fixed scalar relates the variant outp
 
 ## LLM Judge + Three-Tier Override System
 
-The LLM judge reads both codes and their stdout outputs and returns a functional equivalence verdict (VALID/INVALID/SKIP). For LASSI-generated codes, deterministic tier results take priority over the judge via four override rules applied in order:
+The LLM judge reads both codes and their stdout outputs and returns a functional equivalence verdict (VALID or INVALID). Any other response (e.g. SKIP, malformed output) is normalized to INVALID and counted as an API error; three consecutive API errors halt the pipeline. The raw judge verdict is captured as `judge_raw_verdict` immediately after the judge call, before any tier override logic runs — this is what is stored as `judge_verdict` in Table 2 and is never subsequently modified. For LASSI-generated codes, deterministic tier results take priority over the judge via four override rules applied in order:
 
 | Override | Condition | Final verdict | Logged as |
 |----------|-----------|---------------|-----------|
@@ -362,7 +362,8 @@ Configured by two notebook flags:
 
 | File | Contents |
 |------|----------|
-| `lassi-verify_pipeline_data.csv` | One row per trial; all `experiment_data` fields |
+| `lassi-verify_pipeline_data.csv` | **Table 1** — one row per trial; all `experiment_data` fields (final outcomes, aggregated counts) |
+| `lassi-verify_attempt_log.csv` | **Table 2** — one row per code attempt within a trial; per-attempt `judge_verdict`, `final_verdict`, `tier1/2/3_verdict`, `override_applied`, `is_best_code`, runtime/energy |
 | `verification_log_<name>_Trial<N>.json` | Full Tier 2/3 results, judge discrepancies, config |
 | `<name>_Trial<N>.cu` | Each generated code version |
 | `<name>_verify.cu` | Instrumented SOURCE_verify (Tier 1 + Tier 2) |
@@ -370,7 +371,10 @@ Configured by two notebook flags:
 | `<name>_mt_<relation>.cu` | Tier 3 metamorphic variant sources |
 | `<name>_Trial<N>.txt` | Full metadata, prompts, stdout, comparison response |
 
-### Key CSV columns
+### Key CSV columns — Table 1 (`lassi-verify_pipeline_data.csv`)
+- `lassiee_valid` — tier-dominant verdict for the best LASSI code (`VALID` / `INVALID` / `SOURCE`); used for Variant 1 (verified-pass@k) in pass@k analysis
+- `base_v1_valid` — raw LLM judge verdict for the zero-shot code; used for Variant 3 (judge-pass@k zero-shot)
+- `base_llm_verified_valid` — tier-only verdict for the zero-shot code from post-pipeline verification (True/False/NA); used for Variant 4 (verified-pass@k zero-shot)
 - `source_v0_runtime_s` — uninstrumented source baseline
 - `lassiee_runtime_s` — best LASSI instrumented runtime
 - `lassiee_runtime_diff` — % change vs source (instrumented — includes overhead)
@@ -380,6 +384,15 @@ Configured by two notebook flags:
 - `tier2_pass_count`, `tier2_fail_total`
 - `tier3_pass_count`, `tier3_fail_total`, `tier3_active_relations`
 - `judge_false_positives`, `judge_false_negatives`
+
+### Key CSV columns — Table 2 (`lassi-verify_attempt_log.csv`)
+- `judge_verdict` — raw LLM judge output captured before any override logic; never modified; used for Variant 2 (judge-pass@k LASSI) on the `is_best_code=True` row
+- `final_verdict` — tier-dominant operational result (`VALID` / `INVALID`); starts as judge output, then overrides ensure tiers win when they have a deterministic result; drives winner selection and self-correction
+- `override_applied` — which override fired (`none` / `override1_tier2_exhausted` / `override2_tiers_pass` / `override3_tier3_exhausted` / `global_sc_budget_exhausted` / `tier1_exhausted`); diagnostic only
+- `tier1_verdict`, `tier2_verdict`, `tier3_verdict` — individual tier verdicts per attempt: `PASS` / `FAIL` / `SKIP`. All tiers are fully deterministic; parse errors in Tier 2 output produce `FAIL` and trigger self-correction. Budget exhaustion is encoded in `override_applied`, not in the verdict string.
+- `is_best_code` — True on exactly one row per trial (the winning code's final attempt row)
+- `is_final_attempt` — True for the definitive verdict row per code version; False for mid-retry self-correction rows
+- `code_block_index` — index into `code_blocks` (2 = zero-shot, 3+ = LASSI v{n})
 
 ---
 

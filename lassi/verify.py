@@ -1,4 +1,3 @@
-from IPython.display import display, Markdown
 import re
 import os
 import json
@@ -233,10 +232,9 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
     else:
         print("Invalid LLM source")
 
-    print("\n\n----- " + color.BOLD + color.BLUE + "THE GENERATED CODE" + color.END + " -----\n")
-    if display_response:
-        print("(hidden)\n\n")
-        display(Markdown(response_text))
+    print("< BEGIN: LLM GENERATED CODE · Tier 2 passthrough >")
+    print(response_text)
+    print("< END: LLM GENERATED CODE >")
 
     # Extract only the code block -
     # Search for the ``` pattern in the text
@@ -262,6 +260,30 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
         return ""
 
     return extracted_code
+
+
+def _strip_t2_blocks(code):
+    """Remove all Tier 2 PASSTHROUGH blocks from an instrumented code string.
+    Returns a T1-only template suitable for use with code_insert_instrumentation_from_template
+    when performing the Tier 1 step of zero-shot empirical verification."""
+    return re.sub(
+        r'// >>> BEGIN LASSI-VERIFY PASSTHROUGH.*?// <<< END LASSI-VERIFY PASSTHROUGH <<<\n?',
+        '',
+        code,
+        flags=re.DOTALL,
+    )
+
+
+def _strip_t1_blocks(code):
+    """Remove all Tier 1 ASSERTIONS blocks from an instrumented code string.
+    Returns a T2-only template suitable for use with code_insert_instrumentation_from_template
+    when performing the Tier 2 step of zero-shot empirical verification."""
+    return re.sub(
+        r'// >>> BEGIN LASSI-VERIFY ASSERTIONS.*?// <<< END LASSI-VERIFY ASSERTIONS <<<\n?',
+        '',
+        code,
+        flags=re.DOTALL,
+    )
 
 
 def code_insert_instrumentation_from_template(base_code, template_instrumented_code,
@@ -348,10 +370,9 @@ adapted to PROGRAM B's specific code structure.
         print("Invalid LLM source")
         response_text = ""
 
-    print("\n\n----- " + color.BOLD + color.BLUE + "BASE LLM TEMPLATE-GUIDED INSTRUMENTATION" + color.END + " -----\n")
-    if display_response:
-        print("(hidden)\n\n")
-        display(Markdown(response_text))
+    print("< BEGIN: LLM GENERATED CODE · template instrumentation >")
+    print(response_text)
+    print("< END: LLM GENERATED CODE >")
 
     pattern = r"```(.*?)```"
     match = re.search(pattern, response_text, re.DOTALL)
@@ -536,10 +557,9 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     else:
         print("Invalid LLM source")
         
-    print("\n\n----- " + color.BOLD + color.BLUE + "THE GENERATED CODE" + color.END + " -----\n")
-    if display_response:
-        print("(hidden)\n\n")
-        display(Markdown(response_text))
+    print("< BEGIN: LLM GENERATED CODE · Tier 1 assertions >")
+    print(response_text)
+    print("< END: LLM GENERATED CODE >")
 
     # Extract only the code block -
     # Search for the ``` pattern in the text
@@ -574,9 +594,7 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
 
 
 def compare_passthrough_outputs(spec_stdout, generated_stdout,
-                                tolerance=1e-6,
-                                llm_source=None, model=None, num_ctx=None,
-                                system_prompt=None, verifyprompt=False):
+                                tolerance=1e-6):
     """
     Tier 2 empirical equivalence check. Compare passthrough output from a generated
     code against the source-as-specification reference (SOURCE_verify stdout).
@@ -585,20 +603,21 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     is the correctness criterion. A transformation is correct if it preserves this
     behavior; the framework makes no claim about whether the source itself is correct.
 
-    Hybrid comparison approach:
-    1. Deterministic layer (primary): parse labeled blocks, compare min/max/mean and
-       sample values using numpy allclose-style mixed tolerance:
-           |a - b| <= atol + rtol * max(|a|, |b|)
-       where atol = |spec_max| * rtol (derived per-block from the spec's max statistic).
-       This anchors the absolute tolerance to the field's actual dynamic range, preventing
-       false positives from near-zero statistics (e.g., converged Jacobi mean ~1e-12).
-       `sum` is intentionally excluded: it equals mean×N and accumulates per-element
-       floating-point noise at large N, making it an unreliable correctness criterion.
-    2. LLM-mediated layer (fallback): invoked when structured parsing fails or is
-       incomplete (e.g., LLM did not emit expected format). Returns PASS/FAIL + rationale.
+    Purely deterministic: parse labeled blocks, compare min/max/mean and sample values
+    using numpy allclose-style mixed tolerance:
+        |a - b| <= atol + rtol * max(|a|, |b|)
+    where atol = |spec_max| * rtol (derived per-block from the spec's max statistic).
+    This anchors the absolute tolerance to the field's actual dynamic range, preventing
+    false positives from near-zero statistics (e.g., converged Jacobi mean ~1e-12).
+    `sum` is intentionally excluded: it equals mean×N and accumulates per-element
+    floating-point noise at large N, making it an unreliable correctness criterion.
+
+    Parse errors (malformed passthrough output) are treated as FAIL and trigger
+    self-correction — no LLM fallback. This keeps Tier 2 verdicts fully deterministic
+    and independent of the LLM judge.
 
     Returns:
-        verdict (str): "PASS" | "PASS (LLM)" | "FAIL" | "FAIL (LLM)" | "SKIP"
+        verdict (str): "PASS" | "FAIL" | "SKIP"
         diagnostic (dict): structured result for self-correction context and logs.
             Keys: verdict, method, tolerance, blocks_compared, failures, summary
     """
@@ -798,56 +817,14 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     extra_labels = set(gen_blocks.keys()) - set(spec_blocks.keys())
 
     # ------------------------------------------------------------------
-    # Decide verdict from deterministic layer
+    # Deterministic verdict
     # ------------------------------------------------------------------
-    # Trigger LLM fallback if any parse_error failures exist (structured output was unusable)
-    has_parse_errors = any(f["stat"] in ("parse_error",) for f in failures)
-    numeric_failures = [f for f in failures if f["stat"] not in ("parse_error",)]
-
-    if has_parse_errors and llm_source is not None:
-        # LLM fallback: send raw outputs to LLM for judgment
-        fallback_prompt = prompts.get_codeknowledge("passthrough_compare_fallback")
-        fallback_prompt += (
-            f"\n\n--- PROGRAM A OUTPUT (SOURCE_verify — source-as-specification reference) ---\n"
-            f"{spec_stdout[:8000]}\n\n"
-            f"--- PROGRAM B OUTPUT (generated/refactored code) ---\n"
-            f"{generated_stdout[:8000]}\n"
-        )
-        temp = 0.0
-        if llm_source == "argo":
-            llm_response = argo_llm(model, system_prompt, fallback_prompt, temp, verifyprompt)
-        elif llm_source == "ollama":
-            llm_response = ollama_llm_nostream(model, num_ctx, system_prompt, fallback_prompt, temp, verifyprompt)
-        elif llm_source == "cerebras":
-            llm_response = cerebras_llm(model, num_ctx, system_prompt, fallback_prompt, temp, verifyprompt)
-        else:
-            llm_response = ""
-
-        llm_upper = llm_response.upper()
-        if "FAIL" in llm_upper:
-            llm_verdict = "FAIL (LLM)"
-        elif "PASS" in llm_upper:
-            llm_verdict = "PASS (LLM)"
-        else:
-            llm_verdict = "SKIP"  # LLM gave ambiguous response
-
-        summary = (
-            f"Tier 2 LLM fallback (deterministic parsing failed for {len([f for f in failures if f['stat']=='parse_error'])} block(s)). "
-            f"LLM verdict: {llm_verdict}. LLM rationale: {llm_response[:300]}"
-        )
-        diagnostic = {
-            "verdict":         llm_verdict,
-            "method":          "llm_fallback",
-            "tolerance":       tolerance,
-            "blocks_compared": blocks_compared,
-            "failures":        failures,
-            "max_relative_error": max_rel_err if max_rel_err != float('inf') else None,
-            "summary":         summary,
-        }
-        return llm_verdict, diagnostic
-
-    # Pure deterministic verdict
-    if numeric_failures or any(f["stat"] == "block_missing" for f in failures):
+    # Any failure (parse_error, block_missing, numeric mismatch) → FAIL.
+    # Parse errors mean the generated code did not emit well-formed passthrough output;
+    # this triggers Tier 2 self-correction so the LLM can fix the format.
+    # No LLM fallback: Tier 2 verdicts must be fully deterministic and independent
+    # of the LLM judge.
+    if failures:
         fail_summary_parts = []
         for f in failures:
             if f["stat"] == "block_missing":
@@ -1002,7 +979,8 @@ def check_tier1_assertions(stdout):
 # =============================================================================
 
 def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, system_prompt,
-                                   display_response, verifyprompt=False, code_description=None):
+                                   display_response, verifyprompt=False, code_description=None,
+                                   feedback=None):
     """
     Tier 3: Generate a metamorphic contract for the given source code.
 
@@ -1016,6 +994,7 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
     under related inputs). The LLM selects validation MRs from mathematical/physical
     semantics, not implementation details.
     """
+    system_prompt = prompts.get_system_prompt("verify_contract")
     content_prompt = (
         "You are preparing GPU-accelerated scientific code for Tier 3 metamorphic testing "
         "as part of the LASSI-Verify verification framework.\n\n"
@@ -1049,6 +1028,19 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
             "any deviation silently disables that relation.\n\n"
         )
 
+    if feedback:
+        content_prompt += (
+            "IMPORTANT — previous attempt feedback:\n"
+            "The following relations were proposed in a previous attempt but ALL FAILED "
+            "when tested against the verified source code. Do NOT re-propose these relations:\n\n"
+        )
+        for name, description, fail_reason in feedback:
+            content_prompt += f"  - {name}: {description}\n    Reason failed: {fail_reason}\n"
+        content_prompt += (
+            "\nUsing the catalog above, select DIFFERENT relations that are categorically "
+            "distinct from those that failed.\n\n"
+        )
+
     content_prompt += (
         "Following the Instructions section in the catalog above, analyze the source code "
         "and return a JSON contract. Return ONLY the JSON block — no explanatory text "
@@ -1072,8 +1064,9 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
         print("Invalid LLM source for generate_metamorphic_contract")
         return {}
 
-    if display_response:
-        display(Markdown(response_text))
+    print("< BEGIN: LLM GENERATED CODE · Tier 3 metamorphic contract >")
+    print(response_text)
+    print("< END: LLM GENERATED CODE >")
 
     # Extract JSON from response: try ```json ... ``` first, then bare { ... }
     contract = {}
@@ -1381,8 +1374,9 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             print("Invalid LLM source for code_insert_metamorphic_variant")
             return ""
 
-        if display_response:
-            display(Markdown(response_text))
+        print("< BEGIN: LLM GENERATED CODE · Tier 3 metamorphic variant >")
+        print(response_text)
+        print("< END: LLM GENERATED CODE >")
 
         # Extract code block (same pattern as code_insert_asserts / code_insert_passthrough)
         pattern = r"```(.*?)```"
@@ -2073,10 +2067,18 @@ def run_metamorphic_variants(source_code, active_relations, contract,
         if relation.get("factor") is None and relation_type in ("SCALING", "SYMMETRY"):
             print(f"  [Tier 3] '{relation_name}' has null factor — spatial {relation_type} "
                   f"requires Phase 3 element-wise comparison; SKIP")
-            relation["source_status"] = "SKIP"
+            if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
+                relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": "null factor: spatial SYMMETRY/SCALING deferred to Phase 3"})
             _retry_info[relation_name] = None  # Phase 3 deferred — intentional SKIP, no retry
+            if code_version is not None:  # Fix B: active relation untestable → FAIL (defensive)
+                first_failure_diagnostic = {
+                    "verdict": "FAIL", "relation_name": relation_name,
+                    "reason": results[-1]["reason"],
+                    "summary": f"FAIL: active relation '{relation_name}' could not be tested on generated code ({results[-1]['reason']}).",
+                }
+                break
             continue
 
         # --- Determine variant file paths ---
@@ -2109,7 +2111,8 @@ def run_metamorphic_variants(source_code, active_relations, contract,
         )
         if not variant_code:
             print(f"  [Tier 3] Variant insertion FAILED for '{relation_name}' — SKIP")
-            relation["source_status"] = "SKIP"
+            if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
+                relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": "variant insertion failed"})
             _retry_info[relation_name] = {
@@ -2121,6 +2124,13 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                 ),
                 "failed_code": None,  # no code was extracted
             }
+            if code_version is not None:  # Fix B: active relation untestable → FAIL
+                first_failure_diagnostic = {
+                    "verdict": "FAIL", "relation_name": relation_name,
+                    "reason": results[-1]["reason"],
+                    "summary": f"FAIL: active relation '{relation_name}' could not be tested on generated code ({results[-1]['reason']}).",
+                }
+                break
             continue
 
         # --- Step 2: Write variant to disk ---
@@ -2134,7 +2144,8 @@ def run_metamorphic_variants(source_code, active_relations, contract,
         )
         if compile_err:
             print(f"  [Tier 3] Compile FAILED for '{relation_name}' — SKIP")
-            relation["source_status"] = "SKIP"
+            if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
+                relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": "compile failed",
                              "compile_error": compile_err[:300]})
@@ -2146,6 +2157,13 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                 ),
                 "failed_code": variant_code,  # compiled but failed — show LLM the actual code
             }
+            if code_version is not None:  # Fix B: active relation untestable → FAIL
+                first_failure_diagnostic = {
+                    "verdict": "FAIL", "relation_name": relation_name,
+                    "reason": results[-1]["reason"],
+                    "summary": f"FAIL: active relation '{relation_name}' could not be tested on generated code ({results[-1]['reason']}).",
+                }
+                break
             continue
 
         # --- Step 4: Execute (lightweight — no power measurement, no wait time) ---
@@ -2170,7 +2188,8 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                     print(f"  stderr: {result.stderr[:400]}")
         except subprocess.TimeoutExpired:
             print(f"  [Tier 3] Execution TIMEOUT for '{relation_name}' — SKIP")
-            relation["source_status"] = "SKIP"
+            if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
+                relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": "execution timeout"})
             _retry_info[relation_name] = {
@@ -2181,10 +2200,18 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                 ),
                 "failed_code": variant_code,
             }
+            if code_version is not None:  # Fix B: active relation untestable → FAIL
+                first_failure_diagnostic = {
+                    "verdict": "FAIL", "relation_name": relation_name,
+                    "reason": results[-1]["reason"],
+                    "summary": f"FAIL: active relation '{relation_name}' could not be tested on generated code ({results[-1]['reason']}).",
+                }
+                break
             continue
         except Exception as e:
             print(f"  [Tier 3] Execution ERROR for '{relation_name}': {e} — SKIP")
-            relation["source_status"] = "SKIP"
+            if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
+                relation["source_status"] = "SKIP"
             results.append({"name": relation_name, "verdict": "SKIP",
                              "reason": f"execution error: {e}"})
             _retry_info[relation_name] = {
@@ -2194,6 +2221,13 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                 ),
                 "failed_code": variant_code,
             }
+            if code_version is not None:  # Fix B: active relation untestable → FAIL
+                first_failure_diagnostic = {
+                    "verdict": "FAIL", "relation_name": relation_name,
+                    "reason": results[-1]["reason"],
+                    "summary": f"FAIL: active relation '{relation_name}' could not be tested on generated code ({results[-1]['reason']}).",
+                }
+                break
             continue
 
         # --- Step 5: Check metamorphic relation ---
@@ -2383,6 +2417,11 @@ def run_metamorphic_variants(source_code, active_relations, contract,
     # --- Determine overall verdict ---
     verdicts = [r["verdict"] for r in results]
     if "FAIL" in verdicts:
+        overall_verdict = "FAIL"
+    elif code_version is not None and "SKIP" in verdicts:
+        # Main loop: binary PASS/FAIL only — an active relation that could not be tested
+        # (variant insertion, compile, or execution failure) counts as FAIL.
+        # Stage 0 is unaffected: there, SKIP on one relation is inconclusive for that relation.
         overall_verdict = "FAIL"
     elif not any_ran or not verdicts:
         overall_verdict = "SKIP"
