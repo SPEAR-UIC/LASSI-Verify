@@ -4,10 +4,6 @@ Here, we first embrace the capability of the base LLM
 by running the initial refactor as a zero-shot, no context attempt.
 Then, subsequent iterations, we bring in self-prompting and background context
 to see if we can improve the energy efficiency outcome further.
-
-Then, we split up the base LLM (without any help) and the base LLM + self-correction
-9/3/2015:
-For focus, we will not do the base LLM + self-correction. Just base LLM then LASSI for a pass@k metric.
 """
 
 import os
@@ -2007,6 +2003,18 @@ def auto_code_llmgeneration_pipeline(prompts,
                 print(f"\n----- Zero-Shot Empirical Verdict: {zs_empirical_verdict} "
                       f"(T1={zs_tier1_verdict}, T2={zs_tier2_verdict}, T3={zs_tier3_verdict}) -----")
 
+            # Empirical verdict overrides LLM judge for zero-shot code.
+            # If empirical verification ran and found a failure, the code is INVALID
+            # regardless of what the judge said. If empirical was SKIP (verify_zeroshot
+            # disabled or no active tiers ran), fall back to the judge verdict.
+            if verify_zeroshot and zero_shot and zs_empirical_verdict == "FAIL":
+                if valid_code_flag == "VALID":
+                    print(color.YELLOW + f"[Zero-Shot] Empirical verification FAIL overrides judge VALID → marking INVALID" + color.END)
+                valid_code_flag = "INVALID"
+            elif verify_zeroshot and zero_shot and zs_empirical_verdict == "PASS":
+                pass  # judge and empirical agree (or empirical confirms VALID — keep as-is)
+            # zs_empirical_verdict == "SKIP": keep judge verdict unchanged
+
             # Handle scenario where we might have a bad power measurement
             # (only applies in EE mode; in runtime mode energy is always 0)
             if power_measure and total_energy_joules_refactor == 0:
@@ -2166,6 +2174,9 @@ def auto_code_llmgeneration_pipeline(prompts,
             print(runtime_history)
             print("  Valid code history: ", end=' ')
             print(valid_code_history)
+            if zero_shot and verify_zeroshot and zs_empirical_verdict != "SKIP":
+                _agree = "✓ agree" if (zs_empirical_verdict == "PASS") == (valid_code_history[-1].endswith("VALID")) else "⚠ DISAGREE"
+                print(f"  Zero-shot: judge={judge_raw_verdict}, empirical={zs_empirical_verdict} ({_agree})")
             print("  Iteration log: ", end= ' ')
             print(iteration_log)
             # print("  LLM Judge Code Analysis: ")
@@ -2843,157 +2854,22 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["lassiee_clean_energy_J"] = lassiee_clean_energy_J
     experiment_data["lassiee_clean_energy_diff"] = lassiee_clean_energy_diff
 
-    # --- POST-PIPELINE: Three-Tier Verification of Base LLM (Zero-Shot) Code ---
-    # Apply the same three-tier verification framework to the base LLM code to determine
-    # its trustworthiness independent of the LLM judge. No self-correction: this step
-    # measures the code "as-is" to provide an honest, empirically grounded verdict.
-    # If any tier fails, base_llm_verified_valid = False (may override the prior judge verdict).
-    # Gated on run_tier2 and a non-empty passthrough spec — if Tier 2 never ran, we have no
-    # SOURCE_verify reference output to compare against.
-    base_llm_tier1_verdict = "NA"
-    base_llm_tier2_verdict = "NA"
-    base_llm_tier3_verdict = "NA"
-    base_llm_verified_valid = "NA"
+    # --- POST-PIPELINE: Populate base_llm fields from verify_zeroshot results ---
+    # The zero-shot code was already verified in-loop by the verify_zeroshot block (T1→T2→T3).
+    # No re-instrumentation or re-execution needed here — just map the existing state variables.
+    # If verify_zeroshot=False, all fields remain "SKIP" (no empirical data collected).
+    base_llm_tier1_verdict = zs_tier1_verdict
+    base_llm_tier2_verdict = zs_tier2_verdict
+    base_llm_tier3_verdict = zs_tier3_verdict
+    base_llm_verified_valid = (zs_empirical_verdict == "PASS")
+
     base_llm_verification = {
-        "skipped": True,
-        "reason": "base LLM code not available or Tier 2 not enabled",
-        "tier1_verdict": "NA", "tier2_verdict": "NA", "tier3_verdict": "NA", "verified_valid": "NA",
+        "skipped": not verify_zeroshot,
+        "tier1_verdict": zs_tier1_verdict,
+        "tier2_verdict": zs_tier2_verdict,
+        "tier3_verdict": zs_tier3_verdict,
+        "verified_valid": base_llm_verified_valid,
     }
-
-    if len(code_blocks) > 2 and run_tier2 and passthrough_spec_output != "":
-        print("\n\n=== POST-PIPELINE: Three-Tier Verification of Base LLM Code ===")
-        print("Instrumenting zero-shot code with same Tier 1+2 observation points as SOURCE_verify ...")
-        try:
-            # Step 1: Template-guided instrumentation — replicate SOURCE_verify's LASSI-VERIFY blocks
-            # into the base LLM code at equivalent locations (single LLM call, Tier 1 + Tier 2).
-            base_llm_instrumented = lassi.verify.code_insert_instrumentation_from_template(
-                code_blocks[2],     # base LLM code (generated from SOURCE_orig, no instrumentation)
-                input_code,         # SOURCE_verify (Tier 1 + Tier 2 instrumented — the template)
-                llm_source, model, num_ctx, system_prompt,
-                display_response, verifyprompt
-            )
-
-            if not base_llm_instrumented:
-                print("[Base LLM Verification] Instrumentation LLM returned empty code — skipping.")
-                base_llm_verification["reason"] = "instrumentation_failed"
-            else:
-                # Write instrumented code to disk
-                base_llm_verify_path = os.path.join(
-                    experiment_data_directory, file_name_save + "_base_llm_verify.cu"
-                )
-                with open(base_llm_verify_path, 'w') as _blf:
-                    _blf.write(base_llm_instrumented)
-
-                # Step 2: Compile instrumented base LLM code
-                print("[Base LLM Verification] Compiling instrumented base LLM code ...")
-                compile_err_bl, base_llm_exe = lassi.code_manager.compile_code(
-                    base_llm_verify_path, target_lang, code_compiler, code_compiler_kwds
-                )
-
-                if compile_err_bl:
-                    print(f"[Base LLM Verification] COMPILE ERROR:\n{str(compile_err_bl)[:300]}")
-                    base_llm_verification = {
-                        "skipped": False, "reason": "compile_error",
-                        "tier1_verdict": "NA", "tier2_verdict": "NA",
-                        "tier3_verdict": "NA", "verified_valid": False,
-                    }
-                else:
-                    # Step 3: Execute (power_measure=False — correctness run only, no energy overhead)
-                    print("[Base LLM Verification] Executing ...")
-                    _bl_result, _bl_stdout, _bl_energy_J, _bl_avg_power, _bl_std_power, \
-                        _bl_duration, _bl_metrics = lassi.code_manager.execute_code_selectvendor(
-                        experiment_data_directory,
-                        2,                    # code_version = base LLM index
-                        True,                 # zero_shot=True
-                        trial_number,
-                        directory,
-                        base_llm_exe,
-                        exe_input_parameters,
-                        False,                # power_measure=False (correctness run only)
-                        "base_llm_verify",    # code_source label
-                        target_lang,
-                        build_script,
-                        make_script,
-                        gpu_vendor="auto",
-                        wait=3
-                    )
-
-                    if _bl_result != "0":
-                        print("[Base LLM Verification] EXECUTE ERROR")
-                        base_llm_verification = {
-                            "skipped": False, "reason": "execute_error",
-                            "tier1_verdict": "NA", "tier2_verdict": "NA",
-                            "tier3_verdict": "NA", "verified_valid": False,
-                        }
-                    else:
-                        # Step 4: Tier 1 — invariant assertion check
-                        _bl_tier1_verdict, _bl_tier1_diag = lassi.verify.check_tier1_assertions(_bl_stdout)
-                        print(f"[Base LLM Verification] Tier 1: {_bl_tier1_verdict}")
-                        if _bl_tier1_verdict == "FAIL":
-                            print(_bl_tier1_diag.get("summary", ""))
-                        base_llm_tier1_verdict = _bl_tier1_verdict
-
-                        # Step 5: Tier 2 — empirical equivalence vs SOURCE_verify reference
-                        _bl_tier2_verdict, _bl_tier2_diag = lassi.verify.compare_passthrough_outputs(
-                            spec_stdout=passthrough_spec_output,
-                            generated_stdout=_bl_stdout,
-                            tolerance=tier2_tolerance,
-                        )
-                        print(f"[Base LLM Verification] Tier 2: {_bl_tier2_verdict}")
-                        if _bl_tier2_diag.get("failures"):
-                            print(_bl_tier2_diag.get("summary", ""))
-                        base_llm_tier2_verdict = _bl_tier2_verdict
-
-                        # Step 6: Tier 3 — metamorphic testing (if active and Tier 2 not failed)
-                        _bl_tier3_verdict = "SKIP"
-                        _bl_tier3_results = []
-                        if run_tier3 and tier3_active_relations and not _bl_tier2_verdict.startswith("FAIL"):
-                            _bl_tier3_verdict, _bl_tier3_results, _bl_tier3_diag = \
-                                lassi.verify.run_metamorphic_variants(
-                                base_llm_instrumented,
-                                tier3_active_relations,
-                                tier3_contract,
-                                _bl_stdout,        # base LLM's own output as Tier 3 baseline (self-referential)
-                                llm_source, model, num_ctx, system_prompt,
-                                display_response,
-                                directory, file_name, code_compiler, code_compiler_kwds,
-                                build_script, make_script, code_build_script,
-                                exe_input_parameters,
-                                experiment_data_directory=experiment_data_directory,
-                                code_version="base_llm",
-                                verifyprompt=verifyprompt
-                            )
-                            print(f"[Base LLM Verification] Tier 3: {_bl_tier3_verdict}")
-                        base_llm_tier3_verdict = _bl_tier3_verdict
-
-                        # Step 7: Final verdict — any FAIL in any tier overrides prior judge decision
-                        _bl_all_pass = (
-                            _bl_tier1_verdict == "PASS" and
-                            not _bl_tier2_verdict.startswith("FAIL") and
-                            not _bl_tier3_verdict.startswith("FAIL")
-                        )
-                        base_llm_verified_valid = _bl_all_pass
-                        base_llm_verification = {
-                            "skipped": False,
-                            "tier1_verdict": _bl_tier1_verdict,
-                            "tier1_diagnostic": _bl_tier1_diag,
-                            "tier2_verdict": _bl_tier2_verdict,
-                            "tier2_diagnostic": _bl_tier2_diag,
-                            "tier3_verdict": _bl_tier3_verdict,
-                            "tier3_results": _bl_tier3_results,
-                            "verified_valid": _bl_all_pass,
-                        }
-                        print(f"\n[Base LLM Verification] FINAL VERDICT: "
-                              f"{'VALID' if _bl_all_pass else 'INVALID'} "
-                              f"(T1:{_bl_tier1_verdict}, T2:{_bl_tier2_verdict}, T3:{_bl_tier3_verdict})")
-
-        except Exception as _bl_ex:
-            print(f"[Base LLM Verification] EXCEPTION: {_bl_ex}")
-            base_llm_verification = {
-                "skipped": False, "reason": f"exception: {str(_bl_ex)}",
-                "tier1_verdict": "NA", "tier2_verdict": "NA", "tier3_verdict": "NA",
-                "verified_valid": False,
-            }
 
     verification_log["base_llm_verification"] = base_llm_verification
     experiment_data["base_llm_tier1_verdict"] = base_llm_tier1_verdict
