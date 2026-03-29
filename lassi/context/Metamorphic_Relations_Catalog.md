@@ -144,6 +144,7 @@ add more simply because they appear in the catalog.
 - **Stencil / CFD**: CONSERVATION (flux balance) → SYMMETRY → ROTATION (if isotropic)
 - **Reduction kernel** (sum, dot product, norm): SCALING → CONSERVATION (decomposition) → PERMUTATIVE
 - **Particle / N-body**: CONSERVATION (energy) → PERMUTATIVE (particle index) → SCALING
+- **Normalized distance / correlation kernel** (z-score normalized DTW, LB_Keogh, cross-correlation, standardized regression): SCALING on the **co-normalized group** (raw data + precomputed mean + precomputed std, all by the same α) → output UNCHANGED (factor = 1.0); PERMUTATIVE (inner sum index permutation) → output UNCHANGED (factor = 1.0) — SCALING on any **single** input variable IS NOT APPLICABLE (see normalization warning below)
 - **Dynamic programming / path algorithms** (shortest path, DP table fill, wavefront, graph BFS/DFS): PERMUTATIVE (row/column index permutation) → MONOTONICITY (result non-decreasing with iterations) — **SCALING IS NOT APPLICABLE** (see below)
 - **Sorting / ranking / selection**: PERMUTATIVE (input permutation → permuted output) — SCALING IS NOT APPLICABLE (sort of 2×input is NOT 2× sort of input in index rank)
 - **Thresholding / clamping / activation**: SCALING IS NOT APPLICABLE for any input scale that crosses a threshold; CONSERVATION may apply if the operation conserves sum under special conditions
@@ -171,6 +172,33 @@ path selection at each step is non-linear in the accumulated costs).
 - `if (a < b)` selection to write output (same as `min` semantically)
 - Accumulated values that represent accumulated path costs, shortest distances, or minimum-weight sums
 - The kernel accumulates values with `+` AND selects with `min/max` — this is a shortest-path/DP pattern
+
+**⚠️ CRITICAL — Normalization (z-score / standardization) invalidates single-variable SCALING:**
+
+If the kernel normalizes data with the pattern `(x - mean) / std` (z-score normalization), the
+variables `x`, `mean`, and `std` form a **co-normalized group**. Scaling only `x` produces output
+that is NOT a simple scaling of the original because the mean-subtraction breaks linearity:
+
+```
+(α·x - mean) / std   ≠   α · (x - mean) / std    [when mean ≠ 0]
+```
+
+**Pattern to recognize:** `(buffer[idx] - stats_mean[idx]) / stats_std[idx]` where `stats_mean`
+and `stats_std` are precomputed arrays passed as separate kernel arguments.
+
+**Rules for co-normalized groups:**
+- Do NOT propose SCALING on `buffer` alone, `stats_mean` alone, or `stats_std` alone.
+- The valid SCALING is: scale **all three** (`buffer`, `stats_mean`, `stats_std`) by the same
+  positive factor α → the normalized value is unchanged → output is unchanged (factor = 1.0).
+- This `factor = 1.0` MR is a strong correctness test: any code that drops the mean subtraction
+  or std division will produce wrong output under this transformation.
+
+**If only division is present (mean = 0):** scaling `x` and `std` together by α gives `α·x / α·std = x / std` → output unchanged (factor = 1.0). Scale both.
+
+**Clamped-squared deviation pattern** (common in distance kernels): `val² × (val > 0)` or
+`max(0, val)²` where `val = (x - mean)/std - envelope`. Scaling the co-normalized group
+(x + mean + std together) leaves `val` unchanged → output unchanged. Scaling only `x` changes
+`val` in a position-dependent, nonlinear way because which values are clamped to zero also changes.
 
 ### Analysis Question 3: Are there physical conservation laws?
 
@@ -305,6 +333,24 @@ parameter in this way, what exactly should change in the output?"
 
 **Output-driven** (for CONSERVATION): Ask "What aggregation of the output should be preserved?
 What input structure allows me to decompose it?"
+
+**MANDATORY — Symbolic trace before proposing any SCALING relation:**
+
+Before writing a SCALING relation into the contract, trace the specific input variable(s) you
+plan to scale through every kernel operation symbolically and confirm the expected output ratio.
+
+Example — incorrect reasoning (keogh failure):
+- "I see squared terms → scaling subject by α should scale output by α²"  ← WRONG
+- Trace: `value = (α·subject - avg) / std` → value is NOT `α·(subject-avg)/std` → ratio is
+  input-position-dependent → SCALING on `subject` alone is INVALID.
+
+Example — correct reasoning (keogh):
+- Scale `subject`, `avgs`, `stds` all by α: `value = (α·s - α·avg)/(α·std) = (s-avg)/std`
+  → value unchanged → output unchanged → factor = 1.0 ✓
+
+If you cannot write a symbolic trace that confirms the exact output ratio for at least one
+representative input value, do NOT propose the relation. A relation that cannot be verified
+symbolically will fail the source filter and waste a contract slot.
 
 **IMPORTANT — null-factor relations are not supported in Phase 1/2:** Only propose relations where
 `factor` is a concrete non-null number (e.g., `2.0`, `-1.0`, `1.0`). Any relation requiring

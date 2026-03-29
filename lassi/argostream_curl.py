@@ -21,7 +21,7 @@ def argo_fetch_with_curl(data):
     local = True
 
     if local:
-        host_url = "apps-dev.inside.anl.gov"
+        host_url = "apps-stage.inside.anl.gov"
     else:
         host_url = "localhost:5000"
 

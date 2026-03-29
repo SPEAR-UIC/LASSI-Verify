@@ -316,6 +316,20 @@ details.refplan-block {
 }
 details.refplan-block > summary { color: #9cdcfe; }
 .refplan-block .collapsible-cap { color: #5a7a9f; border-top: 1px solid #3a5a7f; }
+/* LLM generated code block — amber accent */
+details.gencode-block {
+  border-left: 4px solid #b07830; border-bottom: 2px solid #7a5020;
+  border-top: 1px solid #7a5020; border-right: 1px solid #7a5020;
+}
+details.gencode-block > summary { color: #e5a550; }
+.gencode-block .collapsible-cap { color: #9a6a30; border-top: 1px solid #5a3a10; }
+/* LLM prose response block — violet accent */
+details.llmresp-block {
+  border-left: 4px solid #7a5aaa; border-bottom: 2px solid #5a3a8a;
+  border-top: 1px solid #5a3a8a; border-right: 1px solid #5a3a8a;
+}
+details.llmresp-block > summary { color: #b39ddb; }
+.llmresp-block .collapsible-cap { color: #7a5aaa; border-top: 1px solid #4a2a7a; }
 /* LLM response section markers */
 .llm-response  { color: #9cdcfe; font-style: italic; }
 /* metrics / results section */
@@ -475,9 +489,21 @@ function addLog(ts, text) {
     _openBlock(ts, 'CODE EXECUTION OUTPUT', 'exec-block', '▲  end of execution output'); return;
   }
   if (/< END: Standard Output >/.test(text))           { _closeBlock(); return; }
-  if (/LLM RESPONSE: refactoring plan/.test(text)) {
+  if (/< BEGIN: LLM RESPONSE · refactoring plan >/.test(text)) {
     _openBlock(ts, 'REFACTORING PLAN', 'refplan-block', '▲  end of refactoring plan'); return;
   }
+  if (/< BEGIN: LLM RESPONSE/.test(text)) {
+    const lm = text.match(/< BEGIN: LLM RESPONSE · (.+) >/);
+    const label = lm ? 'LLM RESPONSE  ·  ' + lm[1] : 'LLM RESPONSE';
+    _openBlock(ts, label, 'llmresp-block', '▲  end of LLM response'); return;
+  }
+  if (/< END: LLM RESPONSE >/.test(text)) { _closeBlock(); return; }
+  if (/< BEGIN: LLM GENERATED CODE/.test(text)) {
+    const lm = text.match(/< BEGIN: LLM GENERATED CODE · (.+) >/);
+    const label = lm ? 'LLM GENERATED CODE  ·  ' + lm[1] : 'LLM GENERATED CODE';
+    _openBlock(ts, label, 'gencode-block', '▲  end of generated code'); return;
+  }
+  if (/< END: LLM GENERATED CODE >/.test(text)) { _closeBlock(); return; }
   const cls    = classify(text);
   const node   = document.createElement('span');
   node.className = 'log-line' + (cls ? ' ' + cls : '');

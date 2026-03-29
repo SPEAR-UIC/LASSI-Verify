@@ -18,10 +18,46 @@ Properties tied to specific execution patterns:
 - Thread execution order assumptions
 - Intermediate state checks assuming serial or specific parallel execution
 - Timing or performance metrics
-- Thread/block/warp-specific checks
-- Algorithm implementation details that change with optimization
+- Thread/block/warp-specific checks, including thread block dimensions (`blockDim.x`, `blockDim.y`), grid dimensions, or warp size assumptions
+- Algorithm implementation details that change with optimization, including number of CUDA streams, shared memory tile sizes, reduction strategies, and memory layout choices
+- Hardware tuning parameters that control how the computation is mapped to hardware but do not affect what is computed
 
 **YOU MUST INSERT ONLY TYPE A ASSERTIONS.**
+
+### The One-Sentence Decision Test
+> **Ask: "If this property were violated, would the code produce a wrong answer?"**
+> - If YES → it is a semantic invariant (Type A) and may be an assertion candidate.
+> - If NO → it is a hardware tuning or implementation parameter (Type B) and must never be asserted.
+
+**Example:** A thread block of 16×16 vs 32×8 both compute the same result. Violating `blockDim.x == 16 && blockDim.y == 16` does NOT produce wrong output — it is a valid optimization target. Do not assert it. Tier 2 confirms numerical equivalence independently.
+
+---
+
+---
+
+## ⚠️ SCOPE BOUNDARY: What Tier 1 Is and Is Not
+
+**Tier 1 assertions check that the program ran correctly in a structural sense — not that the computed values are correct.**
+
+### Tier 1 IS:
+- Pointer and allocation validity (did memory get allocated?)
+- Size and dimension constraints (are problem-size counts, array dimensions, or index bounds in range?)
+- Numerical validity of inputs and outputs (are floats finite? no NaN or Inf?)
+- Plausible output range (is the output value within the physically/mathematically possible range for this type?)
+- Structural properties of data layouts (prefix sums non-decreasing, probabilities sum to 1, etc.)
+- Algorithmic parameters that control correctness (convergence tolerance > 0, max iterations > 0, grid covers the full domain)
+- Pre-kernel launch configuration: only check that device pointers are non-null and problem-size counts are positive — do NOT assert specific block/grid dimensions
+
+### Tier 1 is NOT:
+- **Checking whether the computed output values are numerically correct** — do not compare GPU output to any reference, expected, or re-computed value
+- **Verifying that GPU and CPU produce the same result** — this is handled separately and is not a Tier 1 concern
+- **Checking specific domain-correct values** — do not assert that a field equals a known boundary condition value, a known analytical solution, or any particular number
+- **Re-running the computation to verify it** — do not add a serial CPU fallback and compare to GPU output
+
+### The one-sentence rule:
+> **Check that values exist, are finite, and are in a plausible range. Do NOT check that they equal anything specific.**
+
+If your assertion contains a comparison to an expected numerical value (e.g., `== 0.0`, `== ustar`, `>= ref_result`, `!= 0` after knowing what the result should be), it is a correctness check and should be removed or replaced with a range/finiteness check.
 
 ---
 
@@ -140,18 +176,20 @@ The pipeline parses `LASSI-VERIFY ASSERTIONS [label]: PASS` and `LASSI-VERIFY AS
 ```
 
 ### Pattern 2: Loop/array check (accumulate pattern)
+The loop must be a standard 3-part `for` with exactly one semicolon between init, condition, and increment. The boolean accumulator `_t1_pass` is **not** part of the for-header — it lives in the loop body.
 ```cpp
 // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
 // LASSI_INSTRUMENTATION - [Brief description]
 {
     bool _t1_pass = true;
-    for (int i = 0; i < N; i++) {
-        if (!(per_element_condition_on_i)) { _t1_pass = false; break; }
+    for (int i = 0; i < N; i++) {           // ← 3 parts: init ; condition ; increment
+        if (!(per_element_condition_on_i)) { _t1_pass = false; break; }  // ← flag set in body
     }
     printf("LASSI-VERIFY ASSERTIONS [unique_label]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
+**NEVER write:** `for (int i = 0; i < N; _t1_pass; i++)` — placing `_t1_pass` as the for-header increment expression is a syntax error in C/C++ (the increment position does not accept a boolean expression as a statement in this context and produces a compiler error).
 
 ### Pattern 3: Before/after conservation check
 Declare capture variable at function scope OUTSIDE any block, before computation:
@@ -227,6 +265,35 @@ Identify:
 ## ❌ ANTI-PATTERNS: What NOT to Do
 
 These are examples of **INCORRECT** assertion insertions that violate the invariant-only rule:
+
+### ❌ WRONG: Hardware Tuning Parameters (Thread Block Dimensions, Stream Counts, Tile Sizes)
+```cpp
+// BAD — asserts specific thread block geometry sourced from original code
+dim3 threads(blockDim.x, blockDim.y);
+// WRONG: 32×8 blocks are a valid optimization of 16×16 blocks; both produce the same result
+{
+    bool _t1_pass = (blockDim.x == 16 && blockDim.y == 16);
+    printf("LASSI-VERIFY ASSERTIONS [block_dims_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+
+// ALSO BAD — asserts a specific stream count
+{
+    bool _t1_pass = (num_streams == 4);  // WRONG: 1, 2, or 8 streams compute the same result
+    printf("LASSI-VERIFY ASSERTIONS [stream_count_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+**WHY THIS IS WRONG:** Thread block dimensions, stream counts, shared memory tile sizes, and reduction strategies are hardware mapping decisions — they control how the GPU schedules work, not what is computed. Changing them is the primary mechanism by which an LLM optimization can improve energy efficiency or runtime. An assertion on these values directly forbids the optimization the framework is designed to find.
+
+Applying the decision test: if `blockDim.x` changes from 16 to 32, does the code compute a wrong answer? No — Tier 2 confirms numerical equivalence independently. Therefore it is a Type B parameter and must never be asserted.
+
+**CORRECT:** Assert only that the problem-size count is positive and the device pointer is non-null:
+```cpp
+// GOOD — checks only that the kernel can legally launch (problem-size constraint)
+{
+    bool _t1_pass = (d_input != nullptr && N > 0);
+    printf("LASSI-VERIFY ASSERTIONS [launch_preconditions]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+```
 
 ### ❌ WRONG: Thread Execution Order Assumptions
 ```cpp
@@ -322,6 +389,71 @@ __global__ void pathfinder(const int* gpuWall, const int* gpuSrc,
 **WHY THIS IS CATASTROPHIC:** When the kernel signature changes, the LLM must rewrite both the kernel and its call site(s). During that rewrite, it frequently simplifies or discards the core computation. The Tier 1 instrumented SOURCE_verify then produces wrong output (e.g., initial data values instead of computed DP results), poisoning the Tier 2 spec. Every generated code that computes the correct answer will then FAIL Tier 2 because it disagrees with the corrupted spec — the pipeline cannot make forward progress. This is an undetectable silent corruption: all Tier 1 assertions still PASS because the stub produces trivially valid-looking values.
 
 **CORRECT:** Leave the kernel signature and body completely untouched. If you need to inspect a value that is computed inside the kernel, copy the relevant output buffer from device to host after the kernel completes and validate it in a host-side assertion block.
+
+### ❌ WRONG: Comparing GPU Output to a CPU Reference or Expected Value
+```cpp
+// BAD — computes a CPU reference and asserts GPU output matches it
+uint64_t cpu_hash = murmurhash3_cpu(key, length);
+cudaMemcpy(h_out, d_out, numKeys * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+{
+    bool _t1_pass = (h_out[0] == cpu_hash);  // WRONG: correctness check, not structural
+    printf("LASSI-VERIFY ASSERTIONS [gpu_cpu_hash_match]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+
+// ALSO BAD — comparing host buffer to device buffer to "verify" the copy
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (h_out[i] != expected_values[i]) { _t1_pass = false; break; }  // WRONG
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_matches_ref]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+**WHY THIS IS WRONG:** Computing a CPU reference adds code that can itself be incorrect, producing FAIL on valid source code. The assertion is fragile: it fails if the CPU reference has a bug, if the data types differ, or if floating-point rounding differs between CPU and GPU. Verifying that computed output values are numerically correct is out of scope for Tier 1.
+
+**CORRECT:** Check only that the output pointer is non-null, the count is correct, and values are finite (for floats) or within the representable range of their type (for integers). Do not check specific values.
+```cpp
+cudaMemcpy(h_out, d_out, numKeys * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Validate output pointer and that kernel produced non-trivial output
+{
+    bool _t1_pass = (h_out != NULL && numKeys > 0);
+    printf("LASSI-VERIFY ASSERTIONS [output_ptr_valid]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+### ❌ WRONG: Asserting on a Host Buffer Before the Device-to-Host Copy
+```cpp
+kernel<<<blocks, threads>>>(d_input, d_out, N);
+cudaDeviceSynchronize();
+
+// WRONG: h_out still has its initial value (zeros / garbage) here — the copy hasn't happened
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+{
+    bool _t1_pass = (h_out[0] != 0);   // WRONG: always FAIL because h_out is still zeroed
+    printf("LASSI-VERIFY ASSERTIONS [output_nonzero]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+
+cudaMemcpy(h_out, d_out, N * sizeof(uint64_t), cudaMemcpyDeviceToHost);  // copy happens AFTER
+```
+**WHY THIS IS WRONG:** The host buffer `h_out` is only populated after `cudaMemcpy`. Asserting on it before the copy observes its initial allocation value (typically all zeros), causing the assertion to always FAIL on valid source code.
+
+**CORRECT:** Place every host-buffer assertion **after** the corresponding `cudaMemcpy` call, not before.
+```cpp
+kernel<<<blocks, threads>>>(d_input, d_out, N);
+cudaDeviceSynchronize();
+cudaMemcpy(h_out, d_out, N * sizeof(uint64_t), cudaMemcpyDeviceToHost);  // copy first
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Validate output pointer after transfer
+{
+    bool _t1_pass = (h_out != NULL && N > 0);
+    printf("LASSI-VERIFY ASSERTIONS [output_valid_post_copy]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
 
 ### ✅ CORRECT Alternatives for Each Case:
 
@@ -441,13 +573,14 @@ double residual = compute_residual(h_A, h_b, h_x, N);
 ```
 
 ### 1.6 Configuration Validity
-**Use when:** Function behavior depends on configuration parameters
+**Use when:** Algorithmic parameters control correctness (convergence tolerance, max iterations, problem counts).
+**Do NOT use for:** Thread block dimensions, stream counts, tile sizes, or any other hardware tuning parameter — these are Type B (see above). Changing them does not produce wrong output and must not be asserted.
 ```cpp
 // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Validate configuration parameters
+// LASSI_INSTRUMENTATION - Validate algorithmic configuration (tolerance > 0, max_iter > 0)
 {
-    bool _t1_pass = (num_threads > 0 && num_threads <= MAX_THREADS && tolerance > 0.0 && tolerance < 1.0);
-    printf("LASSI-VERIFY ASSERTIONS [config_valid]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+    bool _t1_pass = (tolerance > 0.0 && tolerance < 1.0 && max_iter > 0);
+    printf("LASSI-VERIFY ASSERTIONS [algo_config_valid]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
