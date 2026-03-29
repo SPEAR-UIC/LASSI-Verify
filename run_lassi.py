@@ -418,7 +418,7 @@ def experimental_setup(cfg):
     if _exp_label:
         experiment = _exp_label
     else:
-        experiment = "TEST_EXP_verify_runtime_" + model_coder + "_" + app_folder_name + detected_vendor.upper()  # Assign any label for experiment name.
+        experiment = "TEST_EXP_verify_runtime_" + model_coder + "_" + app_folder_name + "_" + detected_vendor.upper()  # Assign any label for experiment name.
     display_response = True
     test_with_error = False
     generate_test_case = False
