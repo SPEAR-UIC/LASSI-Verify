@@ -501,6 +501,10 @@ def auto_code_llmgeneration_pipeline(prompts,
     verification_log["zeroshot_tier2_verdict"] = "SKIP"
     verification_log["zeroshot_tier3_verdict"] = "SKIP"
     verification_log["zeroshot_empirical_verdict"] = "SKIP"
+    experiment_data["zeroshot_tier1_verdict"] = "SKIP"
+    experiment_data["zeroshot_tier2_verdict"] = "SKIP"
+    experiment_data["zeroshot_tier3_verdict"] = "SKIP"
+    experiment_data["zeroshot_empirical_verdict"] = "SKIP"
 
 
     # -----------------------------------------------------------
@@ -1817,7 +1821,14 @@ def auto_code_llmgeneration_pipeline(prompts,
                     judge_dict["source_stdout"] = source_orig_stdout  # use uninstrumented stdout; source_verify_stdout has passthrough dump noise
                 else:
                     judge_dict = dict(input_content_llmjudge_dict)  # shallow copy so strip below does not mutate the shared dict
+                    judge_dict["source_code"] = code_blocks[0]      # compare LASSI code against SOURCE_orig (uninstrumented); T1+T2 verified by this point so the judge should see the clean algorithm, not the LASSI-VERIFY blocks
                     judge_dict["source_stdout"] = source_orig_stdout  # uninstrumented baseline; source_verify_stdout has Tier 2 passthrough noise
+                    # Strip T1 + T2 LASSI-VERIFY blocks from the generated code body so the
+                    # judge sees only the algorithmic transformation — correctness is already
+                    # established by the three tiers, so instrumentation is now noise.
+                    judge_dict["refactored_code"] = lassi.verify._strip_t2_blocks(
+                        lassi.verify._strip_t1_blocks(judge_dict.get("refactored_code", ""))
+                    )
                 # Strip Tier 1 + Tier 2 LASSI-VERIFY instrumentation from refactored stdout
                 # so the judge sees only the benchmark's primary output — matching the
                 # original (pre-LASSI) judge design and preventing context-window overflow
@@ -2000,6 +2011,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                 verification_log["zeroshot_tier2_verdict"] = zs_tier2_verdict
                 verification_log["zeroshot_tier3_verdict"] = zs_tier3_verdict
                 verification_log["zeroshot_empirical_verdict"] = zs_empirical_verdict
+                experiment_data["zeroshot_tier1_verdict"] = zs_tier1_verdict
+                experiment_data["zeroshot_tier2_verdict"] = zs_tier2_verdict
+                experiment_data["zeroshot_tier3_verdict"] = zs_tier3_verdict
+                experiment_data["zeroshot_empirical_verdict"] = zs_empirical_verdict
                 print(f"\n----- Zero-Shot Empirical Verdict: {zs_empirical_verdict} "
                       f"(T1={zs_tier1_verdict}, T2={zs_tier2_verdict}, T3={zs_tier3_verdict}) -----")
 
@@ -2194,10 +2209,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                     experiment_data["base_v1_energy_diff"] = round(((total_energy_joules_refactor - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if power_measure and sourcecode_total_energy_joules != 0 else "NA"
                     experiment_data["base_v1_avg_power_diff"] = round(((ave_power_refactor - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if power_measure and sourcecode_ave_power != 0 else "NA"
                     experiment_data["base_v1_runtime_diff"] = round(((duration_refactor - duration) / duration) * 100 ,2) if duration != 0 else "NA"
-                    experiment_data["zeroshot_tier1_verdict"] = zs_tier1_verdict
-                    experiment_data["zeroshot_tier2_verdict"] = zs_tier2_verdict
-                    experiment_data["zeroshot_tier3_verdict"] = zs_tier3_verdict
-                    experiment_data["zeroshot_empirical_verdict"] = zs_empirical_verdict
                     # experiment_data["base_v1_optimization_methods"] = "None"
                 elif stage == "stage2":
                     experiment_data["base_v2_energy_J"] = total_energy_joules_refactor
@@ -2854,28 +2865,6 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["lassiee_clean_energy_J"] = lassiee_clean_energy_J
     experiment_data["lassiee_clean_energy_diff"] = lassiee_clean_energy_diff
 
-    # --- POST-PIPELINE: Populate base_llm fields from verify_zeroshot results ---
-    # The zero-shot code was already verified in-loop by the verify_zeroshot block (T1→T2→T3).
-    # No re-instrumentation or re-execution needed here — just map the existing state variables.
-    # If verify_zeroshot=False, all fields remain "SKIP" (no empirical data collected).
-    base_llm_tier1_verdict = zs_tier1_verdict
-    base_llm_tier2_verdict = zs_tier2_verdict
-    base_llm_tier3_verdict = zs_tier3_verdict
-    base_llm_verified_valid = (zs_empirical_verdict == "PASS")
-
-    base_llm_verification = {
-        "skipped": not verify_zeroshot,
-        "tier1_verdict": zs_tier1_verdict,
-        "tier2_verdict": zs_tier2_verdict,
-        "tier3_verdict": zs_tier3_verdict,
-        "verified_valid": base_llm_verified_valid,
-    }
-
-    verification_log["base_llm_verification"] = base_llm_verification
-    experiment_data["base_llm_tier1_verdict"] = base_llm_tier1_verdict
-    experiment_data["base_llm_tier2_verdict"] = base_llm_tier2_verdict
-    experiment_data["base_llm_tier3_verdict"] = base_llm_tier3_verdict
-    experiment_data["base_llm_verified_valid"] = base_llm_verified_valid
 
     # --- LASSI-VERIFY JSON SIDECAR: save full verification_log for detailed inspection ---
     # tier2_spec_output (large stdout) and sourcecode_analysis (large text) are excluded here;
