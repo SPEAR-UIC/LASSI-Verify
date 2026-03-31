@@ -115,7 +115,7 @@ values are edge cases where the MR cannot distinguish correct from incorrect beh
 
 Three to six diverse MRs reveal approximately 90% of faults detectable by a full oracle
 (Liu et al., confirmed by Segura 2016, Chen et al. 2019, and independent replication studies).
-Target **2–4 relations** per generated code.
+Target **3 to 6 relations** per generated code.
 
 ---
 
@@ -134,15 +134,15 @@ Every catalog entry specifies a relation as a 3-tuple:
 
 ## Selection Framework
 
-When generating a contract, work through these analysis questions. Stop at 2–4 relations — do not
+When generating a contract, work through these analysis questions. Stop at 3 to 6 relations — do not
 add more simply because they appear in the catalog.
 
 ### Analysis Question 1: What is the core computation type?
 
-- **Linear algebra** (matrix multiply, dense solve): SCALING → PERMUTATIVE
+- **Linear algebra** (matrix multiply, dense solve): SCALING → ADDITIVITY → PERMUTATIVE
 - **Iterative solver** (Jacobi, CG, GMRES): SCALING (on source term if BCs allow) → PERMUTATIVE
 - **Stencil / CFD**: CONSERVATION (flux balance) → SYMMETRY → ROTATION (if isotropic)
-- **Reduction kernel** (sum, dot product, norm): SCALING → CONSERVATION (decomposition) → PERMUTATIVE
+- **Reduction kernel** (sum, dot product, norm): SCALING → ADDITIVITY → CONSERVATION (decomposition) → PERMUTATIVE
 - **Particle / N-body**: CONSERVATION (energy) → PERMUTATIVE (particle index) → SCALING
 - **Normalized distance / correlation kernel** (z-score normalized DTW, LB_Keogh, cross-correlation, standardized regression): SCALING on the **co-normalized group** (raw data + precomputed mean + precomputed std, all by the same α) → output UNCHANGED (factor = 1.0); PERMUTATIVE (inner sum index permutation) → output UNCHANGED (factor = 1.0) — SCALING on any **single** input variable IS NOT APPLICABLE (see normalization warning below)
 - **Dynamic programming / path algorithms** (shortest path, DP table fill, wavefront, graph BFS/DFS): PERMUTATIVE (row/column index permutation) → MONOTONICITY (result non-decreasing with iterations) — **SCALING IS NOT APPLICABLE** (see below)
@@ -151,11 +151,12 @@ add more simply because they appear in the catalog.
 
 ### Analysis Question 2: Is the algorithm linear or nonlinear?
 
-- **Linear**: SCALING is directly applicable: `f(α×x) = α×f(x)`
-- **Nonlinear or thresholded**: SCALING does not apply to the full output; check whether it applies
-  to a residual metric or intermediate buffer
+- **Linear**: BOTH SCALING and ADDITIVITY apply: `f(α×x) = α×f(x)` AND `f(x+c) = f(x)+c` (when
+  linear coefficient is unity; see ADDITIVITY contraindications for non-unit coefficients)
+- **Nonlinear or thresholded**: neither SCALING nor ADDITIVITY applies to the full output; check
+  whether either applies to a residual metric or intermediate buffer
 - **Iterative with fixed boundary conditions**: SCALING applies to the source term ONLY if BCs are
-  also scaled or are homogeneous (zero)
+  also scaled or are homogeneous (zero); ADDITIVITY does not apply (BC constraints pin boundary values)
 
 **⚠️ CRITICAL — MIN/MAX operations always make SCALING inapplicable to the final output:**
 If the kernel uses `min()`, `max()`, `fmin()`, `fmax()`, `__min()`, `__max()`, conditional
@@ -220,9 +221,10 @@ Order selected relations **cheapest-first and most-discriminating-first** within
 1. CONSERVATION — cheap (1 extra compile + run; no input transformation needed)
 2. SYMMETRY — cheap (1 extra compile + run; negation of input, no structural change)
 3. SCALING — cheap (1 extra compile + run; **highest discriminating power**)
-4. PERMUTATIVE — cheap (1 extra compile + run)
-5. ROTATION — cheap (1 extra compile + run)
-6. MONOTONICITY — cheap (1 extra compile + run; **weakest, last resort only**)
+4. ADDITIVITY — cheap (1 extra compile + run; **complementary to SCALING** — catches additive bias bugs SCALING misses)
+5. PERMUTATIVE — cheap (1 extra compile + run)
+6. ROTATION — cheap (1 extra compile + run)
+7. MONOTONICITY — cheap (1 extra compile + run; **weakest, last resort only**)
 
 The fail-fast loop stops at the **first FAIL**. Put the best low-cost relations first.
 
@@ -283,6 +285,21 @@ Sum: %.17g
 === END LASSI-VERIFY METAMORPHIC [energy_after] ===
 ```
 
+**For ADDITIVITY** (compare shifted output to original + offset; same Statistics format as SCALING but with `Offset:` instead of `Factor:`):
+```
+=== BEGIN LASSI-VERIFY METAMORPHIC [label] ===
+Relation: additivity
+Offset: 1.0
+Buffer: h_output
+Elements: 1024
+Statistics: min=%.17g, max=%.17g, mean=%.17g
+Sample_first10: %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g
+=== END LASSI-VERIFY METAMORPHIC [label] ===
+```
+
+The checker verifies: `Z_stat ≈ Y_stat + offset` for each statistic and sample.
+The `offset` value is taken from the contract's `factor` field.
+
 **For MONOTONICITY** (per-iteration residual):
 ```
 === BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_0] ===
@@ -324,12 +341,12 @@ Identify:
 - Literal constants in the kernel: grid spacing `dx`, timestep `dt`, element count `N`,
   convergence threshold `tol`, domain length `L`
 
-### Step 2: Select 2–4 Relations from the Catalog
+### Step 2: Select 3 to 6 Relations from the Catalog
 
 Use the Selection Framework above. Apply BOTH approaches:
 
-**Input-driven** (for SCALING, PERMUTATIVE, SYMMETRY, ROTATION): Ask "If I change this input
-parameter in this way, what exactly should change in the output?"
+**Input-driven** (for SCALING, ADDITIVITY, PERMUTATIVE, SYMMETRY, ROTATION): Ask "If I change
+this input parameter in this way, what exactly should change in the output?"
 
 **Output-driven** (for CONSERVATION): Ask "What aggregation of the output should be preserved?
 What input structure allows me to decompose it?"
@@ -403,9 +420,9 @@ Return a single JSON block with this structure:
 **Field descriptions:**
 - `name`: short identifier used in variant filename (`{file_name}_mt_{name}.cu`). Use lowercase with
   underscores, no spaces.
-- `type`: one of `CONSERVATION`, `SYMMETRY`, `SCALING`, `PERMUTATIVE`, `ROTATION`, `MONOTONICITY`
+- `type`: one of `CONSERVATION`, `SYMMETRY`, `SCALING`, `ADDITIVITY`, `PERMUTATIVE`, `ROTATION`, `MONOTONICITY`
 - `description`: one sentence explaining the mathematical or physical basis of the relation
-- `factor`: scaling factor (for SCALING/SYMMETRY), or `null`
+- `factor`: scaling factor (for SCALING/SYMMETRY), additive offset c (for ADDITIVITY), or `null`
 - `input_variables`: C++ variable names of host arrays/scalars to transform (from the source code)
 - `observation_points`: METAMORPHIC block label(s); must match PASSTHROUGH labels when comparing
   scaled output to original. **MUST be the primary output array** (e.g., `["final_solution"]`,
@@ -467,6 +484,21 @@ BAD: "f(2*x) = 2*f(x)" when the kernel applies clamping or a threshold
 
 Check `applicable_when` carefully. For iterative solvers with fixed Dirichlet BCs, the solution
 does not scale with the source term — the BCs dominate.
+
+### ❌ ADDITIVITY When Output Shift ≠ Input Offset
+
+```
+BAD: ADDITIVITY on y = A*x when row sums of A ≠ 1 (shift in output mean = c × mean(row_sums(A)), not c)
+BAD: ADDITIVITY on y = α*x when α ≠ 1 (shift in output = α*c, not c)
+BAD: ADDITIVITY on iterative solver with fixed Dirichlet BCs (BCs pin boundary values, interior shift ≠ c)
+```
+
+ADDITIVITY (Phase 1/2) requires the output to shift by exactly `c` when all inputs shift by `c`.
+This holds for reductions (mean shifts by c, sum shifts by N*c but mean stays shifted by c),
+and pointwise operations with unit coefficient. For a general linear operator A, the shift in
+output mean is `c × mean(row_sums(A))` — if row sums ≠ 1, ADDITIVITY with expected shift = c is
+wrong. The source filter will correctly catch this, but a failed source filter wastes a contract
+slot. Verify the shift analytically before proposing ADDITIVITY.
 
 ### ❌ MONOTONICITY When Equality Is Available
 
@@ -968,6 +1000,88 @@ for (int iter = 0; iter < max_iter; iter++) {
 
 **Check:** `residual[k] >= residual[k+1] - tolerance * residual[k]` for all k (allow tiny
 numerical noise in "near-equal" consecutive values).
+
+---
+
+### Category 7: ADDITIVITY (TRANSLATIONAL)
+
+**Formal basis:** Murphy et al. ADDITIVE — the direct companion to MULTIPLICATIVE (SCALING) that
+completes the linearity test. Linear operator theory: superposition principle `L(x + c) = L(x) + L(c)`.
+Validated in ML testing as feature translation invariance (Segura 2016). Together with SCALING,
+forms a complete two-property linearity verification:
+- SCALING tests **homogeneity**: `f(α×x) = α×f(x)`
+- ADDITIVITY tests **superposition**: `f(x+c) = f(x) + c` (when linear coefficient = 1)
+
+**Why ADDITIVITY catches bugs SCALING misses:** A refactoring can preserve the multiplicative
+response `f(αx) = αf(x)` while introducing an incorrect additive bias — for example, a constant
+offset introduced by incorrect initialization, a spurious term added in accumulation, or a missing
+subtraction in a centered computation. SCALING would pass; ADDITIVITY would fail.
+
+**Formal 3-tuple:**
+- `input_relation`: x₂ = x₁ + c (add a constant offset c to all relevant input array elements)
+- `output_relation`: f(x₂) = f(x₁) + c (all output statistics and per-element values shift by c)
+- `applicable_when`: the kernel computes a reduction (mean, sum) or pointwise-linear transform
+  where adding c to all inputs shifts all output statistics by exactly c
+
+**Phase 1/2 restriction:** The checker uses the contract `factor` field as the expected shift for
+ALL statistics (min, max, mean) and per-element samples. This is exact only when the linear
+coefficient is unity: mean(x+c) = mean(x)+c, min(x+c) = min(x)+c, max(x+c) = max(x)+c.
+For kernels with non-unit coefficients (y = A*x where row sums ≠ 1), output shift ≠ c — do not
+propose ADDITIVITY in Phase 1/2 for such kernels.
+
+**Cost:** Cheap — 1 additional compile + run.
+
+**Discriminating power: HIGH (complementary to SCALING).** Tests a different fault class:
+additive biases, spurious constant terms, incorrect initialization offsets.
+
+**Applicable to:**
+- Reduction kernels (sum, mean): mean(x + c) = mean(x) + c exactly
+- Pointwise-linear kernels with identity coefficient: y[i] = x[i] → y[i] + c
+- Linear algebra with unit row-sum property (stochastic matrices, probability kernels)
+- Distance kernels where the offset propagates linearly through the computation
+
+**Contraindications:**
+- Kernels with non-unit linear coefficients (y = A*x, A's row sums ≠ 1) — shift ≠ c
+- Nonlinear operations (squaring, clamping, exp, log, min/max pooling) — shift ≠ c
+- Iterative solvers with fixed Dirichlet BCs — BCs pin boundary values; interior shift ≠ c
+- Operations with positivity/range constraints — choose c carefully to stay in valid domain
+- Normalized outputs (z-score, softmax) — normalization absorbs any constant offset
+
+**Choosing c (the offset):** Default c = 1.0. Avoid c = 0 (trivially satisfied). Choose c that
+keeps all input values within the valid physical domain. Use a value that is small relative to
+input magnitude to avoid numerical instability in iterative codes.
+
+#### 7.1 Constant Offset (Reduction / Pointwise Linear)
+
+`input_relation`: add constant c to all elements of the relevant input array(s)
+`output_relation`: Z_min ≈ Y_min + c; Z_max ≈ Y_max + c; Z_mean ≈ Y_mean + c; Z_sample[i] ≈ Y_sample[i] + c
+`applicable_when`: kernel computes a reduction (mean, sum) or pointwise-linear transform where
+output shifts by exactly c when inputs shift by c
+
+```cpp
+const double offset = 1.0;
+// AFTER initialization, BEFORE first H→D copy:
+for (int i = 0; i < N; i++) h_input[i] += offset;
+// If multiple input arrays contribute linearly, offset ALL of them
+
+// After final D→H transfer, print METAMORPHIC block:
+printf("=== BEGIN LASSI-VERIFY METAMORPHIC [output_label] ===\n");
+printf("Relation: additivity\nOffset: %.17g\n", offset);
+printf("Buffer: h_output\nElements: %d\n", N);
+double mn = h_output[0], mx = h_output[0], sm = 0.0;
+for (int i = 0; i < N; i++) {
+    if (h_output[i] < mn) mn = h_output[i];
+    if (h_output[i] > mx) mx = h_output[i];
+    sm += h_output[i];
+}
+printf("Statistics: min=%.17g, max=%.17g, mean=%.17g\n", mn, mx, sm/N);
+printf("Sample_first10:");
+for (int i = 0; i < 10 && i < N; i++) printf(" %.17g", h_output[i]);
+printf("\n=== END LASSI-VERIFY METAMORPHIC [output_label] ===\n");
+```
+
+**Check:** `|Z_stat − (Y_stat + offset)| ≤ atol + rtol × max(|Z_stat|, |Y_stat + offset|)` per statistic.
+The `offset` value is taken from the contract's `factor` field (same JSON field, additive interpretation for ADDITIVITY).
 
 ---
 

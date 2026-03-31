@@ -2,9 +2,10 @@
 CLI runner for LASSI-Verify analysis.
 
 Usage:
-    python -m lassi_verify_analysis.run_all \\
-        --data-dir ./data \\
-        --output-dir ./results
+    python -m lassi_verify_analysis.run_all --data-dir ./data
+
+    # Optionally override the output location (default: <data-dir>/analysis_results/):
+    python -m lassi_verify_analysis.run_all --data-dir ./data --output-dir ./results
 
 Loads the two pre-aggregated CSV files from --data-dir and runs all
 implemented metrics, writing outputs (tables, figures) to --output-dir.
@@ -16,10 +17,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from .data_loader import get_kernels, load_data
 from . import pass_at_k
+from . import verification_analysis
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -49,8 +52,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
-        help="Directory where tables and figures will be written.",
+        default=None,
+        help=(
+            "Directory where tables and figures will be written. "
+            "Defaults to <data-dir>/analysis_results/."
+        ),
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -58,6 +64,8 @@ def main() -> int:
         help="Enable DEBUG-level logging.",
     )
     args = parser.parse_args()
+
+    output_dir = args.output_dir or os.path.join(args.data_dir, "analysis_results")
 
     _configure_logging(args.verbose)
     log = logging.getLogger(__name__)
@@ -79,16 +87,18 @@ def main() -> int:
     # --- Metric 1: verified-pass@k ---
     log.info("Computing Metric 1: verified-pass@k ...")
     m1_results = pass_at_k.compute(df_trials, df_attempts)
-    pass_at_k.report(m1_results, output_dir=args.output_dir)
+    pass_at_k.report(m1_results, output_dir=output_dir)
     log.info("Metric 1 complete.")
 
-    # --- Future metrics will be added here ---
-    # log.info("Computing Metric 5: judge accuracy ...")
-    # from . import judge_accuracy
-    # m5_results = judge_accuracy.compute(df_trials, df_attempts)
-    # judge_accuracy.report(m5_results, output_dir=args.output_dir)
+    # --- Verification Effectiveness Analysis (sub-metrics A–E) ---
+    log.info("Computing Verification Effectiveness Analysis (sub-metrics A–E) ...")
+    va_results = verification_analysis.compute(df_trials, df_attempts)
+    verification_analysis.report(va_results, output_dir=output_dir)
+    log.info("Verification analysis complete.")
 
-    log.info("All metrics complete. Outputs written to: %s", args.output_dir)
+    # --- Future metrics will be added here ---
+
+    log.info("All metrics complete. Outputs written to: %s", output_dir)
     return 0
 
 
