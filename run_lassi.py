@@ -503,10 +503,10 @@ def experimental_setup(cfg):
         "lassiee_clean_runtime_diff",
         "lassiee_clean_energy_J",
         "lassiee_clean_energy_diff",
-        "base_llm_tier1_verdict",
-        "base_llm_tier2_verdict",
-        "base_llm_tier3_verdict",
-        "base_llm_verified_valid"
+        "zeroshot_tier1_verdict",    # ★ T1 invariant assertion verdict for zero-shot code (PASS/FAIL/SKIP)
+        "zeroshot_tier2_verdict",    # ★ T2 empirical equivalence verdict for zero-shot code (PASS/FAIL/SKIP)
+        "zeroshot_tier3_verdict",    # ★ T3 metamorphic testing verdict for zero-shot code (PASS/FAIL/SKIP)
+        "zeroshot_empirical_verdict" # ★ composite empirical verdict (PASS/FAIL/SKIP)
     ]
 
     return (app_folder_name, app_name, file_name, lines_of_code, source_lang, target_lang, model, model_coder, model_judge, num_ctx, num_ctx_coder, llm_source, use_context, use_context_summaries_only,

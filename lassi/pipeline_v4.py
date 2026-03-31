@@ -242,7 +242,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     self_correction_max = 10
     self_correction_power_counter_max = 10
     self_correction_verify_counter = 0    # Global total Tier 2 + Tier 3 failures across all generated codes; pipeline-level safety net (Tier 1 excluded — it has its own per-code budget)
-    self_correction_verify_counter_max = 15  # Global limit (increased from 10 to support multiple codes × per-code budget)
+    self_correction_verify_counter_max = 45  # Safety net only; per-code limits are the primary stopping mechanism
     self_correction_verify_counter_code = 0   # Per-code Tier 2 self-correction attempts; resets on fresh code generation
     self_correction_verify_counter_code_max = 5  # Per-code limit: if exhausted, mark INVALID and generate a fresh code
     tier2_exhausted = False   # Set True when per-code Tier 2 budget is exhausted; forces INVALID after judge block
@@ -258,8 +258,10 @@ def auto_code_llmgeneration_pipeline(prompts,
     # --- Tier 1: Invariant Assertion Check state variables ---
     self_correction_tier1_counter_code = 0    # Per-code Tier 1 retry count; resets on fresh code
     self_correction_tier1_counter_code_max = 3  # Per-code limit (matches Tier 3; assertion failures are structural)
+    tier1_exhausted = False                    # Set when T1 per-code budget exhausted; reset each iteration
     tier1_verdict = "SKIP"          # Most recent Tier 1 verdict for the current code
     tier1_diagnostic = {}           # Most recent Tier 1 assertion diagnostic
+    force_new_plan = False          # Set when any per-code tier exhaustion requires a new refactoring plan
     exe_output_source = ""
     source_orig_stdout = ""    # stdout from SOURCE_orig execution (Stage 0)
     source_verify_stdout = ""  # stdout from SOURCE_verify execution (Stage 1)
@@ -777,6 +779,12 @@ def auto_code_llmgeneration_pipeline(prompts,
         # so the counter accumulates correctly until the per-code budget is exhausted.
         if compile_result_before_generation in ("", "energy_efficiency"):
             self_correction_counter = 0
+            self_correction_tier1_counter_code = 0   # Reset T1 per-code counter on fresh generation
+            # NOTE: force_new_plan is NOT reset here. It must survive into the EE SC branch
+            # (later in this same iteration) so that the plan-generation condition
+            # "self_correction_power_counter == 0 or force_new_plan" can see the True value
+            # set by per-code tier exhaustion. It is cleared inside the EE SC branch after
+            # the new plan is generated (see "if force_new_plan:" block in Change 9).
 
         # --- Table 2 ★: determine generation type and attempt number for the attempt record ---
         # generation_type and attempt_number track what kind of code generation this iteration performs.
@@ -906,52 +914,122 @@ def auto_code_llmgeneration_pipeline(prompts,
         elif compile_result == "tier1_failure" and not zero_shot:
             """
             Tier 1 (invariant assertion) verification failure self-correction.
-            The generated code compiled and executed successfully but one or more invariant
-            assertion blocks printed FAIL to stdout. All failing assertion labels are reported
-            so the LLM has full visibility into every violated invariant.
+            Two sub-cases are handled separately:
+              SKIP (sentinel_missing): the LLM stripped the assertion blocks entirely.
+                Prompt includes ALL assertion blocks from SOURCE_verify as a re-insertion
+                template so the LLM can copy them back verbatim.
+              FAIL: one or more assertion blocks printed FAIL to stdout.
+                Prompt includes only the failing blocks and their diagnostic so the LLM
+                knows exactly which invariant(s) were violated.
             """
-            print("\n\n----- " + color.BOLD + color.RED + "LASSI-VERIFY Tier 1 SELF-CORRECTION: " + str(self_correction_verify_counter) + color.END + " -----")
+            print("\n\n----- " + color.BOLD + color.RED + "LASSI-VERIFY Tier 1 SELF-CORRECTION: "
+                  + str(self_correction_tier1_counter_code + 1) + "/" + str(self_correction_tier1_counter_code_max)
+                  + " (global: " + str(self_correction_verify_counter) + ")" + color.END + " -----")
             print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
 
-            tier1_diag_summary = tier1_diagnostic.get("summary", "(no diagnostic available)")
-            failing_labels = tier1_diagnostic.get("failing_labels", [])
-            failing_labels_str = ", ".join(f"[{l}]" for l in failing_labels)
+            # Increment per-code T1 counter and check exhaustion BEFORE generating another SC attempt.
+            self_correction_tier1_counter_code += 1
+            tier1_sc_count += 1  # Table 1 ★ per-type SC counter (count even on exhaustion — it IS a SC event)
+            iteration_log.setdefault("v" + str(len(code_blocks) - 1), {"self_correction_count": 0, "energy_refactor_count": 0, "LLM_temperature": round(code_gen_temp, 1)})
+            iteration_log["v" + str(len(code_blocks) - 1)]["self_correction_count"] += 1
 
-            # Extract the full assertion block source for each failing label so the LLM knows
-            # exactly what condition needs to evaluate to true — not just the label name.
+            if self_correction_tier1_counter_code > self_correction_tier1_counter_code_max:
+                # Per-code T1 budget exhausted: this code cannot satisfy invariant assertions.
+                # Keep code in code_blocks as a research artifact (it ran — T1 assertions detected a flaw).
+                # Write a final attempt record, then drive fresh generation with a new refactoring plan.
+                print(f"\n----- LASSI-Verify Tier 1: FAIL — per-code budget exhausted ({self_correction_tier1_counter_code_max} attempts), marking INVALID, generating new plan next -----")
+                tier1_exhausted = True
+                compile_result = "energy_efficiency"       # drive fresh code generation on next iteration
+                energy_efficiency_refactor_success = False  # ensure EE SC branch fires on next iteration
+                force_new_plan = True                       # force new refactoring plan
+                bad_refactor_plans.append(refactoring_plan) # record so plan LLM avoids repeating this strategy
+                # Write final attempt record for the exhausted T1-failing code before continuing
+                _cb_idx = len(code_blocks) - 1
+                _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
+                attempt_log_buffer.append(_build_attempt_record(
+                    app_name=file_name, trial_number=trial_number,
+                    code_block_index=_cb_idx, attempt_number=attempt_number,
+                    is_final_attempt=True, generation_type=current_generation_type,
+                    sc_trigger=current_sc_trigger, llm_temperature=code_gen_temp,
+                    compile_status="success", execute_status="success",
+                    runtime_s=duration_refactor, energy_J=total_energy_joules_refactor,
+                    ave_power_W=ave_power_refactor,
+                    tier1_verdict=tier1_verdict, tier1_instrumented_labels=_t1_instr,
+                    tier1_diagnostic=tier1_diagnostic,
+                    tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
+                    tier3_verdict="SKIP", tier3_diagnostic={},
+                    judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_t1_sc_budget",
+                ))
+                continue  # Skip remainder of loop body (T2, T3, judge, metrics, stagnation)
+
             _block_re = re.compile(
                 r'(// >>> BEGIN LASSI-VERIFY ASSERTIONS.*?// <<< END LASSI-VERIFY ASSERTIONS <<<)',
                 re.DOTALL
             )
-            failing_block_texts = []
-            for _label in failing_labels:
-                for _bm in _block_re.finditer(code_blocks[1]):  # SOURCE_verify is authoritative — unmodified by LLM
-                    if f'[{_label}]' in _bm.group(1):
-                        failing_block_texts.append(_bm.group(1).strip())
-                        break
-            failing_blocks_section = (
-                "\n\n=== FAILING ASSERTION BLOCK(S) — source of the condition that printed FAIL ===\n"
-                + "\n\n".join(failing_block_texts) +
-                "\n=== END FAILING ASSERTION BLOCK(S) ===\n"
-            ) if failing_block_texts else ""
 
-            error_correction_prompt_intro = (
-                "\n\nThe above code compiled and executed successfully but FAILED LASSI-Verify "
-                "Tier 1 invariant assertion checking. One or more assertion blocks printed FAIL "
-                "to stdout, indicating a mathematical correctness violation.\n\n"
-                "=== TIER 1 DIAGNOSTIC ===\n"
-                + tier1_diag_summary +
-                "\n\nFailing assertion label(s): " + (failing_labels_str if failing_labels_str else "(see diagnostic above)") +
-                failing_blocks_section +
-                "\n=== END TIER 1 DIAGNOSTIC ===\n\n"
-                "Fix the generated code so that the condition(s) shown in the failing assertion "
-                "block(s) above evaluate to true. "
-                "Do NOT remove, comment out, or modify any LASSI-VERIFY ASSERTIONS or "
-                "LASSI-VERIFY PASSTHROUGH blocks — the fix must be in the surrounding "
-                "computation, not in the assertions themselves. "
-                "The issue is a mathematical correctness error — the computation violates a "
-                "transformation-invariant property that any correct implementation must satisfy."
-            )
+            if tier1_verdict == "SKIP":
+                # Sentinel not found — the LLM removed the assertion blocks from the generated
+                # code. Extract ALL blocks from SOURCE_verify (authoritative, unmodified) and
+                # include them as a verbatim re-insertion template.
+                all_block_texts = [_bm.group(1).strip() for _bm in _block_re.finditer(code_blocks[1])]
+                all_blocks_section = (
+                    "\n\n=== LASSI-VERIFY ASSERTION BLOCKS TO RE-INSERT (copy verbatim) ===\n"
+                    + "\n\n".join(all_block_texts) +
+                    "\n=== END ASSERTION BLOCKS ===\n"
+                ) if all_block_texts else ""
+
+                error_correction_prompt_intro = (
+                    "\n\nThe above generated code is MISSING the LASSI-VERIFY ASSERTIONS blocks "
+                    "that must be present for verification. The Tier 1 completion sentinel was not "
+                    "found in the execution output, which means the assertion instrumentation was "
+                    "removed or never included in the generated code.\n\n"
+                    "You MUST re-insert the following assertion blocks into the generated code "
+                    "verbatim — copy them exactly as shown, at the same logical locations as in "
+                    "the original source code (after the corresponding computation steps). "
+                    "Do NOT modify, paraphrase, or summarize them."
+                    + all_blocks_section +
+                    "\nDo NOT remove, comment out, or modify any LASSI-VERIFY ASSERTIONS or "
+                    "LASSI-VERIFY PASSTHROUGH blocks. These are required for verification and "
+                    "must be preserved exactly as written in every generated code version."
+                )
+            else:
+                # FAIL case — one or more assertion blocks printed FAIL.
+                # Include only the failing blocks so the LLM focuses on the violated invariants.
+                tier1_diag_summary = tier1_diagnostic.get("summary", "(no diagnostic available)")
+                failing_labels = tier1_diagnostic.get("failing_labels", [])
+                failing_labels_str = ", ".join(f"[{l}]" for l in failing_labels)
+
+                # Extract the full assertion block source for each failing label so the LLM knows
+                # exactly what condition needs to evaluate to true — not just the label name.
+                failing_block_texts = []
+                for _label in failing_labels:
+                    for _bm in _block_re.finditer(code_blocks[1]):  # SOURCE_verify is authoritative — unmodified by LLM
+                        if f'[{_label}]' in _bm.group(1):
+                            failing_block_texts.append(_bm.group(1).strip())
+                            break
+                failing_blocks_section = (
+                    "\n\n=== FAILING ASSERTION BLOCK(S) — source of the condition that printed FAIL ===\n"
+                    + "\n\n".join(failing_block_texts) +
+                    "\n=== END FAILING ASSERTION BLOCK(S) ===\n"
+                ) if failing_block_texts else ""
+
+                error_correction_prompt_intro = (
+                    "\n\nThe above code compiled and executed successfully but FAILED LASSI-Verify "
+                    "Tier 1 invariant assertion checking. One or more assertion blocks printed FAIL "
+                    "to stdout, indicating a mathematical correctness violation.\n\n"
+                    "=== TIER 1 DIAGNOSTIC ===\n"
+                    + tier1_diag_summary +
+                    "\n\nFailing assertion label(s): " + (failing_labels_str if failing_labels_str else "(see diagnostic above)") +
+                    failing_blocks_section +
+                    "\n=== END TIER 1 DIAGNOSTIC ===\n\n"
+                    "Fix the generated code so that the condition(s) shown in the failing assertion "
+                    "block(s) above evaluate to true. "
+                    "Do NOT remove, comment out, or modify any LASSI-VERIFY ASSERTIONS or "
+                    "LASSI-VERIFY PASSTHROUGH blocks — the fix must be in the surrounding "
+                    "computation, not in the assertions themselves. "
+                    "The issue is a mathematical correctness error — the computation violates a "
+                    "transformation-invariant property that any correct implementation must satisfy."
+                )
 
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
             error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
@@ -973,20 +1051,63 @@ def auto_code_llmgeneration_pipeline(prompts,
 
             # Build the Tier 2 verification error prompt:
             #   - the generated code that failed
+            #   - structured per-stat failure table (label | stat | spec | generated | rel_err)
+            #   - systematic error pattern hint (if relative error is consistent across failures)
             #   - the diagnostic summary (which observation points diverged and by how much)
             #   - raw passthrough output from SOURCE_verify (source-as-specification reference)
             #   - raw passthrough output from the generated code
             tier2_diag_summary = tier2_diagnostic.get("summary", "(no diagnostic available)")
             # Truncate raw outputs to avoid exceeding context window
-            spec_output_excerpt  = passthrough_spec_output[:4000]  if len(passthrough_spec_output)  > 4000  else passthrough_spec_output
-            gen_output_excerpt   = passthrough_outputs[-1][:4000]  if passthrough_outputs and len(passthrough_outputs[-1]) > 4000 else (passthrough_outputs[-1] if passthrough_outputs else "")
+            spec_output_excerpt = passthrough_spec_output[:2000] if len(passthrough_spec_output) > 2000 else passthrough_spec_output
+            gen_output_excerpt  = (passthrough_outputs[-1][:2000] if passthrough_outputs and len(passthrough_outputs[-1]) > 2000
+                                   else (passthrough_outputs[-1] if passthrough_outputs else ""))
+
+            # Build structured per-stat failure table from tier2_diagnostic["failures"]
+            _failures = tier2_diagnostic.get("failures", [])
+            _failure_table_str = ""
+            if _failures:
+                _table_lines = ["Block Label            | Stat       | Expected (spec)   | Actual (generated) | Rel. Err"]
+                _table_lines.append("-" * 90)
+                _seen_labels = []
+                for f in _failures[:15]:   # cap at 15 rows to stay within context
+                    label = f.get("label", "?")
+                    if label not in _seen_labels:
+                        _seen_labels.append(label)
+                    spec_v = f.get("spec", 0.0)
+                    gen_v  = f.get("generated", 0.0)
+                    abs_e  = f.get("abs_err", 0.0)
+                    rel_pct = f"{(abs_e / (abs(spec_v) + 1e-30)) * 100:.2f}%" if isinstance(spec_v, (int, float)) else "?"
+                    _table_lines.append(f"{label:<22} | {f.get('stat','?'):<10} | {spec_v:<18.6g} | {gen_v:<19.6g} | {rel_pct}")
+                _failure_table_str = "\n".join(_table_lines)
+
+                # Add pattern hint if relative error is consistent across failures
+                _rel_errs = []
+                for f in _failures[:12]:
+                    s, g = f.get("spec", 0.0), f.get("generated", 0.0)
+                    if isinstance(s, float) and abs(s) > 1e-10:
+                        _rel_errs.append(abs(s - g) / abs(s))
+                if len(_rel_errs) >= 3:
+                    avg_rel = sum(_rel_errs) / len(_rel_errs)
+                    std_rel = (sum((r - avg_rel) ** 2 for r in _rel_errs) / len(_rel_errs)) ** 0.5
+                    if std_rel < 0.005:  # consistent within 0.5% — likely a systematic factor
+                        _failure_table_str += (
+                            f"\n\nPattern: All failing statistics show a consistent ~{avg_rel * 100:.1f}% relative error. "
+                            "This strongly suggests a systematic factor difference — e.g., a wrong constant, "
+                            "a missing scale factor, a different reduction order, or a wrong accumulation variable."
+                        )
+
+            _failure_detail_section = (
+                "=== TIER 2 FAILURE DETAILS (per-stat breakdown) ===\n"
+                + (_failure_table_str if _failure_table_str else "(no structured failures available)")
+                + "\n\n=== TIER 2 SUMMARY ===\n"
+                + tier2_diag_summary
+            )
 
             error_correction_prompt_intro = (
                 "\n\nThe above code compiled and executed successfully but FAILED LASSI-Verify "
                 "Tier 2 empirical equivalence checking. Its passthrough observation point output "
                 "does not match the SOURCE_verify source-as-specification reference.\n\n"
-                "=== TIER 2 DIAGNOSTIC ===\n"
-                + tier2_diag_summary +
+                + _failure_detail_section +
                 "\n\n=== SOURCE_verify PASSTHROUGH OUTPUT (source-as-specification reference) ===\n"
                 + spec_output_excerpt +
                 "\n\n=== GENERATED CODE PASSTHROUGH OUTPUT ===\n"
@@ -994,8 +1115,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                 "\n\n=== END TIER 2 DIAGNOSTIC ===\n\n"
                 "Fix the generated code so that its passthrough observation point output matches "
                 "the source-as-specification reference within floating-point tolerance. "
+                "Focus your fix on the specific block(s) and statistics listed in the failure table above. "
                 "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
-                "The issue likely involves incorrect computation, wrong algorithm, or wrong data transformation."
+                "The issue likely involves incorrect computation, wrong algorithm, or wrong data "
+                "transformation in the section of code that produces the failing passthrough block output."
             )
 
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
@@ -1145,8 +1268,9 @@ def auto_code_llmgeneration_pipeline(prompts,
             # On the first try following the base LLM zero shot attempts,
             # otherwise, new refactoring plans will only be created when
             # a new "best" code version is generated by the pipeline.
-            if self_correction_power_counter == 0:
-                # Generate a new refactoring plan following a new "best" version of the refactored code.
+            if self_correction_power_counter == 0 or force_new_plan:
+                # Generate a new refactoring plan: on first LASSI attempt (power_counter==0), on each new best
+                # code, OR when a per-code tier SC budget was exhausted (force_new_plan=True — previous strategy failed).
                 # When tracking_best_version <= 1 (SOURCE_orig or SOURCE_verify), pass the uninstrumented
                 # original source so the LLM focuses on the algorithm, not the assertion instrumentation.
                 plan_input_code = original_input_code if tracking_best_version <= 1 else code_blocks[tracking_best_version]
@@ -1179,6 +1303,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                         code_to_refactor += "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and consumed a total energy of " + str(round(energy_history[1], 2)) + " Joules at an average power of " + str(round(power_history[1], 2)) + " Watts, which includes the idle system energy consumption and average power.\n"
                     else:
                         code_to_refactor += "\n\nFor reference, the CODE TO REFACTOR provided above was executed on this system and had a wall-clock execution time of " + str(round(runtime_history[1], 4)) + " seconds.\n"
+                if force_new_plan:
+                    print(f"  [Per-code tier SC exhausted] New refactoring plan generated. LLM temperature: {round(code_gen_temp, 1)}")
+                    force_new_plan = False  # clear flag — plan has been regenerated
             else:
                 # Build a list of tuples (index, code_chunk) where the status is "VALID"
                 ## valid_prior_codes = [(i, code) for i, (code, status) in enumerate(zip(code_blocks, valid_code_history)) if (status == "VALID" or status == "SOURCE" or status == "basellm_VALID")]
@@ -1624,14 +1751,13 @@ def auto_code_llmgeneration_pipeline(prompts,
             # original_input_code (no passthrough blocks), so compare_passthrough_outputs() would
             # return SKIP — which is the correct behavior for the zero-shot path.
             # Reset per-code Tier 2 self-correction counter when processing a fresh code.
-            # A Tier 2 retry enters here with compile_result_before_generation == "tier2_failure";
-            # anything else means a fresh code block reaching T2 for the first time — including
-            # the lassi_fresh→T1 FAIL→T1 SC→T1 PASS→T2 path (compile_result_before_generation
-            # == "tier1_failure" on that final T1 SC iteration). "tier1_failure" must NOT suppress
-            # the reset: the T2 per-code counter must start at 0 regardless of prior T1 retries.
-            if compile_result_before_generation != "tier2_failure":
+            # Only reset on true fresh generation (compile_result_before_generation in ("", "energy_efficiency")).
+            # T1 SC retries ("tier1_failure") and T3 SC retries ("tier3_failure") must NOT reset this counter:
+            # each SC event on the same code consumes its own T2 per-code budget, preventing the
+            # 5×T2 per T1 SC cascade bug (Bug A in plan).
+            if compile_result_before_generation in ("", "energy_efficiency"):
                 self_correction_verify_counter_code = 0
-                tier2_exhausted = False  # defensive reset: ensure no stale exhausted state from prior iteration
+                tier2_exhausted = False  # reset only on true fresh generation, not on T1/T3 SC retries
             tier2_verdict = "SKIP"
             tier2_diagnostic = {}
             if run_tier2 and not zero_shot and passthrough_spec_output != "":
@@ -1706,6 +1832,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     # produce a new SC attempt, so it should not count as a self-correction event.
                     tier2_exhausted = True
                     compile_result = "energy_efficiency"  # drive fresh code generation (not Tier 2 retry)
+                    force_new_plan = True                 # force a new refactoring plan — same approach clearly failed
+                    bad_refactor_plans.append(refactoring_plan)  # record so plan LLM avoids repeating this strategy
             # Tier 2 PASS or SKIP: record in verification log and proceed to judge
             if run_tier2 and not zero_shot and "tier2_pass_count" in verification_log and tier2_verdict.startswith("PASS"):
                 verification_log["tier2_pass_count"] += 1
@@ -1713,8 +1841,9 @@ def auto_code_llmgeneration_pipeline(prompts,
             # --- TIER 3: Metamorphic Testing (after Tier 2 PASS/SKIP, before judge) ---
             # Applies only to LASSI-generated codes with active relations.
             # Zero-shot codes skip entirely (no Tier 2 passthrough baseline exists for them).
-            # Reset per-code Tier 3 counter on fresh code (mirrors Tier 2 counter reset logic).
-            if compile_result_before_generation != "tier3_failure":
+            # Reset per-code Tier 3 counter only on true fresh generation (mirrors Tier 2 counter reset fix).
+            # T1 SC ("tier1_failure") and T2 SC ("tier2_failure") must NOT reset this counter (Bug B fix).
+            if compile_result_before_generation in ("", "energy_efficiency"):
                 self_correction_tier3_counter_code = 0
             tier3_verdict = "SKIP"
             tier3_diagnostic = {}
@@ -1802,6 +1931,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier3_sc_count += 1             # Table 1 ★ exhaustion counts as a SC event (the last retry)
                     tier3_exhausted = True
                     compile_result = "energy_efficiency"  # drive fresh generation next iteration
+                    force_new_plan = True                 # force a new refactoring plan — T3 structural failure requires new approach
+                    bad_refactor_plans.append(refactoring_plan)  # record so plan LLM avoids repeating this strategy
 
             if run_tier3 and not zero_shot and "tier3_pass_count" in verification_log and tier3_verdict == "PASS":
                 verification_log["tier3_pass_count"] += 1
@@ -2045,7 +2176,8 @@ def auto_code_llmgeneration_pipeline(prompts,
             _override2_fired = False
 
             # Override 1 (false positive): Tier 2 budget exhausted → INVALID even if judge said VALID.
-            # Tier 2 already ran and failed self_correction_verify_counter_code_max times — code is wrong.
+            # T2 per-code limit exhausted: the code has a fundamental numerical equivalence flaw.
+            # T1 exhaustion uses a continue path (see T1 SC branch) and never reaches this override block.
             if tier2_exhausted and not zero_shot:
                 if judge_raw_verdict == "VALID":
                     verification_log["judge_discrepancies"].append({

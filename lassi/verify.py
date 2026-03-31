@@ -984,7 +984,7 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
     """
     Tier 3: Generate a metamorphic contract for the given source code.
 
-    Calls the LLM with the metamorphic catalog to select 2-4 applicable relations.
+    Calls the LLM with the metamorphic catalog to select 3 to 6 applicable relations.
     Returns a contract dict with a 'relations' key, or {} on failure.
 
     Called once in Stage 0 after SOURCE_verify is constructed (after Tier 1 + Tier 2
@@ -998,7 +998,7 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
     content_prompt = (
         "You are preparing GPU-accelerated scientific code for Tier 3 metamorphic testing "
         "as part of the LASSI-Verify verification framework.\n\n"
-        "Your task is to analyze the source code and select 2-4 applicable metamorphic "
+        "Your task is to analyze the source code and select 3 to 6 applicable metamorphic "
         "relations from the catalog below. Return your selection as a single JSON block.\n\n"
         "----\n\n"
     )
@@ -1427,7 +1427,7 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
     original_passthrough_stdout (the generated code's own Tier 2 passthrough output),
     then verifies the expected mathematical relationship.
 
-    Phase 1 implements: SCALING, SYMMETRY, CONSERVATION, MONOTONICITY.
+    Phase 1 implements: SCALING, SYMMETRY, CONSERVATION, MONOTONICITY, ADDITIVITY.
     PERMUTATIVE and ROTATION require element-level array access and are deferred to Phase 3.
 
     Uses allclose-style tolerance throughout:
@@ -1780,6 +1780,128 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
         return verdict, {
             "verdict": verdict, "relation_name": relation_name, "factor": None,
             "blocks_compared": len(residuals), "failures": failures, "summary": summary,
+        }
+
+    # ==========================================================================
+    # ADDITIVITY: check Z_stat ≈ Y_stat + offset for each statistic and sample.
+    # Complements SCALING (tests superposition, not homogeneity). Most applicable
+    # to reductions (mean, sum) and pointwise-identity-coefficient transforms where
+    # adding a constant c to all inputs shifts all output stats by exactly c.
+    # The contract's `factor` field holds the offset c (additive interpretation).
+    # ==========================================================================
+    elif relation_type == "ADDITIVITY":
+        meta_blocks = extract_meta_blocks(variant_stdout)
+        pass_blocks = extract_pass_blocks(original_passthrough_stdout)
+
+        if not meta_blocks and not pass_blocks:
+            return "SKIP", {
+                "verdict": "SKIP", "relation_name": relation_name, "factor": factor,
+                "blocks_compared": 0, "failures": [],
+                "summary": "SKIP: No METAMORPHIC or PASSTHROUGH blocks found in outputs.",
+            }
+
+        offset = factor   # contract `factor` field carries the additive offset for ADDITIVITY
+        failures = []
+        blocks_compared = 0
+
+        labels_to_check = obs_points if obs_points else list(meta_blocks.keys())
+        for label in labels_to_check:
+            if label not in meta_blocks:
+                failures.append({"label": label, "stat": "metamorphic_block_missing",
+                                  "detail": "METAMORPHIC block absent in variant output"})
+                continue
+            if label not in pass_blocks:
+                failures.append({"label": label, "stat": "passthrough_block_missing",
+                                  "detail": "PASSTHROUGH block absent in original output"})
+                continue
+
+            pass_bodies = pass_blocks[label]
+            meta_bodies = meta_blocks[label]
+            n_pairs = min(len(pass_bodies), len(meta_bodies))
+            multi = max(len(pass_bodies), len(meta_bodies)) > 1
+
+            for i in range(n_pairs):
+                failure_label = f"{label}#{i+1}" if multi else label
+                orig_stats = parse_stats(pass_bodies[i])
+                var_stats  = parse_stats(meta_bodies[i])
+                blocks_compared += 1
+
+                if orig_stats is None or var_stats is None:
+                    failures.append({"label": failure_label, "stat": "parse_error",
+                                      "detail": "Could not parse Statistics line in one or both blocks"})
+                    continue
+
+                if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
+                    continue  # NaN/Inf guard
+
+                # atol anchored to |Y_stat + offset| * rtol — the expected output magnitude
+                expected_max = abs(orig_stats.get('max', 0.0) + offset)
+                atol = expected_max * rtol
+
+                for stat_name, orig_val in orig_stats.items():
+                    var_val = var_stats.get(stat_name)
+                    if var_val is None:
+                        failures.append({"label": failure_label, "stat": stat_name,
+                                          "orig": orig_val, "variant": "(missing)"})
+                        continue
+                    expected_var = orig_val + offset
+                    if not both_finite(var_val, expected_var):
+                        continue
+                    if not allclose(var_val, expected_var, rtol, atol):
+                        failures.append({
+                            "label": failure_label, "stat": stat_name,
+                            "orig": orig_val, "expected_variant": expected_var,
+                            "actual_variant": var_val,
+                            "abs_err": abs(var_val - expected_var),
+                            "atol": atol, "rtol": rtol,
+                        })
+
+                # Element-wise sample comparison
+                orig_samples = parse_samples(pass_bodies[i])
+                var_samples  = parse_samples(meta_bodies[i])
+                for idx, (ov, vv) in enumerate(zip(orig_samples, var_samples)):
+                    if not both_finite(ov, vv):
+                        continue
+                    expected_vv = ov + offset
+                    if not both_finite(vv, expected_vv):
+                        continue
+                    if not allclose(vv, expected_vv, rtol, atol):
+                        failures.append({
+                            "label": failure_label, "stat": f"sample[{idx}]",
+                            "orig": ov, "expected_variant": expected_vv,
+                            "actual_variant": vv,
+                            "abs_err": abs(vv - expected_vv),
+                            "atol": atol, "rtol": rtol,
+                        })
+
+        if failures:
+            lines = []
+            for f in failures:
+                if "detail" in f:
+                    lines.append(f"  [{f['label']}] {f['stat']}: {f['detail']}")
+                else:
+                    lines.append(
+                        f"  [{f['label']}] {f['stat']}: "
+                        f"orig={f.get('orig')}, expected_variant={f.get('expected_variant')}, "
+                        f"actual_variant={f.get('actual_variant')}, "
+                        f"abs_err={f.get('abs_err', '?'):.3e}"
+                    )
+            summary = (
+                f"FAIL: {len(failures)} discrepancy(ies) across {blocks_compared} block(s). "
+                f"Relation: {relation_name} (offset={offset}, rtol={rtol:.1e})\n"
+                + "\n".join(lines)
+            )
+            verdict = "FAIL"
+        else:
+            summary = (
+                f"PASS: {blocks_compared} block(s) satisfied ADDITIVITY relation "
+                f"(offset={offset}, rtol={rtol:.1e}, atol=|Y+offset|_max*rtol per block)."
+            )
+            verdict = "PASS"
+
+        return verdict, {
+            "verdict": verdict, "relation_name": relation_name, "factor": offset,
+            "blocks_compared": blocks_compared, "failures": failures, "summary": summary,
         }
 
     # ==========================================================================

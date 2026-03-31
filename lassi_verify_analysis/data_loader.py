@@ -87,11 +87,21 @@ def load_data(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     if not os.path.isfile(trials_path):
         raise FileNotFoundError(f"Table 1 not found: {trials_path}")
 
-    df_trials = pd.read_csv(trials_path, dtype=str)
+    # index_col=False prevents pandas from auto-detecting extra data fields as
+    # index columns when the data has more columns than the header (e.g. when
+    # new columns were added to data rows before the header was updated).
+    # Extra trailing data fields are silently dropped; a ParserWarning is emitted
+    # but suppressed here — the user is responsible for keeping header in sync.
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", pd.errors.ParserWarning)
+        df_trials = pd.read_csv(trials_path, dtype=str, index_col=False)
     log.info("Loaded Table 1: %d rows from %s", len(df_trials), trials_path)
 
     if os.path.isfile(attempts_path):
-        df_attempts = pd.read_csv(attempts_path, dtype=str)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", pd.errors.ParserWarning)
+            df_attempts = pd.read_csv(attempts_path, dtype=str, index_col=False)
         log.info("Loaded Table 2: %d rows from %s", len(df_attempts), attempts_path)
     else:
         log.warning(

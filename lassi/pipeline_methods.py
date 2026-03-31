@@ -372,8 +372,19 @@ def generate_refactoring_plan(source_lang,
     code_to_refactor = code_to_refactor + metric_context
     refactoring_plan_instructions = refactoring_plan_instructions + code_to_refactor
     
+    # Override the system prompt persona for the plan step.
+    # The main system prompt is tuned for code generation ("You always surround your generated
+    # code with the three characters ```") which conflicts with plan-only output.  Appending a
+    # plan-specific clarification here keeps the LLM in analysis/planning mode without
+    # requiring a separate system prompt key or affecting any other pipeline step.
+    plan_system_prompt = (system_prompt +
+                          "\n\nFor this task you are producing a WRITTEN REFACTORING PLAN ONLY, not code. "
+                          "Do NOT output complete functions, kernels, or full implementations. "
+                          "You may include brief illustrative snippets (a few lines) to clarify a technique, "
+                          "but your primary response must be prose and bullet points.")
+
     # Generate the refactoring plan
-    refactoring_plan = "\n\n" + "[YOUR REFACTORING PLAN]\n" + lassi.llm_methods.llm_call("refactoring plan", llm_source, model, num_ctx, system_prompt, refactoring_plan_instructions, display_response, verifyprompt)
+    refactoring_plan = "\n\n" + "[YOUR REFACTORING PLAN]\n" + lassi.llm_methods.llm_call("refactoring plan", llm_source, model, num_ctx, plan_system_prompt, refactoring_plan_instructions, display_response, verifyprompt)
     
     # Append few-shot learning examples
     if few_shot_learning:
