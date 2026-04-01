@@ -2,7 +2,7 @@
 
 app:
   collection: HeCBench
-  name: bsearch
+  name: murmurhash3
   make_script: false
   build_script: false
 language:
@@ -31,5 +31,5 @@ pipeline:
   verifyprompt: true
 experiment:
   trial_number: 1
-  total_trials: 1
+  total_trials: 5
   label: ''
