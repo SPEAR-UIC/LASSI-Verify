@@ -154,6 +154,18 @@ ATTEMPT_LOG_FIELDNAMES = [
 ]
 
 
+def _flush_attempt_row(row, file_path):
+    """Incrementally write one attempt row to CSV immediately after it is built.
+    Called at every attempt_log_buffer.append() site so crash recovery preserves
+    the full trajectory. is_best_code will be False in incrementally-written rows;
+    the end-of-trial rewrite (mode='w') corrects it for the winning row."""
+    if file_path is None:
+        return
+    import csv as _csv
+    with open(file_path, "a", newline="") as _f:
+        _csv.DictWriter(_f, fieldnames=ATTEMPT_LOG_FIELDNAMES).writerow(row)
+
+
 def auto_code_llmgeneration_pipeline(prompts,
                                      this_llm_systemcode_prompt,
                                      this_llm_prompt,  # The refactoring instruction prompt
@@ -244,7 +256,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     self_correction_verify_counter = 0    # Global total Tier 2 + Tier 3 failures across all generated codes; pipeline-level safety net (Tier 1 excluded — it has its own per-code budget)
     self_correction_verify_counter_max = 45  # Safety net only; per-code limits are the primary stopping mechanism
     self_correction_verify_counter_code = 0   # Per-code Tier 2 self-correction attempts; resets on fresh code generation
-    self_correction_verify_counter_code_max = 5  # Per-code limit: if exhausted, mark INVALID and generate a fresh code
+    self_correction_verify_counter_code_max = 3  # Per-code limit: if exhausted, mark INVALID and generate a fresh code
     tier2_exhausted = False   # Set True when per-code Tier 2 budget is exhausted; forces INVALID after judge block
     # --- Tier 3: Metamorphic Testing state variables ---
     tier3_contract = {}             # Metamorphic contract from Stage 0 LLM call
@@ -296,6 +308,11 @@ def auto_code_llmgeneration_pipeline(prompts,
     # --- Table 2 per-attempt log state variables ---
     attempt_number = 0              # Attempt counter within the current code_block_index; resets on fresh generation
     attempt_log_buffer = []         # Accumulates Table 2 rows during the trial; written to CSV at trial end
+    # Initialize attempt log CSV immediately — incremental row writes follow at each append site.
+    if attempt_log_file_path:
+        with open(attempt_log_file_path, "w", newline="") as _alf_init:
+            import csv as _csv
+            _csv.DictWriter(_alf_init, fieldnames=ATTEMPT_LOG_FIELDNAMES).writeheader()
     compile_sc_count = 0            # Self-corrections triggered by compile errors
     execute_sc_count = 0            # Self-corrections triggered by execute errors
     tier1_sc_count = 0              # Self-corrections triggered by Tier 1 assertion failures
@@ -946,7 +963,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # Write final attempt record for the exhausted T1-failing code before continuing
                 _cb_idx = len(code_blocks) - 1
                 _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
-                attempt_log_buffer.append(_build_attempt_record(
+                _rec = _build_attempt_record(
                     app_name=file_name, trial_number=trial_number,
                     code_block_index=_cb_idx, attempt_number=attempt_number,
                     is_final_attempt=True, generation_type=current_generation_type,
@@ -959,7 +976,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                     tier3_verdict="SKIP", tier3_diagnostic={},
                     judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_t1_sc_budget",
-                ))
+                )
+                attempt_log_buffer.append(_rec)
+                _flush_attempt_row(_rec, attempt_log_file_path)
                 continue  # Skip remainder of loop body (T2, T3, judge, metrics, stagnation)
 
             _block_re = re.compile(
@@ -1497,7 +1516,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             # LASSI code compile error — emit intermediate Table 2 row before the retry.
             # code_block_index uses len(code_blocks) (intended next index; code never appended).
             _cb_idx = len(code_blocks)
-            attempt_log_buffer.append(_build_attempt_record(
+            _rec = _build_attempt_record(
                 app_name=file_name, trial_number=trial_number,
                 code_block_index=_cb_idx, attempt_number=attempt_number,
                 is_final_attempt=False, generation_type=current_generation_type,
@@ -1508,7 +1527,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                 tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                 tier3_verdict="SKIP", tier3_diagnostic={},
                 judge_verdict=None, final_verdict=None, override_applied=None,
-            ))
+            )
+            attempt_log_buffer.append(_rec)
+            _flush_attempt_row(_rec, attempt_log_file_path)
             current_sc_trigger = "compile_error"  # Table 2 ★ carry into next iteration's record
 
         if yes_execute and compile_result == "" and self_correction_counter <= self_correction_max:
@@ -1539,7 +1560,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     # LASSI code execute error — emit intermediate Table 2 row before the retry.
                     # code_block_index uses len(code_blocks) (intended next index; code never appended).
                     _cb_idx = len(code_blocks)
-                    attempt_log_buffer.append(_build_attempt_record(
+                    _rec = _build_attempt_record(
                         app_name=file_name, trial_number=trial_number,
                         code_block_index=_cb_idx, attempt_number=attempt_number,
                         is_final_attempt=False, generation_type=current_generation_type,
@@ -1550,7 +1571,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                         tier3_verdict="SKIP", tier3_diagnostic={},
                         judge_verdict=None, final_verdict=None, override_applied=None,
-                    ))
+                    )
+                    attempt_log_buffer.append(_rec)
+                    _flush_attempt_row(_rec, attempt_log_file_path)
                     current_sc_trigger = "execute_error"  # Table 2 ★ carry into next iteration's record
             else:
                 # We have a keeper! Save the generated code as a separate versioned copy
@@ -1586,7 +1609,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             # Emit final attempt record so cb_idx has a is_final_attempt=True row in Table 2.
             # This closes the last open code_block_index that ran out of SC retries before executing.
             _cb_idx = len(code_blocks)  # code never appended (execute never ran)
-            attempt_log_buffer.append(_build_attempt_record(
+            _rec = _build_attempt_record(
                 app_name=file_name, trial_number=trial_number,
                 code_block_index=_cb_idx, attempt_number=attempt_number,
                 is_final_attempt=True, generation_type=current_generation_type,
@@ -1597,7 +1620,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                 tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                 tier3_verdict="SKIP", tier3_diagnostic={},
                 judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_sc_budget",
-            ))
+            )
+            attempt_log_buffer.append(_rec)
+            _flush_attempt_row(_rec, attempt_log_file_path)
 
         # If the Baseline LLM generated code that failed to compile or execute,
         #  then we still need to save off zero'd data to maintain our history tracking used by LASSI
@@ -1686,7 +1711,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         # Table 2 ★ intermediate attempt row — log before pop overwrites this code_block_index
                         _cb_idx = len(code_blocks) - 1
                         _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
-                        attempt_log_buffer.append(_build_attempt_record(
+                        _rec = _build_attempt_record(
                             app_name=file_name, trial_number=trial_number,
                             code_block_index=_cb_idx, attempt_number=attempt_number,
                             is_final_attempt=False, generation_type=current_generation_type,
@@ -1699,7 +1724,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                             tier3_verdict="SKIP", tier3_diagnostic={},
                             judge_verdict=None, final_verdict=None, override_applied=None,
-                        ))
+                        )
+                        attempt_log_buffer.append(_rec)
+                        _flush_attempt_row(_rec, attempt_log_file_path)
                         current_sc_trigger = ("tier1_skip:sentinel_missing" if tier1_verdict == "SKIP"
                                               else ("tier1_fail:" + tier1_diagnostic["failing_labels"][0]
                                                     if tier1_diagnostic.get("failing_labels") else "tier1_fail:unknown"))
@@ -1718,7 +1745,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         # Table 2 ★ final attempt row — Tier 1 exhaustion is the final verdict; judge never runs
                         _cb_idx = len(code_blocks) - 1
                         _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
-                        attempt_log_buffer.append(_build_attempt_record(
+                        _rec = _build_attempt_record(
                             app_name=file_name, trial_number=trial_number,
                             code_block_index=_cb_idx, attempt_number=attempt_number,
                             is_final_attempt=True, generation_type=current_generation_type,
@@ -1731,7 +1758,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                             tier3_verdict="SKIP", tier3_diagnostic={},
                             judge_verdict=None, final_verdict="INVALID", override_applied="tier1_exhausted",
-                        ))
+                        )
+                        attempt_log_buffer.append(_rec)
+                        _flush_attempt_row(_rec, attempt_log_file_path)
                         current_sc_trigger = None  # exhausted → next iteration is fresh
                         valid_code_flag = "INVALID"
                         compile_result = "energy_efficiency"  # drive fresh generation next iteration
@@ -1784,7 +1813,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 self_correction_verify_counter += 1
                 self_correction_verify_counter_code += 1
 
-                if self_correction_verify_counter_code < self_correction_verify_counter_code_max:
+                if self_correction_verify_counter_code <= self_correction_verify_counter_code_max:
                     # Still within per-code budget: pop code, self-correct with Tier 2 feedback.
                     # Only increment SC counters when a new attempt will actually be generated.
                     # (Exhausted final attempts must NOT count — no new SC is produced.)
@@ -1797,7 +1826,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     _cb_idx = len(code_blocks) - 1
                     _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
                     _t2_instr = lassi.verify.extract_tier2_labels(code_blocks[-1])
-                    attempt_log_buffer.append(_build_attempt_record(
+                    _rec = _build_attempt_record(
                         app_name=file_name, trial_number=trial_number,
                         code_block_index=_cb_idx, attempt_number=attempt_number,
                         is_final_attempt=False, generation_type=current_generation_type,
@@ -1811,7 +1840,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_diagnostic=tier2_diagnostic,
                         tier3_verdict="SKIP", tier3_diagnostic={},
                         judge_verdict=None, final_verdict=None, override_applied=None,
-                    ))
+                    )
+                    attempt_log_buffer.append(_rec)
+                    _flush_attempt_row(_rec, attempt_log_file_path)
                     _t2_fail_label = (tier2_diagnostic.get("failures", [{}])[0].get("label", "unknown")
                                       if tier2_diagnostic.get("failures") else "unknown")
                     current_sc_trigger = f"tier2_fail:{_t2_fail_label}"
@@ -1901,7 +1932,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     _cb_idx = len(code_blocks) - 1
                     _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
                     _t2_instr = lassi.verify.extract_tier2_labels(code_blocks[-1])
-                    attempt_log_buffer.append(_build_attempt_record(
+                    _rec = _build_attempt_record(
                         app_name=file_name, trial_number=trial_number,
                         code_block_index=_cb_idx, attempt_number=attempt_number,
                         is_final_attempt=False, generation_type=current_generation_type,
@@ -1915,7 +1946,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_diagnostic=tier2_diagnostic,
                         tier3_verdict=tier3_verdict, tier3_diagnostic=tier3_diagnostic,
                         judge_verdict=None, final_verdict=None, override_applied=None,
-                    ))
+                    )
+                    attempt_log_buffer.append(_rec)
+                    _flush_attempt_row(_rec, attempt_log_file_path)
                     current_sc_trigger = f"tier3_fail:{tier3_diagnostic.get('relation_name', 'unknown')}"
                     code_version -= 1  # roll back: pop removes the code so code_version must stay in sync
                     code_blocks.pop()
@@ -2251,7 +2284,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 _cb_idx = len(code_blocks) - 1
                 _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
                 _t2_instr = lassi.verify.extract_tier2_labels(code_blocks[-1])
-                attempt_log_buffer.append(_build_attempt_record(
+                _rec = _build_attempt_record(
                     app_name=file_name, trial_number=trial_number,
                     code_block_index=_cb_idx, attempt_number=attempt_number,
                     is_final_attempt=True, generation_type=current_generation_type,
@@ -2266,14 +2299,16 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier3_verdict=tier3_verdict, tier3_diagnostic=tier3_diagnostic,
                     judge_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
                     override_applied=_override_applied,
-                ))
+                )
+                attempt_log_buffer.append(_rec)
+                _flush_attempt_row(_rec, attempt_log_file_path)
                 current_sc_trigger = None  # reset; next fresh generation starts clean
             elif zero_shot:
                 # Table 2 ★ zero-shot attempt row: tier fields carry the empirical verify verdicts
                 # (zs_tier1/2/3_verdict) from the separate T1/T2 compile+execute runs, or "SKIP"
                 # if verify_zeroshot=False. The zero-shot code has no inline instrumentation so
                 # tier{1,2}_instrumented_labels are empty strings.
-                attempt_log_buffer.append(_build_attempt_record(
+                _rec = _build_attempt_record(
                     app_name=file_name, trial_number=trial_number,
                     code_block_index=len(code_blocks) - 1, attempt_number=1,
                     is_final_attempt=True, generation_type="zeroshot",
@@ -2288,7 +2323,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier3_verdict=zs_tier3_verdict, tier3_diagnostic={},
                     judge_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
                     override_applied="none",
-                ))
+                )
+                attempt_log_buffer.append(_rec)
+                _flush_attempt_row(_rec, attempt_log_file_path)
 
             # valid_code_flag can be: (1) "VALID", (2) "INVALID", or (3) "NONE"
             if not zero_shot:
@@ -2983,11 +3020,12 @@ def auto_code_llmgeneration_pipeline(prompts,
                 row["is_best_code"] = True
                 break  # exactly one row should receive this flag
         if attempt_log_file_path:
-            with open(attempt_log_file_path, "a", newline="") as _alf:
+            with open(attempt_log_file_path, "w", newline="") as _alf:
                 import csv as _csv
                 _writer = _csv.DictWriter(_alf, fieldnames=ATTEMPT_LOG_FIELDNAMES)
+                _writer.writeheader()
                 _writer.writerows(attempt_log_buffer)
-            print(f"\nAttempt log: {len(attempt_log_buffer)} rows written to {attempt_log_file_path}")
+            print(f"\nAttempt log: {len(attempt_log_buffer)} rows finalized (is_best_code corrected) in {attempt_log_file_path}")
 
     # --- BEST CLEAN RUN: uninstrumented performance of best LASSI code ---
     # lassiee_clean_* variables set in the post-loop block above.
