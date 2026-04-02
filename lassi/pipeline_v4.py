@@ -1096,7 +1096,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                     gen_v  = f.get("generated", 0.0)
                     abs_e  = f.get("abs_err", 0.0)
                     rel_pct = f"{(abs_e / (abs(spec_v) + 1e-30)) * 100:.2f}%" if isinstance(spec_v, (int, float)) else "?"
-                    _table_lines.append(f"{label:<22} | {f.get('stat','?'):<10} | {spec_v:<18.6g} | {gen_v:<19.6g} | {rel_pct}")
+                    _sv = f"{spec_v:<18.6g}" if isinstance(spec_v, (int, float)) else f"{str(spec_v):<18}"
+                    _gv = f"{gen_v:<19.6g}" if isinstance(gen_v,  (int, float)) else f"{str(gen_v):<19}"
+                    _table_lines.append(f"{label:<22} | {f.get('stat','?'):<10} | {_sv} | {_gv} | {rel_pct}")
                 _failure_table_str = "\n".join(_table_lines)
 
                 # Add pattern hint if relative error is consistent across failures
