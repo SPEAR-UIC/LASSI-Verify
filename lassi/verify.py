@@ -1085,6 +1085,62 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
                 rel["source_status"] = None
             n = len(contract.get("relations", []))
             print(f"\n----- Tier 3 contract generated: {n} relation(s) selected -----")
+
+            # --- Post-parse validation: correct/drop relations with bad observation_points ---
+            # The LLM is told to reuse exact PASSTHROUGH labels, but sometimes hallucinates.
+            # check_metamorphic_relation() does exact-string matching, so any mismatch silently
+            # disables a relation. Here we auto-correct obvious mismatches and drop the rest.
+            if _pt_labels and contract.get("relations"):
+                _pt_label_set = set(_pt_labels)
+
+                def _best_label_match(bad_label, candidates):
+                    """Return the best-matching candidate label, or None if ambiguous/poor fit.
+                    Priority:
+                      1. Single candidate → always substitute (unambiguous).
+                      2. Token-overlap (split on '_'): pick candidate with highest fraction of
+                         bad_label tokens present; require ≥ 50% overlap to auto-correct.
+                    """
+                    if len(candidates) == 1:
+                        return next(iter(candidates))
+                    bad_tokens = set(bad_label.split('_'))
+                    best, best_score = None, 0
+                    for cand in candidates:
+                        overlap = len(bad_tokens & set(cand.split('_'))) / max(len(bad_tokens), 1)
+                        if overlap > best_score:
+                            best_score, best = overlap, cand
+                    return best if best_score >= 0.5 else None
+
+                valid_relations = []
+                for rel in contract["relations"]:
+                    rel_name = rel.get("name", "unknown")
+                    obs = rel.get("observation_points", [])
+                    corrected_obs = []
+                    drop = False
+                    for op in obs:
+                        if op in _pt_label_set:
+                            corrected_obs.append(op)
+                        else:
+                            fix = _best_label_match(op, _pt_label_set)
+                            if fix:
+                                print(f"[Tier 3 contract] Auto-corrected observation_point "
+                                      f"for '{rel_name}': '{op}' → '{fix}'")
+                                corrected_obs.append(fix)
+                            else:
+                                print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
+                                      f"observation_point '{op}' not in source PASSTHROUGH "
+                                      f"labels {sorted(_pt_label_set)} and no close match found.")
+                                drop = True
+                                break
+                    if not drop:
+                        rel["observation_points"] = corrected_obs
+                        valid_relations.append(rel)
+
+                n_dropped = len(contract["relations"]) - len(valid_relations)
+                if n_dropped:
+                    print(f"[Tier 3 contract] {n_dropped} relation(s) dropped due to "
+                          f"unresolvable observation_points; {len(valid_relations)} remain.")
+                contract["relations"] = valid_relations
+
         except (json.JSONDecodeError, ValueError) as e:
             print(f"\n----- Tier 3 contract JSON parse failed: {e} — Tier 3 disabled -----")
             contract = {}

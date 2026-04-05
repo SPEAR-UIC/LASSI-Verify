@@ -30,6 +30,6 @@ pipeline:
   vary_llm_temp: true
   verifyprompt: true
 experiment:
-  trial_number: 7
+  trial_number: 4
   total_trials: 10
   label: ''

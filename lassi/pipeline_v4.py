@@ -154,17 +154,6 @@ ATTEMPT_LOG_FIELDNAMES = [
 ]
 
 
-def _flush_attempt_row(row, file_path):
-    """Incrementally write one attempt row to CSV immediately after it is built.
-    Called at every attempt_log_buffer.append() site so crash recovery preserves
-    the full trajectory. is_best_code will be False in incrementally-written rows;
-    the end-of-trial rewrite (mode='w') corrects it for the winning row."""
-    if file_path is None:
-        return
-    import csv as _csv
-    with open(file_path, "a", newline="") as _f:
-        _csv.DictWriter(_f, fieldnames=ATTEMPT_LOG_FIELDNAMES).writerow(row)
-
 
 def auto_code_llmgeneration_pipeline(prompts,
                                      this_llm_systemcode_prompt,
@@ -307,12 +296,7 @@ def auto_code_llmgeneration_pipeline(prompts,
     # iteration_log[version] = {"self_correction": 0, "energy_refactor": 0, "LLM_temperature": 0}
     # --- Table 2 per-attempt log state variables ---
     attempt_number = 0              # Attempt counter within the current code_block_index; resets on fresh generation
-    attempt_log_buffer = []         # Accumulates Table 2 rows during the trial; written to CSV at trial end
-    # Initialize attempt log CSV immediately — incremental row writes follow at each append site.
-    if attempt_log_file_path:
-        with open(attempt_log_file_path, "w", newline="") as _alf_init:
-            import csv as _csv
-            _csv.DictWriter(_alf_init, fieldnames=ATTEMPT_LOG_FIELDNAMES).writeheader()
+    attempt_log_buffer = []         # Accumulates Table 2 rows during the trial; appended to CSV at trial end
     compile_sc_count = 0            # Self-corrections triggered by compile errors
     execute_sc_count = 0            # Self-corrections triggered by execute errors
     tier1_sc_count = 0              # Self-corrections triggered by Tier 1 assertion failures
@@ -978,7 +962,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                     judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_t1_sc_budget",
                 )
                 attempt_log_buffer.append(_rec)
-                _flush_attempt_row(_rec, attempt_log_file_path)
                 continue  # Skip remainder of loop body (T2, T3, judge, metrics, stagnation)
 
             _block_re = re.compile(
@@ -1531,7 +1514,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                 judge_verdict=None, final_verdict=None, override_applied=None,
             )
             attempt_log_buffer.append(_rec)
-            _flush_attempt_row(_rec, attempt_log_file_path)
             current_sc_trigger = "compile_error"  # Table 2 ★ carry into next iteration's record
 
         if yes_execute and compile_result == "" and self_correction_counter <= self_correction_max:
@@ -1575,7 +1557,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                         judge_verdict=None, final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
-                    _flush_attempt_row(_rec, attempt_log_file_path)
                     current_sc_trigger = "execute_error"  # Table 2 ★ carry into next iteration's record
             else:
                 # We have a keeper! Save the generated code as a separate versioned copy
@@ -1624,7 +1605,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                 judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_sc_budget",
             )
             attempt_log_buffer.append(_rec)
-            _flush_attempt_row(_rec, attempt_log_file_path)
 
         # If the Baseline LLM generated code that failed to compile or execute,
         #  then we still need to save off zero'd data to maintain our history tracking used by LASSI
@@ -1728,7 +1708,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                             judge_verdict=None, final_verdict=None, override_applied=None,
                         )
                         attempt_log_buffer.append(_rec)
-                        _flush_attempt_row(_rec, attempt_log_file_path)
                         current_sc_trigger = ("tier1_skip:sentinel_missing" if tier1_verdict == "SKIP"
                                               else ("tier1_fail:" + tier1_diagnostic["failing_labels"][0]
                                                     if tier1_diagnostic.get("failing_labels") else "tier1_fail:unknown"))
@@ -1762,7 +1741,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                             judge_verdict=None, final_verdict="INVALID", override_applied="tier1_exhausted",
                         )
                         attempt_log_buffer.append(_rec)
-                        _flush_attempt_row(_rec, attempt_log_file_path)
                         current_sc_trigger = None  # exhausted → next iteration is fresh
                         valid_code_flag = "INVALID"
                         compile_result = "energy_efficiency"  # drive fresh generation next iteration
@@ -1844,7 +1822,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                         judge_verdict=None, final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
-                    _flush_attempt_row(_rec, attempt_log_file_path)
                     _t2_fail_label = (tier2_diagnostic.get("failures", [{}])[0].get("label", "unknown")
                                       if tier2_diagnostic.get("failures") else "unknown")
                     current_sc_trigger = f"tier2_fail:{_t2_fail_label}"
@@ -1950,7 +1927,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                         judge_verdict=None, final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
-                    _flush_attempt_row(_rec, attempt_log_file_path)
                     current_sc_trigger = f"tier3_fail:{tier3_diagnostic.get('relation_name', 'unknown')}"
                     code_version -= 1  # roll back: pop removes the code so code_version must stay in sync
                     code_blocks.pop()
@@ -2303,7 +2279,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                     override_applied=_override_applied,
                 )
                 attempt_log_buffer.append(_rec)
-                _flush_attempt_row(_rec, attempt_log_file_path)
                 current_sc_trigger = None  # reset; next fresh generation starts clean
             elif zero_shot:
                 # Table 2 ★ zero-shot attempt row: tier fields carry the empirical verify verdicts
@@ -2327,7 +2302,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                     override_applied="none",
                 )
                 attempt_log_buffer.append(_rec)
-                _flush_attempt_row(_rec, attempt_log_file_path)
 
             # valid_code_flag can be: (1) "VALID", (2) "INVALID", or (3) "NONE"
             if not zero_shot:
@@ -3022,10 +2996,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                 row["is_best_code"] = True
                 break  # exactly one row should receive this flag
         if attempt_log_file_path:
-            with open(attempt_log_file_path, "w", newline="") as _alf:
+            with open(attempt_log_file_path, "a", newline="") as _alf:
                 import csv as _csv
                 _writer = _csv.DictWriter(_alf, fieldnames=ATTEMPT_LOG_FIELDNAMES)
-                _writer.writeheader()
                 _writer.writerows(attempt_log_buffer)
             print(f"\nAttempt log: {len(attempt_log_buffer)} rows finalized (is_best_code corrected) in {attempt_log_file_path}")
 
