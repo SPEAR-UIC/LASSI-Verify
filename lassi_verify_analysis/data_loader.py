@@ -71,14 +71,15 @@ def load_data(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     Warns (via logging) on missing optional columns or missing Table 2 file.
     """
-    # Support both bare filenames and the result_-prefixed names the pipeline writes.
+    # Support bare filenames and common pipeline-written prefixes (result_, all-result_).
     def _resolve(name: str) -> str:
         bare = os.path.join(data_dir, name)
-        prefixed = os.path.join(data_dir, "result_" + name)
         if os.path.isfile(bare):
             return bare
-        if os.path.isfile(prefixed):
-            return prefixed
+        for prefix in ("result_", "all-result_"):
+            candidate = os.path.join(data_dir, prefix + name)
+            if os.path.isfile(candidate):
+                return candidate
         return bare  # let the caller raise FileNotFoundError on the bare path
 
     trials_path = _resolve("lassi-verify_pipeline_data.csv")

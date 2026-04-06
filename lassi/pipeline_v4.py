@@ -536,6 +536,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         print(color.RED + color.BOLD +
               "\n[ABORT] Tier 1: code_insert_asserts() produced no assertion blocks in SOURCE_verify. "
               "Cannot run LASSI-Verify without Tier 1 coverage. Exiting pipeline." + color.END)
+        experiment_data["stage0_abort_reason"] = "no_t1_assertions"
         return False
 
     # --- Tier 2: Insert passthrough data dump blocks into the already-asserted code ---
@@ -557,6 +558,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             print(color.RED + color.BOLD +
                   "\n[ABORT] Tier 2: code_insert_passthrough() returned empty — cannot run "
                   "LASSI-Verify without Tier 2 coverage. Exiting pipeline." + color.END)
+            experiment_data["stage0_abort_reason"] = "no_t2_passthrough"
             return False
 
     # Write the instrumented source to disk so test_source_code compiles and runs it —
@@ -590,6 +592,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         print(color.RED + color.BOLD + "\n[STAGE 0 ABORT] " + _abort_msg +
               " Aborting trial." + color.END)
         verification_log["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
+        experiment_data["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
         _abort_monitor_log_path = os.path.join(experiment_data_directory,
             "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
         sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
@@ -628,6 +631,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                   color.END)
             print("Failing assertions:", _t1_diagnostic)
             verification_log["stage0_abort_reason"] = f"tier1_fail: {_t1_diagnostic}"
+            experiment_data["stage0_abort_reason"] = "tier1_assertion_fail"
             _abort_monitor_log_path = os.path.join(experiment_data_directory,
                 "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
             sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
@@ -657,6 +661,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                   color.END)
             print("Affected labels:", _nan_labels)
             verification_log["stage0_abort_reason"] = f"tier2_nan_spec: {_nan_labels}"
+            experiment_data["stage0_abort_reason"] = "tier2_nan_passthrough_spec"
             _abort_monitor_log_path = os.path.join(experiment_data_directory,
                 "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
             sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
@@ -693,6 +698,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     print(color.RED + color.BOLD +
                           f"\n[ABORT] Tier 3 contract generation failed after {TIER3_CONTRACT_MAX_ATTEMPTS} attempts. "
                           f"Cannot run LASSI-Verify without Tier 3 coverage. Exiting pipeline." + color.END)
+                    experiment_data["stage0_abort_reason"] = "no_t3_contract"
                     return False
                 continue  # retry without feedback (no relations to report)
 
@@ -748,6 +754,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                       f"Cannot run LASSI-Verify without Tier 3 coverage. Exiting pipeline." + color.END)
                 verification_log["tier3_contract"] = tier3_contract
                 verification_log["tier3_active_relations"] = []
+                experiment_data["stage0_abort_reason"] = "no_t3_active_relations"
                 return False
 
         verification_log["tier3_contract"] = tier3_contract
