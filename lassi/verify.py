@@ -73,12 +73,28 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
           buffer written by a GPU kernel (`<<<...>>>`) between the most recent H→D copy of this
           buffer and this passthrough location?" If NO — you are capturing input, not output. Find
           a later location where the kernel has written to the buffer.
-        - REQUIRED if the code contains an outer loop over configurations or parameters (e.g.,
+        - REQUIRED if the code contains an outer loop over **configurations or parameters** (e.g.,
           different segment sizes, grid levels, tile sizes, time steps): place the passthrough
           block INSIDE that loop so every configuration is captured independently.
           Use the SAME label each iteration — the LASSI-Verify checker compares loop iterations
           positionally and explicitly supports repeated labels. Do NOT hoist to outside the loop
           and capture only a single representative iteration.
+
+          ⚠️ **BENCHMARK REPEAT LOOP — DO NOT INSTRUMENT INSIDE IT:** Many GPU benchmark codes
+          wrap the entire computation in a pure timing/repeat loop (e.g.,
+          `for (int i = 0; i < repeat; ++i)` or `for (unsigned int c0 = 0; c0 < repeat; ++c0)`).
+          This is NOT a configuration or parameter loop — it repeats the SAME computation
+          unchanged for timing accuracy. Do NOT place passthrough blocks inside such a loop.
+          Blocks placed there fire once per repeat iteration (often 100–200×), producing a
+          massive stdout dump and making the spec comparison unreliable. More critically, any
+          refactored code that hoists allocations or reorganizes work outside the loop will
+          produce different per-iteration buffer snapshots even when the final result is
+          identical — causing guaranteed false Tier 2 failures for every valid optimization.
+          **How to identify a benchmark repeat loop:** it resets accumulators or counters at
+          the top of each iteration (e.g., `cudaMemset(..., 0, ...)`) and produces the same
+          output state at the end of each iteration. Place passthrough blocks AFTER this loop
+          closes, capturing the stable final output state once per execution.
+
         - OPTIONAL: additional intermediate checkpoints after major kernels or phase boundaries
         - Insert AFTER cudaDeviceSynchronize() (or equivalent) and AFTER D→H copy where applicable
         - Insert BEFORE any memory deallocations (cudaFree, hipFree, free)
@@ -201,7 +217,13 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
 
     content_prompt = content_prompt + "\n\n----\n\n"
     if code_description:
-        content_prompt = content_prompt + " [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description + "\n[/END SOURCE CODE DESCRIPTION AND ANALYSIS]\n\n"
+        content_prompt = content_prompt + (
+            "**SOURCE CODE DESCRIPTION** — Read this before selecting observation points.\n"
+            "Use it to determine whether the code has a benchmark repeat loop (timing loop)\n"
+            "vs. a configuration/parameter loop, so you can apply the correct placement rule\n"
+            "from STEP 2 above.\n\n"
+            " [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description + "\n[/END SOURCE CODE DESCRIPTION AND ANALYSIS]\n\n"
+        )
     if code_analysis and code_analysis != "None":
         content_prompt = content_prompt + " [BEGIN CODE ANALYSIS]\n" + code_analysis + "\n[/END CODE ANALYSIS]\n\n"
     content_prompt = content_prompt + " [BEGIN SOURCE CODE]\n" + source_code + "\n[/END SOURCE CODE]\n"
@@ -408,8 +430,17 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     2. **Place assertions at key observation points:**
        - At function entry: validate pointers, dimensions, and configuration parameters
        - Before host-to-device transfers (cudaMemcpy H→D): validate input data
-       - After device-to-host transfers (cudaMemcpy D→H): validate output data
+       - After device-to-host transfers (cudaMemcpy D→H): validate output data — BUT ONLY if that D→H transfer is OUTSIDE any repeat/timing/compute loop (see loop warning below)
        - At function exit: validate final result properties
+
+       ⚠️ **BENCHMARK REPEAT LOOP WARNING:** Many GPU benchmark codes wrap the entire
+       computation in an outer timing or repeat loop (e.g., `for (int i = 0; i < repeat; ++i)`
+       or `for (auto isoValue : isoValues)`). D→H transfers and kernel launches **inside**
+       such a loop are NOT valid assertion points. Assertions placed there fire once per
+       repeat iteration (often 100–200×), flooding stdout with repeated PASS/FAIL lines
+       and causing the pipeline to count each occurrence as a separate assertion event.
+       This is a critical failure mode. Only place assertions BEFORE the outer loop opens
+       or AFTER it closes completely.
 
     3. **Surround all assertion blocks with protective comments** — these are CRITICAL:
        they ensure assertions survive through subsequent LLM-driven transformation steps
@@ -462,25 +493,49 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
        computational characteristics — prioritize foundational invariants (Layer 1), then add
        domain-specific ones (Layer 2) where applicable. Avoid over-instrumentation.
 
-    **Your Analysis Approach:**
+       **Plausibility range checks — use only source-defined constants:** When writing a
+       range or bound check (e.g., `count <= MAX`), the bound MUST come from a named constant
+       or expression already present in the source code (e.g., `blockNum`, `N`, `repeat`,
+       `n * m`). Do NOT invent arithmetic bounds by reasoning about expected output magnitudes
+       or intermediate value ratios — such invented bounds may not hold for the actual code
+       and will cause false failures on the unmodified source. When in doubt, use a structural
+       check (`> 0`, `!= nullptr`, `std::isfinite()`) rather than an invented range.
 
-    Rather than following a fixed procedure, analyze the code by answering these questions:
+    **Your Analysis Approach (follow these steps in order):**
 
+    **Step 1 — Map the loop structure BEFORE selecting any assertion points.**
+    Read the source code description (provided at the end) and the source code itself.
+    Identify every `for`/`while` loop in `main()` (or the top-level host function). For each
+    loop, note its purpose:
+    - **Outer timing/benchmark repeat loop** (e.g., `for (int i = 0; i < repeat; ++i)`) —
+      repeats the ENTIRE computation for timing purposes. ALL kernel launches, cudaMemcpy
+      D→H calls, and intermediate state inside this loop are INSIDE the loop. Assertions
+      placed there fire once per repeat, not once per execution. FORBIDDEN zone.
+    - **Outer configuration/parameter loop** (e.g., iterating over grid levels, tile sizes,
+      isoValues) — similarly, assertions placed inside fire once per parameter value. FORBIDDEN.
+    - **Inner compute loops** (solver iterations, reduction loops) — FORBIDDEN.
+
+    After this analysis, explicitly identify the two safe zones:
+    - **(A) Pre-loop setup:** code before the first outer loop opens (memory allocation,
+      pointer validation, configuration validation)
+    - **(B) Post-loop reporting:** code after the outer loop closes (result printing,
+      final D→H copies for reporting, validation against expected output)
+    All assertions MUST be placed in zone (A) or zone (B) only.
+
+    **Step 2 — Answer these questions about the computation:**
     - **What is the computational domain?** (e.g., linear algebra, CFD, molecular dynamics,
       iterative solver, stochastic methods) — this determines which domain invariants apply
-
     - **What properties must be preserved across ANY correct transformation?**
       - Input constraints: pointer validity, array bounds, value ranges, numerical validity
-      - Output constraints: correctness bounds, conservation laws, physical limits
-      - Mathematical laws: symmetry, conservation, monotonicity — but only where the
-        original problem requires them, not as assumptions about this implementation
-
-    - **Where are the natural observation points?** — function entry/exit and memory transfer
-      boundaries are the primary candidates; avoid checking intermediate kernel state
-
+      - Output constraints: structural correctness (non-null, non-negative count), finiteness
+      - Mathematical laws: only where the original problem requires them
     - **Which assertions are truly transformation-invariant?** — an assertion is valid only if
       it would hold in any correct implementation of this computation, not just this specific
       parallelization or optimization. When in doubt, do not insert the assertion.
+
+    **Step 3 — Select assertions only from the safe zones identified in Step 1.**
+    Do NOT place any assertion at a location that falls within the FORBIDDEN zones, even
+    if a D→H transfer appears at that location. Use only the pre-loop and post-loop regions.
 
     **Preserve all original code:**
     - Do not modify kernels, algorithmic logic, memory allocations, or performance optimizations
@@ -525,7 +580,13 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     """
 
     if code_description:
-        content_prompt = content_prompt + " [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description + "\n[/END SOURCE CODE DESCRIPTION AND ANALYSIS]\n"
+        content_prompt = content_prompt + (
+            "\n**SOURCE CODE DESCRIPTION** — Read this carefully before selecting assertion points.\n"
+            "Use it to identify the algorithm's outer loop structure (especially any timing/repeat\n"
+            "loop that wraps the full computation) and the pre-loop / post-loop safe zones for\n"
+            "assertion placement, as described in Step 1 of the Analysis Approach above.\n\n"
+            " [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description + "\n[/END SOURCE CODE DESCRIPTION AND ANALYSIS]\n"
+        )
     if code_analysis and code_analysis != "None":
         content_prompt = content_prompt + " [BEGIN CODE ANALYSIS]\n" + code_analysis + "\n[/END CODE ANALYSIS]"
     content_prompt = content_prompt + " [BEGIN SOURCE CODE]\n" + source_code + "\n[/END SOURCE CODE]"

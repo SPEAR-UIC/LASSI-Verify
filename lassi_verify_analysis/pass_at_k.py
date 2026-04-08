@@ -518,19 +518,24 @@ def _write_zeroshot_table(results: dict, output_dir: str) -> None:
 
 
 def _write_summary_figure(results: dict, output_dir: str) -> None:
-    """Write pass_at_k_summary.png/pdf — grouped bar chart, all four variants."""
+    """Write pass_at_k_summary.png/pdf — grouped bar chart, three variants.
+
+    V2 (Judge LASSI) is excluded from the figure: its values are trivially equal
+    to V1 (Verified LASSI) because tiers always override the judge — plotting both
+    would be misleading.  The meaningful comparison is LASSI three-tier vs. the
+    judge-only zero-shot baseline.
+    """
     variants = [
-        ("verified_lassi", "Verified (LASSI)", "#1f4e79"),    # dark blue
-        ("judge_lassi", "Judge (LASSI)", "#2e75b6"),          # medium blue
-        ("judge_zeroshot", "Judge (Zero-shot)", "#92b4d1"),   # light blue
-        ("verified_zeroshot", "Verified (Zero-shot)", "#c9daea"),  # very light blue
+        ("verified_lassi",    "Verified (LASSI)",       "#1f4e79"),  # dark blue
+        ("judge_zeroshot",    "Judge (Zero-shot)",      "#e07b39"),  # orange
+        ("verified_zeroshot", "Verified (Zero-shot)",   "#f4b183"),  # light orange
     ]
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
     n_k = len(K_VALUES)
     n_variants = len(variants)
-    bar_width = 0.18
+    bar_width = 0.22
     group_gap = 0.08
     group_width = n_variants * bar_width + group_gap
     x_positions = np.arange(n_k) * group_width
