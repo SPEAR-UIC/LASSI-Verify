@@ -120,35 +120,18 @@ def compute_verified_lassi_pass_vector(df_kernel: pd.DataFrame) -> np.ndarray:
     """Variant 1: verified-pass@k (LASSI) — the headline metric.
 
     A trial passes iff ALL of:
-    1. lassiee_valid == "VALID"
-    2. lassiee_version >= 3 (not a SOURCE_verify fallback; 3+ = LASSI codes)
-    3. Runtime improved vs. source:
-       - Primary: if lassiee_clean_status == "success", use lassiee_clean_runtime_diff < 0
-       - Fallback: otherwise, use lassiee_runtime_diff < 0
-       - If both are NaN, the trial fails the runtime criterion.
+    1. lassiee_valid == "VALID"  (compiled + executed + all three tiers passed)
+    2. lassiee_version >= 3 (not a SOURCE_verify fallback; 3+ = LASSI-generated codes)
+
+    Runtime improvement is intentionally excluded: pass@k measures functional
+    correctness only.  Performance (runtime-reduction@k) is a separate metric.
 
     Returns:
         Boolean numpy array of shape (n_trials,).
     """
     valid = df_kernel["lassiee_valid"].eq("VALID")
     version_ok = df_kernel["lassiee_version"].ge(3)
-
-    clean_available = df_kernel["lassiee_clean_status"].eq("SUCCESS")
-    runtime_improved = pd.Series(False, index=df_kernel.index)
-
-    # Primary: use clean runtime diff when clean run succeeded
-    primary_mask = clean_available
-    primary_diff = pd.to_numeric(df_kernel.get("lassiee_clean_runtime_diff"), errors="coerce")
-    runtime_improved = runtime_improved.where(~primary_mask, primary_diff.lt(0))
-
-    # Fallback: use instrumented runtime diff when clean run unavailable
-    fallback_mask = ~clean_available
-    fallback_diff = pd.to_numeric(df_kernel.get("lassiee_runtime_diff"), errors="coerce")
-    runtime_improved = runtime_improved.where(~fallback_mask, fallback_diff.lt(0))
-
-    # NaN diffs (both unavailable) → False (handled by .lt(0) returning False for NaN)
-
-    return (valid & version_ok & runtime_improved).values
+    return (valid & version_ok).values
 
 
 def compute_judge_lassi_pass_vector(
@@ -162,7 +145,9 @@ def compute_judge_lassi_pass_vector(
     A trial passes iff:
     1. There is an is_best_code==True row in Table 2 for this trial
     2. That row's judge_verdict == "VALID" (pre-override judge verdict)
-    3. Runtime improved vs. source (same logic as Variant 1)
+
+    Runtime improvement is intentionally excluded: pass@k measures functional
+    correctness only.  Performance is a separate metric.
 
     Args:
         df_kernel: Table 1 rows for this kernel.
@@ -199,23 +184,7 @@ def compute_judge_lassi_pass_vector(
     for _, row in bc_kernel.iterrows():
         key = (row.get("app_name"), row.get("trial_number"))
         judge = row.get("judge_verdict")
-
-        judge_valid = str(judge).strip().upper() == "VALID"
-        if not judge_valid:
-            pass_map[key] = False
-            continue
-
-        # Runtime improvement check (same fallback logic as Variant 1)
-        clean_ok = str(row.get("lassiee_clean_status", "")).strip().upper() == "SUCCESS"
-        if clean_ok:
-            rt_diff = pd.to_numeric(row.get("lassiee_clean_runtime_diff"), errors="coerce")
-        else:
-            rt_diff = pd.to_numeric(row.get("lassiee_runtime_diff"), errors="coerce")
-
-        if pd.isna(rt_diff):
-            pass_map[key] = False
-        else:
-            pass_map[key] = bool(rt_diff < 0)
+        pass_map[key] = str(judge).strip().upper() == "VALID"
 
     # Map back to the trial order in df_kernel using the compound key
     compound_keys = list(zip(df_kernel["app_name"], df_kernel["trial_number"]))
@@ -254,17 +223,22 @@ def compute_verified_zeroshot_pass_vector(
 ) -> Optional[np.ndarray]:
     """Variant 4: verified-pass@k (zero-shot).
 
-    A trial passes iff base_llm_verified_valid == True.
-    Returns None if the column is missing (caller should skip this variant).
+    A trial passes iff zeroshot_empirical_verdict == "PASS" — meaning the
+    zero-shot code compiled, executed, and passed all three verification tiers
+    when the pipeline ran empirical verification on it.
 
-    NA/NaN/None in the column → treated as fail (False).
+    SKIP and FAIL both count as not-pass:
+    - SKIP: the zero-shot code failed to compile or execute (code is broken)
+    - FAIL: one or more tiers detected a correctness violation
+
+    Returns None if the column is missing (caller will skip this variant).
 
     Returns:
         Boolean numpy array of shape (n_trials,), or None if column absent.
     """
-    if "base_llm_verified_valid" not in df_kernel.columns:
+    if "zeroshot_empirical_verdict" not in df_kernel.columns:
         return None
-    return df_kernel["base_llm_verified_valid"].eq(True).values
+    return df_kernel["zeroshot_empirical_verdict"].eq("PASS").values
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +299,10 @@ def compute(df_trials: pd.DataFrame, df_attempts: pd.DataFrame) -> dict:
             results["skipped_variants"].append("judge_lassi")
 
     # Check whether Variant 4 is computable
-    v4_available = "base_llm_verified_valid" in df_trials.columns
+    v4_available = "zeroshot_empirical_verdict" in df_trials.columns
     if not v4_available:
         log.warning(
-            "Column 'base_llm_verified_valid' missing from Table 1. "
+            "Column 'zeroshot_empirical_verdict' missing from Table 1. "
             "Variant 4 (verified-pass zero-shot) will be skipped."
         )
         if "verified_zeroshot" not in results["skipped_variants"]:
@@ -518,19 +492,24 @@ def _write_zeroshot_table(results: dict, output_dir: str) -> None:
 
 
 def _write_summary_figure(results: dict, output_dir: str) -> None:
-    """Write pass_at_k_summary.png/pdf — grouped bar chart, all four variants."""
+    """Write pass_at_k_summary.png/pdf — grouped bar chart, three variants.
+
+    V2 (Judge LASSI) is excluded from the figure: its values are trivially equal
+    to V1 (Verified LASSI) because tiers always override the judge — plotting both
+    would be misleading.  The meaningful comparison is LASSI three-tier vs. the
+    judge-only zero-shot baseline.
+    """
     variants = [
-        ("verified_lassi", "Verified (LASSI)", "#1f4e79"),    # dark blue
-        ("judge_lassi", "Judge (LASSI)", "#2e75b6"),          # medium blue
-        ("judge_zeroshot", "Judge (Zero-shot)", "#92b4d1"),   # light blue
-        ("verified_zeroshot", "Verified (Zero-shot)", "#c9daea"),  # very light blue
+        ("verified_lassi",    "Verified (LASSI)",       "#1f4e79"),  # dark blue
+        ("verified_zeroshot", "Verified (Zero-shot)",   "#f4b183"),  # light orange
+        ("judge_zeroshot",    "LLM Judge",              "#e07b39"),  # orange
     ]
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
     n_k = len(K_VALUES)
     n_variants = len(variants)
-    bar_width = 0.18
+    bar_width = 0.22
     group_gap = 0.08
     group_width = n_variants * bar_width + group_gap
     x_positions = np.arange(n_k) * group_width

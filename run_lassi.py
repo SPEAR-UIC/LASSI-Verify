@@ -506,7 +506,8 @@ def experimental_setup(cfg):
         "zeroshot_tier1_verdict",    # ★ T1 invariant assertion verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_tier2_verdict",    # ★ T2 empirical equivalence verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_tier3_verdict",    # ★ T3 metamorphic testing verdict for zero-shot code (PASS/FAIL/SKIP)
-        "zeroshot_empirical_verdict" # ★ composite empirical verdict (PASS/FAIL/SKIP)
+        "zeroshot_empirical_verdict", # ★ composite empirical verdict (PASS/FAIL/SKIP)
+        "stage0_abort_reason"        # ★ set when Stage 0 aborts (None for completed trials)
     ]
 
     return (app_folder_name, app_name, file_name, lines_of_code, source_lang, target_lang, model, model_coder, model_judge, num_ctx, num_ctx_coder, llm_source, use_context, use_context_summaries_only,
@@ -652,15 +653,17 @@ experiment_data_directory = "generated_codes/experiment/" + experiment + "__" + 
 # Convert to absolute directory::
 experiment_data_directory = os.path.abspath(experiment_data_directory)
 experiment_data_file_object = init_data_collection(experiment_data_directory, DATAFIELDNAMES)
-experiment_data = dict.fromkeys(DATAFIELDNAMES, None)  # all keys start out as None
 # Table 2 ★ per-attempt log — one row per code generation attempt (including self-correction retries)
 attempt_log_file_path = init_data_collection(
     experiment_data_directory, lassi.pipeline_v4.ATTEMPT_LOG_FIELDNAMES,
     filename="result_lassi-verify_attempt_log.csv"
 )
-experiment_data["gpu_vendor"] = str(detected_vendor.upper())
 
 while trial_number <= total_trials:
+    # Reset experiment_data fresh each trial so aborted trial rows never carry stale values
+    # from the previous trial's run. gpu_vendor is re-set because it is not populated by the pipeline.
+    experiment_data = dict.fromkeys(DATAFIELDNAMES, None)
+    experiment_data["gpu_vendor"] = str(detected_vendor.upper())
     # For the miniApp, we need to reset the source kernel file
     #  because the pipeline for this scenario must overwrite the
     #  source code in the generated_codes folder.
@@ -781,6 +784,12 @@ while trial_number <= total_trials:
         print("\n\n" + color.GREEN + color.BOLD + "***** LASSI PIPELINE COMPLETED *****\n\n" + color.END)
     else:
         print("\n\n" + color.RED + color.BOLD + "***** LASSI PIPELINE FAILED TO COMPLETE *****\n\n" + color.END)
+        # Write an abort row to the CSV so the trial number is visible in the data.
+        # experiment_data is partially populated (at minimum trial_number, timestamp,
+        # experiment, app_name, gpu_vendor) and stage0_abort_reason is set by the pipeline.
+        with open(experiment_data_file_object, "a", newline="") as _abort_file:
+            _abort_writer = csv.DictWriter(_abort_file, fieldnames=DATAFIELDNAMES)
+            _abort_writer.writerow(experiment_data)
 
     # Increment experiment counter
     trial_number = trial_number + 1

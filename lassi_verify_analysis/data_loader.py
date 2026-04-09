@@ -49,7 +49,7 @@ _REQUIRED_TRIALS_M1 = [
     "lassiee_runtime_diff",
     "base_v1_valid",
 ]
-_OPTIONAL_TRIALS_M1 = ["base_llm_verified_valid"]  # absent → Variant 4 skipped
+_OPTIONAL_TRIALS_M1 = ["zeroshot_empirical_verdict"]  # absent → Variant 4 skipped
 _REQUIRED_ATTEMPTS_M1 = ["app_name", "trial_number", "is_best_code", "judge_verdict"]
 
 
@@ -71,14 +71,15 @@ def load_data(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     Warns (via logging) on missing optional columns or missing Table 2 file.
     """
-    # Support both bare filenames and the result_-prefixed names the pipeline writes.
+    # Support bare filenames and common pipeline-written prefixes (result_, all-result_).
     def _resolve(name: str) -> str:
         bare = os.path.join(data_dir, name)
-        prefixed = os.path.join(data_dir, "result_" + name)
         if os.path.isfile(bare):
             return bare
-        if os.path.isfile(prefixed):
-            return prefixed
+        for prefix in ("result_", "all-result_"):
+            candidate = os.path.join(data_dir, prefix + name)
+            if os.path.isfile(candidate):
+                return candidate
         return bare  # let the caller raise FileNotFoundError on the bare path
 
     trials_path = _resolve("lassi-verify_pipeline_data.csv")
@@ -258,12 +259,6 @@ def _normalize_trials(df: pd.DataFrame) -> pd.DataFrame:
     df = _cast_float_columns(df, FLOAT_COLUMNS_TRIALS)
     df = _cast_int_columns(df, INT_COLUMNS_TRIALS)
     df = _cast_lassiee_version(df)
-
-    # base_llm_verified_valid: tri-state — True / False / None (if verification failed)
-    if "base_llm_verified_valid" in df.columns:
-        df["base_llm_verified_valid"] = _parse_bool_column(
-            df["base_llm_verified_valid"], nullable=True
-        )
 
     return df
 
