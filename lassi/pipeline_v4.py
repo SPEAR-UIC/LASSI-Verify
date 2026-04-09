@@ -2306,7 +2306,12 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_diagnostic={},
                     tier3_verdict=zs_tier3_verdict, tier3_diagnostic={},
                     judge_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
-                    override_applied="none",
+                    override_applied=(
+                        "zs_empirical_fail→INVALID"
+                        if (verify_zeroshot and zs_empirical_verdict == "FAIL"
+                            and judge_raw_verdict == "VALID")
+                        else "none"
+                    ),
                 )
                 attempt_log_buffer.append(_rec)
 

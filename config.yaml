@@ -2,7 +2,7 @@
 
 app:
   collection: HeCBench
-  name: marchingCubes
+  name: pathfinder
   make_script: false
   build_script: false
 language:
