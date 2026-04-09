@@ -2210,16 +2210,19 @@ def auto_code_llmgeneration_pipeline(prompts,
                 code_analysis = "None"
                 tier2_exhausted = False  # reset for next iteration
 
-            # Override 2 (false negative): Tier 1 PASS/SKIP + Tier 2 PASS + Tier 3 PASS/ok-SKIP → VALID even if judge said INVALID.
+            # Override 2 (false negative): Tier 1 PASS + Tier 2 PASS + Tier 3 PASS/ok-SKIP → VALID even if judge said INVALID.
             # All active tiers must be satisfied: Tier 2 PASS alone is insufficient if Tier 1 or Tier 3 is active.
-            # tier1_verdict == "SKIP" is acceptable (Tier 1 inactive/disabled or no assertions found in output).
-            # tier3_verdict == "SKIP" is only acceptable when T3 is genuinely inactive (run_tier3=False or no
-            # active relations). When T3 is active, SKIP means a variant compile/execute failure — not "inactive"
-            # — so the code must not be promoted to VALID on T2 PASS alone.
+            # tier1_verdict == "SKIP" is NOT acceptable here and cannot reach this point: any T1 SKIP/FAIL causes
+            # a `continue` back to the top of the while loop (lines 1727, 1763) before the judge or overrides run.
+            # The T1 check here therefore only needs to allow PASS.
+            # tier3_verdict == "SKIP" is only acceptable when T3 is genuinely inactive (run_tier3=False).
+            # When run_tier3=True, Stage 0 guarantees at least one active relation (aborts trial otherwise),
+            # so tier3_active_relations is never empty in the main loop — the T3 fallback below only covers
+            # the run_tier3=False configuration opt-out.
             # Tier 1 exhausted is handled inline (continue before judge); Tier 3 exhausted by Override 3.
             # Only applies to LASSI codes (zero_shot has no instrumentation → SKIP, no override).
             _t3_ok = (tier3_verdict == "PASS" or not (run_tier3 and tier3_active_relations))
-            if (tier1_verdict in ("PASS", "SKIP") and tier2_verdict == "PASS"
+            if (tier1_verdict == "PASS" and tier2_verdict == "PASS"
                     and _t3_ok
                     and valid_code_flag != "VALID" and not zero_shot):
                 _t1_label = (f"Tier 1 {tier1_verdict}" if not zero_shot else "Tier 1 inactive")

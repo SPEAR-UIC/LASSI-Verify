@@ -49,7 +49,7 @@ _REQUIRED_TRIALS_M1 = [
     "lassiee_runtime_diff",
     "base_v1_valid",
 ]
-_OPTIONAL_TRIALS_M1 = ["base_llm_verified_valid"]  # absent → Variant 4 skipped
+_OPTIONAL_TRIALS_M1 = ["zeroshot_empirical_verdict"]  # absent → Variant 4 skipped
 _REQUIRED_ATTEMPTS_M1 = ["app_name", "trial_number", "is_best_code", "judge_verdict"]
 
 
@@ -259,12 +259,6 @@ def _normalize_trials(df: pd.DataFrame) -> pd.DataFrame:
     df = _cast_float_columns(df, FLOAT_COLUMNS_TRIALS)
     df = _cast_int_columns(df, INT_COLUMNS_TRIALS)
     df = _cast_lassiee_version(df)
-
-    # base_llm_verified_valid: tri-state — True / False / None (if verification failed)
-    if "base_llm_verified_valid" in df.columns:
-        df["base_llm_verified_valid"] = _parse_bool_column(
-            df["base_llm_verified_valid"], nullable=True
-        )
 
     return df
 

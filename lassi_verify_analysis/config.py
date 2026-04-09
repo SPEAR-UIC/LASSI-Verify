@@ -37,6 +37,10 @@ VERDICT_COLUMNS_TRIALS: list[str] = [
     "lassiee_clean_status",
     "zeroshot_compile_status",
     "zeroshot_execute_status",
+    "zeroshot_tier1_verdict",
+    "zeroshot_tier2_verdict",
+    "zeroshot_tier3_verdict",
+    "zeroshot_empirical_verdict",
 ]
 
 VERDICT_COLUMNS_ATTEMPTS: list[str] = [

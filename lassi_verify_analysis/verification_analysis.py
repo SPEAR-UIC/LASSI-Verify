@@ -88,29 +88,30 @@ def _version_groups(df: pd.DataFrame):
 
 def _compute_correction_yield(df: pd.DataFrame) -> dict:
     """
-    For every tier-triggered self-correction attempt, did the corrected code
-    pass ALL three tiers?
+    For every self-correction attempt, did the corrected code resolve the
+    triggering issue specifically?
 
-    Success definition: tier1_verdict == PASS AND tier2_verdict == PASS AND
-    tier3_verdict == PASS.  No SKIP, no FAIL anywhere.  The triggering tier
-    determines which bucket the attempt is counted in, but the outcome is
-    binary: fully passing or not.
+    Success definition (per category):
+      - SELF_CORRECTION_TIER1  → tier1_verdict  == PASS on the corrected code
+      - SELF_CORRECTION_TIER2  → tier2_verdict  == PASS on the corrected code
+      - SELF_CORRECTION_TIER3  → tier3_verdict  == PASS on the corrected code
+      - SELF_CORRECTION_COMPILE → compile_status == SUCCESS
+      - SELF_CORRECTION_EXECUTE → execute_status == SUCCESS
 
-    Regression sub-count (within failures): cases where the triggering tier
-    was fixed (PASS) but a different tier failed or SKIPped.  Distinguishes
-    "feedback was unhelpful" from "feedback was right but fix was incomplete."
+    Each tier and infrastructure check is independent: T1 feedback is scoped
+    to T1's own signals; whether T2 or T3 pass is irrelevant to measuring T1
+    feedback effectiveness (and vice versa).  Compile and execute are likewise
+    independent of one another and of the verification tiers.
 
-    Infrastructure corrections (compile, execute) use a simpler rule: success
-    means compile_status == SUCCESS (and execute_status == SUCCESS for execute
-    corrections).  These measure whether the LLM can fix a syntax/runtime
-    error, not whether the verification feedback loop is effective.
+    Only codes that actually triggered self-correction are counted (LASSI_FRESH
+    and ZEROSHOT rows are excluded).  Codes that passed on the first attempt
+    are not part of this metric.
 
     Returns:
       {
         "overall":    { "tier1": {attempts, successes, rate},
                         "tier2": ..., "tier3": ...,
-                        "compile": ..., "execute": ...,
-                        "regressions": int },
+                        "compile": ..., "execute": ... },
         "per_kernel": { kernel: same structure }
       }
     """
@@ -123,32 +124,24 @@ def _compute_correction_yield(df: pd.DataFrame) -> dict:
             gen = row.get("generation_type", "")
             if gen in _TIER_SC_MAP:
                 tier_col = _TIER_SC_MAP[gen]
-                # gen is uppercased by normalization; strip prefix and lowercase
                 tier_key = gen.replace("SELF_CORRECTION_", "").lower()
-                # Success requires ALL THREE tiers PASS — no SKIP, no FAIL anywhere.
-                # A correction that fixes the triggering tier but breaks another is
-                # still a failure; there is no "partial success" category.
-                t1 = str(row.get("tier1_verdict", "")).strip().upper()
-                t2 = str(row.get("tier2_verdict", "")).strip().upper()
-                t3 = str(row.get("tier3_verdict", "")).strip().upper()
-                success = (t1 == "PASS" and t2 == "PASS" and t3 == "PASS")
-                # Regression: triggering tier was fixed (PASS) but overall still
-                # failed because a different tier failed or SKIPped.
-                # Diagnostic sub-count within failures — not a success modifier.
+                # Success: did this self-correction resolve the triggering tier?
+                # Each tier's feedback is scoped to its own failure signals —
+                # T1 feedback targets T1 assertions; T2 targets passthrough
+                # divergence; T3 targets metamorphic relations.  Only the
+                # triggering tier's verdict matters for this metric.
                 triggering_verdict = str(row.get(tier_col, "")).strip().upper()
-                regression = (not success) and (triggering_verdict == "PASS")
-                events.append({"kind": tier_key, "success": success, "regression": regression})
+                success = (triggering_verdict == "PASS")
+                events.append({"kind": tier_key, "success": success})
 
             elif gen in _INFRA_SC_MAP:
                 infra_key = _INFRA_SC_MAP[gen]
                 if infra_key == "compile":
                     success = str(row.get("compile_status", "")).strip().upper() == "SUCCESS"
                 else:
-                    success = (
-                        str(row.get("compile_status", "")).strip().upper() == "SUCCESS"
-                        and str(row.get("execute_status", "")).strip().upper() == "SUCCESS"
-                    )
-                events.append({"kind": infra_key, "success": success, "regression": False})
+                    # Execute self-correction: only the execute step matters
+                    success = str(row.get("execute_status", "")).strip().upper() == "SUCCESS"
+                events.append({"kind": infra_key, "success": success})
         return events
 
     all_events: list[dict] = []
@@ -165,13 +158,12 @@ def _compute_correction_yield(df: pd.DataFrame) -> dict:
 
     def _summarise(events: list[dict]) -> dict:
         out = {}
-        for cat in ("tier1", "tier2", "tier3", "compile", "execute"):
+        for cat in ("compile", "execute", "tier1", "tier2", "tier3"):
             cat_evts = [e for e in events if e["kind"] == cat]
             n = len(cat_evts)
             s = sum(e["success"] for e in cat_evts)
             out[cat] = {"attempts": n, "successes": s,
                         "rate": (s / n) if n > 0 else None}
-        out["regressions"] = sum(e["regression"] for e in events)
         return out
 
     return {
@@ -491,7 +483,7 @@ def report(results: dict, output_dir: str) -> None:
     vcy = results["correction_yield"]
     vcy_rows = []
     for scope, data in [("OVERALL", vcy["overall"])] + list(vcy["per_kernel"].items()):
-        for cat in ("tier1", "tier2", "tier3", "compile", "execute"):
+        for cat in ("compile", "execute", "tier1", "tier2", "tier3"):
             entry = data.get(cat, {})
             n = entry.get("attempts", 0)
             if n == 0:
@@ -507,8 +499,6 @@ def report(results: dict, output_dir: str) -> None:
     _write(vcy_df, output_dir, "verification_analysis_yield.csv")
     print("\n=== A. Correction Yield ===")
     print(vcy_df.to_string(index=False))
-    print(f"  Regressions (fixed trigger tier, broke another): "
-          f"{vcy['overall'].get('regressions', 0)}")
 
     # --- B: Attempts to Resolution ---
     att = results["attempts"]
@@ -643,6 +633,8 @@ def report(results: dict, output_dir: str) -> None:
             output_dir, "verification_analysis_confusion_matrix.csv"
         )
 
+    _write_confusion_matrix_figure(results, output_dir)
+    _write_correction_yield_figure(results, output_dir)
     _plot_summary(results, output_dir)
 
 
@@ -679,9 +671,14 @@ def _compute_confusion_matrix(df: pd.DataFrame) -> dict:
     if df.empty:
         return {"tp": 0, "fn": 0, "fp": 0, "tn": 0, "total": 0}
 
+    # Include ALL final LASSI attempts, including single-attempt successes
+    # (LASSI_FRESH with is_final_attempt=True). Only ZEROSHOT is excluded —
+    # zero-shot codes are handled separately (see pass@k V3/V4).
+    # Note: _EXCLUDE_GEN_TYPES also contains LASSI_FRESH, which is correct
+    # for the correction yield analysis but wrong here.
     finals = df[
         (df["is_final_attempt"] == True) &
-        (~df["generation_type"].isin(_EXCLUDE_GEN_TYPES))
+        (df["generation_type"] != "ZEROSHOT")
     ].copy()
 
     def _tiers_pass(row) -> bool:
@@ -819,11 +816,18 @@ def _plot_tier_complementarity(cases: pd.DataFrame, ax: plt.Axes) -> None:
     ax.set_ylim(-0.65, 2.65)
 
 
-def _plot_confusion_matrix(cm: dict, ax: plt.Axes) -> None:
+def _plot_confusion_matrix(cm: dict, ax: plt.Axes, *, show_footer: bool = False) -> None:
     """2×2 heatmap: tiers (rows) vs. judge (columns).
 
     TP/TN cells are green (both agree); FP cell is red (judge missed bug);
     FN cell is yellow (judge too strict).
+
+    Args:
+        cm:           Confusion matrix dict from _compute_confusion_matrix().
+        ax:           Matplotlib axes to draw into.
+        show_footer:  If True, add headline callout and precision/recall footer
+                      below the matrix (requires extra vertical space — use for
+                      standalone figures, not the summary panel).
     """
     tp = cm.get("tp", 0)
     fn = cm.get("fn", 0)
@@ -831,12 +835,17 @@ def _plot_confusion_matrix(cm: dict, ax: plt.Axes) -> None:
     tn = cm.get("tn", 0)
     total = cm.get("total", tp + fn + fp + tn)
 
+    n_pass = tp + fn          # ground-truth positive (tiers PASS)
+    n_fail = fp + tn          # ground-truth negative (tiers FAIL)
+    fnr = fn / n_pass * 100 if n_pass > 0 else 0.0   # false negative rate
+    fpr = fp / n_fail * 100 if n_fail > 0 else 0.0   # false positive rate
+
     # Cell layout: [[TP, FN], [FP, TN]]
     # Rows: Tiers PASS (top), Tiers FAIL (bottom)
     # Cols: Judge VALID (left), Judge INVALID (right)
-    cell_values   = [[tp,   fn  ], [fp,   tn  ]]
-    cell_colors   = [["#2ca02c", "#d6b24a"], ["#d62728", "#2ca02c"]]
-    cell_alphas   = [[0.75, 0.65          ], [0.85,      0.75     ]]
+    cell_values = [[tp, fn], [fp, tn]]
+    cell_colors = [["#2ca02c", "#d6b24a"], ["#d62728", "#2ca02c"]]
+    cell_alphas = [[0.75,     0.65      ], [0.90,      0.75     ]]
 
     for r in range(2):
         for c in range(2):
@@ -851,54 +860,148 @@ def _plot_confusion_matrix(cm: dict, ax: plt.Axes) -> None:
             ax.text(c + 0.5, 1.5 - r, f"{val}\n{pct}",
                     ha="center", va="center", fontsize=13, fontweight="bold", color="white")
 
-    # Axis labels
+    # Cell type labels (TP/FN/FP/TN) at top of each cell
+    for (r, c), label in [((0, 0), "TP"), ((0, 1), "FN"), ((1, 0), "FP"), ((1, 1), "TN")]:
+        ax.text(c + 0.5, 2 - r - 0.04, label,
+                ha="center", va="top", fontsize=7.5, color="white", alpha=0.9)
+
+    # "bugs missed" sub-label at the bottom of the FP cell (x=[0,1], y=[0,1])
+    ax.text(0.5, 0.04, "bugs missed", ha="center", va="bottom",
+            fontsize=7, color="white", alpha=0.9, style="italic")
+
+    # Axis configuration — y-tick labels include per-row n-counts
     ax.set_xlim(0, 2)
     ax.set_ylim(0, 2)
     ax.set_xticks([0.5, 1.5])
-    ax.set_xticklabels(["Judge: VALID", "Judge: INVALID"], fontsize=9)
+    ax.set_xticklabels(["LLM Judge:\nVALID", "LLM Judge:\nINVALID"], fontsize=9)
     ax.set_yticks([0.5, 1.5])
-    ax.set_yticklabels(["Tiers: FAIL", "Tiers: PASS"], fontsize=9)
+    ax.set_yticklabels([
+        f"Tiers: FAIL\n(n={n_fail})",
+        f"Tiers: PASS\n(n={n_pass})",
+    ], fontsize=9)
     ax.xaxis.set_ticks_position("top")
     ax.xaxis.set_label_position("top")
-    ax.set_title("Judge vs. Three-Tier Verdict\n(final LASSI attempts)", fontsize=10, pad=18)
-
-    # Diagonal annotations
-    ax.text(0.5, 1.5, "TP", ha="center", va="bottom",
-            fontsize=7.5, color="white", alpha=0.8)
-    ax.text(1.5, 1.5, "FN", ha="center", va="bottom",
-            fontsize=7.5, color="white", alpha=0.8)
-    ax.text(0.5, 0.5, "FP\n(missed bug)", ha="center", va="bottom",
-            fontsize=7.5, color="white", alpha=0.8)
-    ax.text(1.5, 0.5, "TN", ha="center", va="bottom",
-            fontsize=7.5, color="white", alpha=0.8)
+    ax.set_title("Judge vs. Three-Tier Verdict\n(final LASSI attempts)", fontsize=10, pad=22)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["bottom"].set_visible(False)
     ax.spines["left"].set_visible(False)
     ax.tick_params(length=0)
 
+    # Row-level error rate annotations (right of the matrix, clip_on=False to
+    # allow rendering slightly outside the axes bounding box)
+    ax.text(2.08, 1.5, f"FNR = {fnr:.0f}%",
+            va="center", fontsize=9, color="#555555",
+            transform=ax.transData, clip_on=False)
+    ax.text(2.08, 0.5, f"FPR = {fpr:.0f}%",
+            va="center", fontsize=9, color="#d62728", fontweight="bold",
+            transform=ax.transData, clip_on=False)
+
+    if show_footer:
+        # Headline callout: key paper argument stated directly
+        ax.text(
+            1.0, -0.15,
+            f"Judge missed {fp}/{n_fail} bugs ({fpr:.0f}%) caught by three-tier verification",
+            ha="center", va="top", fontsize=9.5, color="#d62728", fontweight="bold",
+            transform=ax.transData, clip_on=False,
+        )
+        # Standard classifier precision / recall summary
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        ax.text(
+            1.0, -0.48,
+            f"Precision = {precision:.0%}    Recall = {recall:.0%}",
+            ha="center", va="top", fontsize=9, color="#444444",
+            transform=ax.transData, clip_on=False,
+        )
+
+
+def _write_confusion_matrix_figure(results: dict, output_dir: str) -> None:
+    """Write confusion_matrix.png/pdf as a standalone full-size figure."""
+    cm = results.get("confusion_matrix", {})
+    if not cm or cm.get("total", 0) == 0:
+        log.warning("Confusion matrix is empty — skipping standalone figure.")
+        return
+
+    fig, ax = plt.subplots(figsize=(6.5, 6.0))
+    _plot_confusion_matrix(cm, ax, show_footer=True)
+    # Extra margin at bottom for the headline + precision/recall footer text
+    fig.subplots_adjust(left=0.22, right=0.80, top=0.82, bottom=0.26)
+
+    for ext in ("png", "pdf"):
+        path = os.path.join(output_dir, f"confusion_matrix.{ext}")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        log.info("Wrote %s", path)
+    plt.close(fig)
+    print(f"\nStandalone confusion matrix saved to "
+          f"{os.path.join(output_dir, 'confusion_matrix.png')}")
+
 
 def _plot_correction_yield(vcy_ov: dict, ax: plt.Axes) -> None:
-    """Bar chart: correction yield per triggering tier."""
-    tier_keys   = ["tier1", "tier2", "tier3"]
-    tier_labels = ["Tier 1", "Tier 2", "Tier 3"]
-    colors      = ["#4C9BE8", "#F0A500", "#E85C4C"]
+    """Bar chart: self-correction resolution rate per trigger type.
 
-    rates  = [vcy_ov[t]["rate"]     if vcy_ov[t]["rate"] is not None else 0.0 for t in tier_keys]
-    counts = [vcy_ov[t]["attempts"] for t in tier_keys]
+    Bars are ordered by pipeline stage: infrastructure first (compile,
+    execute), then verification tiers (T1, T2, T3).  Each bar shows the
+    fraction of self-correction attempts for that trigger type where the
+    corrected code resolved the triggering issue specifically.
 
-    bars = ax.bar(tier_labels, rates, color=colors, alpha=0.85)
-    ax.set_ylim(0, 1.20)
-    ax.set_ylabel("Correction Success Rate", fontsize=9)
-    ax.set_title("Correction Yield\nper Triggering Tier", fontsize=10)
-    ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    Args:
+        vcy_ov: Overall correction yield dict (results["correction_yield"]["overall"]).
+        ax:     Matplotlib axes to draw into.
+    """
+    # Pipeline order: infrastructure first, then verification tiers
+    keys   = ["compile", "execute", "tier1", "tier2", "tier3"]
+    labels = ["Compile", "Execute", "Tier 1", "Tier 2", "Tier 3"]
+    # Gray-green for infrastructure; blue/amber/red for verification tiers
+    colors = ["#74c476", "#41ab5d", "#4C9BE8", "#F0A500", "#E85C4C"]
+
+    rates  = [vcy_ov[k]["rate"]     if vcy_ov[k]["rate"] is not None else 0.0 for k in keys]
+    counts = [vcy_ov[k]["attempts"] for k in keys]
+
+    bars = ax.bar(labels, rates, color=colors, alpha=0.85, width=0.55)
+    ax.set_ylim(0, 1.0)
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax.set_yticklabels(["0%", "25%", "50%", "75%", "100%"], fontsize=9)
+    ax.set_ylabel("Self-Correction Success Rate", fontsize=9)
+    ax.set_title("Self-Correction Resolution Rate\nby Trigger Type", fontsize=10)
+
+    # Vertical divider between infrastructure and verification tiers
+    ax.axvline(1.5, color="#cccccc", linewidth=1.0, linestyle="--")
+    ax.text(0.5, 0.97, "Build Validation", ha="center", va="top",
+            fontsize=7.5, color="#666666", transform=ax.get_xaxis_transform())
+    ax.text(3.5, 0.97, "Verification Tiers", ha="center", va="top",
+            fontsize=7.5, color="#666666", transform=ax.get_xaxis_transform())
+
+    # Count + rate labels above each bar (skip bars with n=0)
     for bar, n, r in zip(bars, counts, rates):
         if n > 0:
             ax.text(bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + 0.04,
+                    bar.get_height() + 0.025,
                     f"{r:.0%}\n(n={n})", ha="center", va="bottom", fontsize=8.5)
+
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+
+
+def _write_correction_yield_figure(results: dict, output_dir: str) -> None:
+    """Write correction_yield.png/pdf as a standalone full-size figure."""
+    vcy = results.get("correction_yield", {})
+    vcy_ov = vcy.get("overall", {})
+    if not vcy_ov:
+        log.warning("Correction yield data missing — skipping standalone figure.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    _plot_correction_yield(vcy_ov, ax)
+    fig.subplots_adjust(left=0.12, right=0.95, top=0.88, bottom=0.15)
+
+    for ext in ("png", "pdf"):
+        path = os.path.join(output_dir, f"correction_yield.{ext}")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        log.info("Wrote %s", path)
+    plt.close(fig)
+    print(f"\nStandalone correction yield saved to "
+          f"{os.path.join(output_dir, 'correction_yield.png')}")
 
 
 def _plot_summary(results: dict, output_dir: str) -> None:
