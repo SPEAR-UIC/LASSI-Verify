@@ -76,7 +76,7 @@ def load_data(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         bare = os.path.join(data_dir, name)
         if os.path.isfile(bare):
             return bare
-        for prefix in ("result_", "all-result_"):
+        for prefix in ("result_", "all-result_", "all_trials-result_"):
             candidate = os.path.join(data_dir, prefix + name)
             if os.path.isfile(candidate):
                 return candidate

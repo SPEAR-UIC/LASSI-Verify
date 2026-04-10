@@ -23,6 +23,7 @@ import sys
 from .data_loader import get_kernels, load_data
 from . import pass_at_k
 from . import verification_analysis
+from . import verification_evidence
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -96,7 +97,11 @@ def main() -> int:
     verification_analysis.report(va_results, output_dir=output_dir)
     log.info("Verification analysis complete.")
 
-    # --- Future metrics will be added here ---
+    # --- Verification Evidence Summary ---
+    log.info("Generating Verification Evidence Summary ...")
+    ve_results = verification_evidence.compute(df_trials, df_attempts)
+    verification_evidence.report(ve_results, output_dir=output_dir)
+    log.info("Verification evidence complete.")
 
     log.info("All metrics complete. Outputs written to: %s", output_dir)
     return 0

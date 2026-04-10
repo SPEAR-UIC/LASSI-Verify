@@ -881,7 +881,7 @@ def _plot_confusion_matrix(cm: dict, ax: plt.Axes, *, show_footer: bool = False)
     ], fontsize=9)
     ax.xaxis.set_ticks_position("top")
     ax.xaxis.set_label_position("top")
-    ax.set_title("Judge vs. Three-Tier Verdict\n(final LASSI attempts)", fontsize=10, pad=22)
+    ax.set_title(f"Judge vs. Three-Tier Verdict\n(all LASSI intermediate code transformations, n={total})", fontsize=10, pad=22)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["bottom"].set_visible(False)
@@ -972,12 +972,21 @@ def _plot_correction_yield(vcy_ov: dict, ax: plt.Axes) -> None:
     ax.text(3.5, 0.97, "Verification Tiers", ha="center", va="top",
             fontsize=7.5, color="#666666", transform=ax.get_xaxis_transform())
 
-    # Count + rate labels above each bar (skip bars with n=0)
+    # Count + rate labels: inside bar when tall enough, above otherwise.
+    # Labels placed above a full-height bar overflow into the title/margin.
+    _INSIDE_THRESHOLD = 0.25  # bar must be >= 25% height to fit label inside
     for bar, n, r in zip(bars, counts, rates):
-        if n > 0:
-            ax.text(bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + 0.025,
-                    f"{r:.0%}\n(n={n})", ha="center", va="bottom", fontsize=8.5)
+        if n == 0:
+            continue
+        h = bar.get_height()
+        label = f"{r:.0%}\n(n={n})"
+        if h >= _INSIDE_THRESHOLD:
+            ax.text(bar.get_x() + bar.get_width() / 2, h / 2,
+                    label, ha="center", va="center", fontsize=8.5,
+                    color="white", fontweight="bold")
+        else:
+            ax.text(bar.get_x() + bar.get_width() / 2, h + 0.025,
+                    label, ha="center", va="bottom", fontsize=8.5)
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
