@@ -501,8 +501,8 @@ def _write_summary_figure(results: dict, output_dir: str) -> None:
     """
     variants = [
         ("verified_lassi",    "Verified (LASSI)",       "#1f4e79"),  # dark blue
-        ("verified_zeroshot", "Verified (Zero-shot)",   "#f4b183"),  # light orange
-        ("judge_zeroshot",    "LLM Judge",              "#e07b39"),  # orange
+        ("verified_zeroshot", "Verified (Vanilla)",   "#f4b183"),  # light orange
+        ("judge_zeroshot",    "LLM Judge (Vanilla)",              "#e07b39"),  # orange
     ]
 
     fig, ax = plt.subplots(figsize=(8, 5))
