@@ -703,6 +703,11 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     sample_pattern = re.compile(
         r'Sample_(first10|last10|spread10):(.*)'
     )
+    # Regex for the Elements count line — parsed and compared exactly (no tolerance).
+    # A mismatch here means the generated code operates on a different problem size than
+    # the source-as-specification, which is an unambiguous correctness violation
+    # regardless of whether min/max/mean statistics happen to match.
+    elements_pattern = re.compile(r'Elements:\s*(\d+)')
 
     def extract_blocks(stdout_text):
         """Return dict mapping label → ordered list of block body strings.
@@ -712,6 +717,16 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
         for m in block_pattern.finditer(stdout_text):
             result.setdefault(m.group(1), []).append(m.group(2))
         return result
+
+    def parse_elements(block_body):
+        """Parse Elements count; return int or None if not found/parseable."""
+        m = elements_pattern.search(block_body)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
 
     def parse_stats(block_body):
         """Parse Statistics line; return dict of {min, max, mean} as floats, or None.
@@ -807,6 +822,24 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
         for i, (spec_body, gen_body) in enumerate(zip(spec_bodies, gen_bodies)):
             failure_label = f"{label}#{i+1}" if multi else label
             blocks_compared += 1
+
+            # Check element count first — a mismatch means the generated code operates
+            # on a different problem size than the source specification. This is an exact
+            # integer comparison: no tolerance. Only fail if BOTH blocks have parseable
+            # counts that disagree; if either is absent, fall through to stat comparison.
+            spec_elements = parse_elements(spec_body)
+            gen_elements  = parse_elements(gen_body)
+            if spec_elements is not None and gen_elements is not None and spec_elements != gen_elements:
+                max_rel_err = max(max_rel_err, float('inf'))
+                failures.append({
+                    "label":     failure_label,
+                    "stat":      "elements_mismatch",
+                    "spec":      spec_elements,
+                    "generated": gen_elements,
+                    "abs_err":   abs(spec_elements - gen_elements),
+                    "atol":      0,
+                })
+                continue  # skip stat/sample comparison — sizes are incommensurate
 
             spec_stats = parse_stats(spec_body)
             gen_stats  = parse_stats(gen_body)

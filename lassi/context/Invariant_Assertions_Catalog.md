@@ -59,6 +59,31 @@ Properties tied to specific execution patterns:
 
 If your assertion contains a comparison to an expected numerical value (e.g., `== 0.0`, `== ustar`, `>= ref_result`, `!= 0` after knowing what the result should be), it is a correctness check and should be removed or replaced with a range/finiteness check.
 
+### ⚠️ IMPORTANT EXCEPTION — Problem Specification Constants (Type A, not Type B):
+
+**Problem-size parameters that are fixed in the source code ARE correct targets for exact-equality assertions.** These are NOT hardware tuning parameters — they define WHAT problem is being solved. Changing them does not optimize the computation; it computes an answer to a different problem entirely.
+
+**How to identify a problem specification constant:**
+- It appears as a `#define`, `const int`, a hardcoded literal, or a value read from a fixed command-line argument that sets the domain size, number of elements, grid dimensions, or problem extent (e.g., `N`, `M`, `nx`, `ny`, `num_particles`, `width`, `height`, `num_keys`, etc.)
+- It controls the size of the primary allocation passed to `cudaMalloc` and to the kernel as the problem extent
+- **Ask: if this constant changed, would the program compute the answer to a different problem?** If yes, it is a specification constant and should be asserted.
+
+**Contrast with Type B (do NOT assert):** Block dimensions, number of streams, tile sizes, shared memory sizes, reduction strategies — these change HOW the computation is mapped to hardware, not WHAT is computed. A valid optimization may change any of these while computing the identical answer. Tier 2 handles numerical equivalence.
+
+**What to assert:** Immediately after the problem-size variable is initialized (from its define, literal, or argument), assert it equals the value found in the source code. The expected value comes directly from reading the source — do not guess it. Pattern:
+```cpp
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+{
+    // Source specifies <parameter_name> = <source_value> (hardcoded / fixed constant).
+    // A refactored code that changes this value solves a different problem.
+    bool _t1_pass = (<parameter_name> == <source_value>);
+    printf("LASSI-VERIFY ASSERTIONS [problem_spec_<parameter_name>_unchanged]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+**This is a Layer 1 Universal Invariant** for any kernel where the problem size or data extent is specified as a fixed constant in the source. Read the source, find the constant's value, and assert it. If the kernel reads its size from command-line arguments at runtime (not hardcoded), assert that the argument is still being passed and is positive — but do not assert a specific value, since runtime arguments are legitimately variable.
+
 ---
 
 ## Assertion Selection Framework
