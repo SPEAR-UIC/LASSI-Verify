@@ -206,15 +206,69 @@ def compute_judge_lassi_pass_vector(
     return result.values
 
 
-def compute_judge_zeroshot_pass_vector(df_kernel: pd.DataFrame) -> np.ndarray:
+def compute_judge_zeroshot_pass_vector(
+    df_kernel: pd.DataFrame,
+    df_attempts: pd.DataFrame,
+) -> np.ndarray:
     """Variant 3: judge-pass@k (zero-shot).
 
-    A trial passes iff base_v1_valid == "VALID".
-    No runtime improvement requirement (matches LASSI-Judge paper convention).
+    A trial passes iff the LLM judge said VALID for the zero-shot code,
+    using the *raw pre-override* judge_verdict from the attempt log
+    (generation_type == 'zeroshot' rows).
+
+    This is the correct source for V3 because the pipeline can apply an
+    empirical override (zs_empirical_fail→INVALID) that writes INVALID into
+    base_v1_valid even when the judge said VALID.  V3 and V4 are meant to be
+    compared directly (judge accuracy vs. three-tier accuracy on the same ZS
+    code), so V3 must reflect the judge's raw opinion before any override.
+
+    Trials where the zero-shot code failed to compile or execute have no
+    zeroshot attempt row (the judge was never called) and default to False —
+    the correct interpretation for both V3 and V4.
+
+    Falls back to base_v1_valid == "VALID" if df_attempts is empty or contains
+    no zeroshot rows (preserves backward compatibility with runs that pre-date
+    the attempt log or used verify_zeroshot=False).
 
     Returns:
         Boolean numpy array of shape (n_trials,).
     """
+    # Prefer raw judge_verdict from the attempt log.
+    # generation_type is uppercased by the data_loader normalization step.
+    if not df_attempts.empty and "generation_type" in df_attempts.columns:
+        zs_rows = df_attempts[df_attempts["generation_type"] == "ZEROSHOT"]
+        if not zs_rows.empty and "judge_verdict" in zs_rows.columns:
+            # Build (app_name, trial_number) → raw judge verdict mapping
+            judge_map: dict[tuple, bool] = {}
+            for _, row in zs_rows.iterrows():
+                key = (row.get("app_name"), row.get("trial_number"))
+                judge_map[key] = str(row.get("judge_verdict", "")).strip().upper() == "VALID"
+
+            compound_keys = list(zip(df_kernel["app_name"], df_kernel["trial_number"]))
+            result = pd.Series(
+                [judge_map.get(k, False) for k in compound_keys],
+                index=df_kernel.index,
+                dtype=bool,
+            )
+
+            missing = [k for k in compound_keys if k not in judge_map]
+            if missing:
+                log.debug(
+                    "Variant 3: %d trial(s) have no zeroshot attempt row "
+                    "(ZS failed to compile/execute — judge not called, treated as not-pass).",
+                    len(missing),
+                )
+            return result.values
+
+    # Fallback: use base_v1_valid from Table 1 for runs that pre-date the attempt
+    # log or used verify_zeroshot=False.  NOTE: base_v1_valid conflates the raw
+    # judge verdict with any zs_empirical_fail→INVALID override that was applied,
+    # so V3 may be understated if that override fired.
+    log.debug(
+        "Variant 3: falling back to base_v1_valid (attempt log unavailable or "
+        "missing zeroshot rows — raw judge verdict may differ from base_v1_valid "
+        "if zs_empirical_fail override was applied)."
+    )
     return df_kernel["base_v1_valid"].eq("VALID").values
 
 
@@ -328,7 +382,7 @@ def compute(df_trials: pd.DataFrame, df_attempts: pd.DataFrame) -> dict:
             if not best_code_merged.empty
             else None
         )
-        v3_pass = compute_judge_zeroshot_pass_vector(df_k)
+        v3_pass = compute_judge_zeroshot_pass_vector(df_k, df_attempts)
         v4_pass = compute_verified_zeroshot_pass_vector(df_k) if v4_available else None
 
         kernel_results: dict = {"n": n}
@@ -400,7 +454,6 @@ def report(results: dict, output_dir: str) -> None:
     - pass_at_k_lassi.csv       — per-kernel table for LASSI variants (V1, V2)
     - pass_at_k_zeroshot.csv    — per-kernel table for zero-shot variants (V3, V4)
     - pass_at_k_summary.png     — grouped bar chart (all four variants)
-    - pass_at_k_summary.pdf     — same figure in PDF
 
     Cell format: "0.83 (0.67–0.93)".
     Average row at bottom of each table uses unweighted mean across kernels.
@@ -500,9 +553,9 @@ def _write_summary_figure(results: dict, output_dir: str) -> None:
     judge-only zero-shot baseline.
     """
     variants = [
-        ("verified_lassi",    "Verified (LASSI)",       "#1f4e79"),  # dark blue
-        ("verified_zeroshot", "Verified (Vanilla)",   "#f4b183"),  # light orange
-        ("judge_zeroshot",    "LLM Judge (Vanilla)",              "#e07b39"),  # orange
+        ("verified_lassi",    "Verified (LASSI)",    "#1f4e79"),  # dark blue
+        ("verified_zeroshot", "Verified (Vanilla)", "#85c1e9"),  # light blue (same family as LASSI)
+        ("judge_zeroshot",    "LLM Judge (Vanilla)", "#e07b39"),  # orange
     ]
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -540,24 +593,35 @@ def _write_summary_figure(results: dict, output_dir: str) -> None:
 
     ax.set_xlabel("k (number of candidates)", fontsize=12)
     ax.set_ylabel("pass@k", fontsize=12)
-    ax.set_title("Metric 1: verified-pass@k vs. judge-pass@k", fontsize=13)
+    # pad=50 leaves room between the title and the legend row that sits just above the axes
+    ax.set_title("verified-pass@k vs. judge-pass@k", fontsize=13, pad=25)
     ax.set_xticks(x_positions)
     ax.set_xticklabels([f"k={k}" for k in K_VALUES], fontsize=11)
     ax.set_ylim(0.0, 1.05)
-    ax.legend(loc="upper left", fontsize=9)
+    # Horizontal legend row between the title and the bars (anchored to axes top, centered)
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=len(variants),
+        fontsize=9,
+        frameon=False,
+        borderaxespad=0.5,
+    )
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    # Outside the axes, same row as the x-axis label, right-justified.
+    # Uses axes-fraction coordinates; bbox_inches='tight' on save captures it.
     ax.text(
-        0.99, 0.02,
+        1.0, -0.10,
         "Error bars: cross-kernel std",
         transform=ax.transAxes,
-        ha="right", va="bottom", fontsize=8, color="#666666",
+        ha="right", va="top", fontsize=8, color="#666666",
     )
 
     fig.tight_layout()
-    for ext in ("png", "pdf"):
-        out_path = os.path.join(output_dir, f"pass_at_k_summary.{ext}")
-        fig.savefig(out_path, dpi=150)
-        log.info("Wrote %s", out_path)
+    out_path = os.path.join(output_dir, "pass_at_k_summary.png")
+    # bbox_inches='tight' ensures the legend above the axes boundary is not clipped
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    log.info("Wrote %s", out_path)
     plt.close(fig)
-    print(f"\nFigure saved to {os.path.join(output_dir, 'pass_at_k_summary.png')}")
+    print(f"\nFigure saved to {out_path}")

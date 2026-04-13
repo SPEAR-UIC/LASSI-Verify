@@ -2018,7 +2018,10 @@ def auto_code_llmgeneration_pipeline(prompts,
             # SOURCE_verify with T1 blocks stripped. This avoids T2 insertion messing up T1
             # blocks and gives each tier a clean start from the original code.
             # Single attempt only — no retries, no self-correction feedback.
-            # Results are informational only: the LLM judge verdict is NOT overridden.
+            # Override policy: if empirical verdict is FAIL, it overrides the judge
+            # (VALID → INVALID). If empirical is PASS or SKIP, the judge verdict stands.
+            # The attempt log records both the raw judge_verdict and the override_applied
+            # field, so the analysis script can recover the raw judge opinion for V3.
             _, _zs_src_ext = os.path.splitext(source_file_path)
             if verify_zeroshot and zero_shot:
                 print("\n\n----- " + color.BOLD + color.PURPLE +
