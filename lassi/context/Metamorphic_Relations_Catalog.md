@@ -141,7 +141,8 @@ add more simply because they appear in the catalog.
 
 - **Linear algebra** (matrix multiply, dense solve): SCALING → ADDITIVITY → PERMUTATIVE
 - **Iterative solver** (Jacobi, CG, GMRES): SCALING (on source term if BCs allow) → PERMUTATIVE
-- **Stencil / CFD**: CONSERVATION (flux balance) → SYMMETRY → ROTATION (if isotropic)
+- **Stencil / linear CFD** (Laplace, isotropic diffusion, heat conduction with homogeneous BCs): CONSERVATION (flux balance) → SYMMETRY → ROTATION (if isotropic) → SCALING (if PDE is linear and BCs are homogeneous)
+- **Coupled nonlinear iterative CFD** (Navier-Stokes, SOR/Red-Black pressure solvers, projection methods, driven-cavity flow, multi-field u-v-p coupling): CONSERVATION (incompressibility or momentum residual, if checkable from passthrough) → MONOTONICITY (residual history, if printed to stdout) — **SCALING and SYMMETRY are typically NOT applicable** (see ⚠️ Coupled Nonlinear CFD guidance in Domain-Specific section)
 - **Reduction kernel** (sum, dot product, norm): SCALING → ADDITIVITY → CONSERVATION (decomposition) → PERMUTATIVE
 - **Particle / N-body**: CONSERVATION (energy) → PERMUTATIVE (particle index) → SCALING
 - **Normalized distance / correlation kernel** (z-score normalized DTW, LB_Keogh, cross-correlation, standardized regression): SCALING on the **co-normalized group** (raw data + precomputed mean + precomputed std, all by the same α) → output UNCHANGED (factor = 1.0); PERMUTATIVE (inner sum index permutation) → output UNCHANGED (factor = 1.0) — SCALING on any **single** input variable IS NOT APPLICABLE (see normalization warning below)
@@ -157,6 +158,25 @@ add more simply because they appear in the catalog.
   whether either applies to a residual metric or intermediate buffer
 - **Iterative with fixed boundary conditions**: SCALING applies to the source term ONLY if BCs are
   also scaled or are homogeneous (zero); ADDITIVITY does not apply (BC constraints pin boundary values)
+
+**⚠️ CRITICAL — Absolute convergence thresholds make SCALING unreliable for iterative solvers:**
+
+If the solver stops at `|residual| < tol` (an *absolute* threshold — not `|r|/|r₀| < tol`), then
+scaling the RHS by α does not guarantee exactly α × solution at the stopping point:
+- The true converged solution scales: x* → α·x*
+- But the solver terminates when absolute |r| < tol regardless of the RHS magnitude
+- The number of iterations may differ between the scaled and unscaled problems, and the final
+  state diverges from exactly α·x* by O(tol)
+
+If tol is tight (≤ 1e-8) relative to the solution magnitude, the error is negligible and SCALING
+may still pass. If tol is in the range 1e-6 to 1e-3, or if the stopping criterion is a dimensional
+physical residual (in Pa, m/s, etc.) rather than a dimensionless normalized residual, the
+deviation from the expected ratio can easily exceed the MR tolerance.
+
+**Rule:** For iterative solvers with absolute convergence criteria, note this risk in `applicable_when`.
+Expect the source filter to reject the SCALING relation for any kernel with a loose absolute threshold
+or a dimensional stopping criterion. If this applies to every SCALING relation you were considering,
+prioritize CONSERVATION or MONOTONICITY instead.
 
 **⚠️ CRITICAL — MIN/MAX operations always make SCALING inapplicable to the final output:**
 If the kernel uses `min()`, `max()`, `fmin()`, `fmax()`, `__min()`, `__max()`, conditional
@@ -324,8 +344,63 @@ Use **allclose-style** tolerance for all metamorphic checks:
 where atol = |expected_Z_stat| × rtol
 ```
 
-Default: `rtol = 1e-5` (slightly looser than Tier 2's 1e-6, to account for accumulated FP noise
-in two independently-computed runs). Adjust per relation if needed (see PERMUTATIVE note).
+Default: `rtol = 1e-5` (slightly looser than the passthrough equivalence tolerance, to account for
+accumulated FP noise in two independently-executed runs). Adjust per relation if needed (see
+PERMUTATIVE note).
+
+### METAMORPHIC Block Placement — Mandatory Rules
+
+Incorrect block placement causes stdout floods that crash or stall the pipeline. These rules
+must be followed for every variant file you produce.
+
+**Rule 1 — NEVER place a METAMORPHIC block inside a nested inner loop.**
+
+If the algorithm has a two-level loop structure (e.g., outer timestep loop wrapping an inner
+solver or SOR loop), a block inside the inner loop emits O(timesteps × inner_iterations) output
+lines — easily millions of lines for a typical iterative benchmark. Place the block AFTER the
+inner loop exits, once per outer-loop iteration.
+
+```cpp
+// TWO-LEVEL STRUCTURE — correct placement
+for (int t = 0; t < num_timesteps; ++t) {         // ← outer timestep loop
+    for (int iter = 0; iter < max_iter; ++iter) {  // ← inner solver loop
+        // ... kernel launches ...
+        if (converged) break;
+    }
+    // ✅ CORRECT: block OUTSIDE inner loop — one block per timestep
+    printf("=== BEGIN LASSI-VERIFY METAMORPHIC [residual_t_%d] ===\n", t);
+    printf("Relation: monotonicity\nIteration: %d\nResidual: %.17g\n", t, final_residual);
+    printf("=== END LASSI-VERIFY METAMORPHIC [residual_t_%d] ===\n", t);
+}
+// ❌ WRONG: placing a block inside the inner loop above would print millions of lines
+```
+
+**Rule 2 — For a single-level iteration loop, cap the number of blocks printed.**
+
+Even when the iteration loop is the outermost loop, cap the METAMORPHIC output. Solvers with
+large `max_iter` (thousands of iterations) will overflow pipeline output buffers if every
+iteration is printed. A few hundred data points is sufficient to verify a monotone trend.
+
+```cpp
+// SINGLE-LEVEL LOOP — cap at 200 iterations
+#define LASSI_MT_MAX_PRINT 200
+for (int iter = 0; iter < max_iter; ++iter) {
+    // ... kernel launches ...
+    if (iter < LASSI_MT_MAX_PRINT) {
+        printf("=== BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\n", iter);
+        printf("Relation: monotonicity\nIteration: %d\nResidual: %.17g\n", iter, residual);
+        printf("=== END LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\n", iter);
+    }
+    if (converged) break;
+}
+```
+
+**Rule 3 — SCALING, SYMMETRY, CONSERVATION, PERMUTATIVE, and ADDITIVITY blocks belong
+entirely outside all loops, after the final device-to-host transfer.**
+
+These relation types compare the final output state only. There is never a reason to place
+one of these blocks inside any loop. If you find yourself writing such a block inside a loop,
+move it to after the loop exits.
 
 ---
 
@@ -534,6 +609,43 @@ relation instead.
 **Formal note:** The current checker compares `Z_stat ≈ factor × Y_stat` for each scalar statistic
 (min, max, mean). This requires an explicit numeric factor. Element-wise comparison (needed for
 reflection symmetry, general permutations, etc.) is deferred to Phase 3.
+
+### ❌ SCALING or SYMMETRY on Zero-Valued Default Parameters
+
+```
+BAD: scale body force Fx by α=2.0, expect u-velocity to scale by 2.0 — when Fx = 0.0 in source config
+BAD: negate external field Fy, expect output to negate — when Fy = 0.0 in source config
+BAD: scale an input array by α — when the array is initialized to all-zeros before the first kernel call
+```
+
+**Why this fails:** If the parameter you are transforming is zero in the default problem configuration,
+then `0 × α = 0` and `−0 = 0` — the transformed input is **identical to the original**. The output
+will be unchanged (effective factor = 1.0), but the relation expects factor = α (or −1.0). The
+SOURCE_verify filter correctly rejects the relation because it fails for the source. The contract slot
+is consumed with zero verification benefit, and if every proposed relation has this defect, Stage 0
+aborts before any generated code is verified.
+
+**This is the most common cause of all-inactive contract slots** in kernels where the default
+benchmark configuration uses zero for one or more physical forcing parameters (body forces, external
+fields, gravity, source terms). Many HPC benchmarks default such parameters to zero to isolate the
+algorithmic behavior of the solver.
+
+**Mandatory check before proposing any SCALING or SYMMETRY relation:**
+In Step 1 (Analyze the Code), locate the initialization or argument-setup code for **every variable
+you plan to transform**. Read the actual assigned value:
+- If the variable is initialized to `0`, `0.0`, or `{0}` — do **NOT** propose a multiplicative or
+  sign-flip relation on it. Any factor applied to zero produces zero; the source filter will reject it.
+- If the variable is a constant set by a `#define` or computed expression, evaluate whether it is
+  zero in the default compilation. If you cannot determine this from the source code alone, skip
+  the relation.
+- If the variable has a non-zero default, proceed — but still perform the symbolic trace (Step 2)
+  before committing to the relation.
+
+**What to do instead:** If all candidate input parameters for SCALING/SYMMETRY are zero in the
+default configuration, pivot to CONSERVATION or MONOTONICITY, which do not require transforming
+any input parameter. If neither is applicable, it is correct to propose zero relations — Stage 0
+will abort the trial, which is the right outcome: there is no valid T3 verification possible for
+this trial configuration.
 
 ### ❌ Composite MRs in Phase 1
 
@@ -985,16 +1097,44 @@ quantitative relation is applicable to the kernel.
 `output_relation`: residual[k] ≥ residual[k+1] (non-increasing) for all k
 `applicable_when`: iterative solver with a monotone convergence guarantee (not CG)
 
+**Before writing the METAMORPHIC blocks, identify the loop structure of the solver:**
+
+**Case A — Single-level iteration loop** (the iteration loop is the outermost loop):
+Cap the number of printed blocks to prevent stdout overflow.
+
 ```cpp
+#define LASSI_MT_MAX_PRINT 200
 for (int iter = 0; iter < max_iter; iter++) {
     kernel<<<blocks, threads>>>(...);
     cudaDeviceSynchronize();
     cudaMemcpy(h_x, d_x, N * sizeof(double), cudaMemcpyDeviceToHost);
     double residual = compute_residual(h_A, h_b, h_x, N);
-    printf("=== BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\n", iter);
-    printf("Relation: monotonicity\nIteration: %d\nResidual: %.17g\n",
-           iter, residual);
-    printf("=== END LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\n", iter);
+    if (iter < LASSI_MT_MAX_PRINT) {
+        printf("=== BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\n", iter);
+        printf("Relation: monotonicity\nIteration: %d\nResidual: %.17g\n", iter, residual);
+        printf("=== END LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\n", iter);
+    }
+    if (converged) break;
+}
+```
+
+**Case B — Two-level loop structure** (outer timestep/sweep loop wrapping an inner solver loop):
+Place the block AFTER the inner loop, once per outer iteration. Printing inside the inner loop
+would emit O(timesteps × inner_iterations) lines — potentially millions — and must never be done.
+
+```cpp
+for (int t = 0; t < num_timesteps; ++t) {
+    double final_residual = 0.0;
+    for (int iter = 0; iter < max_iter; ++iter) {
+        kernel<<<blocks, threads>>>(...);
+        cudaDeviceSynchronize();
+        final_residual = compute_residual(...);
+        if (final_residual < tol) break;
+    }
+    // ✅ Block is OUTSIDE the inner loop — one block per timestep
+    printf("=== BEGIN LASSI-VERIFY METAMORPHIC [residual_t_%d] ===\n", t);
+    printf("Relation: monotonicity\nIteration: %d\nResidual: %.17g\n", t, final_residual);
+    printf("=== END LASSI-VERIFY METAMORPHIC [residual_t_%d] ===\n", t);
 }
 ```
 
@@ -1087,7 +1227,9 @@ The `offset` value is taken from the contract's `factor` field (same JSON field,
 
 ## Domain-Specific Guidance
 
-### Computational Fluid Dynamics / Stencil Codes
+### Computational Fluid Dynamics — Linear / Stencil Codes
+(Laplace equation, isotropic diffusion, heat conduction, Poisson with homogeneous BCs, linear wave equation)
+
 Priority order:
 1. **CONSERVATION** (1.1): flux/energy conservation across a stencil sweep
 2. **SYMMETRY** (2.2): reflecting initial condition produces reflected output (symmetric BCs required)
@@ -1096,6 +1238,49 @@ Priority order:
 
 Contraindication: convection-dominated flows are nonlinear — SCALING rarely applies. Asymmetric
 BCs invalidate SYMMETRY and ROTATION.
+
+### Computational Fluid Dynamics — Coupled Nonlinear Iterative Solvers
+(Navier-Stokes, incompressible flow, SOR / Red-Black pressure solvers, projection-method solvers,
+driven-cavity flow, multi-field coupling between velocity and pressure fields)
+
+**⚠️ WARNING: Most standard relation families do NOT apply to this class.** Evaluate each
+contraindication before proposing any relation:
+
+- **Nonlinear convection term** (u·∇u): any kernel with a nonlinear advection term makes SCALING
+  invalid for the velocity fields. Scaling the driving boundary condition does NOT scale the velocity
+  by the same factor because the nonlinear term responds quadratically.
+- **Non-homogeneous Dirichlet BCs** (fixed lid velocity, fixed wall velocity, fixed temperature):
+  SCALING the interior source/forcing term fails because the boundary values are not scaled alongside.
+  The boundary-dominated part of the solution does not scale.
+- **Zero-valued physical forcing in the default benchmark configuration**: many incompressible flow
+  benchmarks set gravity, body forces, or external fields to zero to isolate solver behavior. See
+  ❌ SCALING on Zero-Valued Default Parameters — any SCALING or SYMMETRY relation on a zero-valued
+  parameter is trivially degenerate and will be rejected by the source filter.
+- **Absolute convergence threshold** (`|r| < tol`): even for the linear pressure Poisson sub-problem,
+  an absolute stopping criterion means the scaled and unscaled problems may terminate at different
+  iteration counts, producing non-proportional final states. See ❌ Absolute convergence thresholds.
+- **Permutative on grid indices**: stencil codes encode spatial position in the array index — swapping
+  two grid cells changes the geometry and breaks physical semantics.
+
+Priority order for this class:
+1. **CONSERVATION** (1.1): Verify a physical invariant at the converged state. For incompressible
+   flow, the velocity divergence should sum to approximately zero across the domain. For energy-based
+   formulations, check that a conserved quantity is unchanged across a full timestep or solver sweep.
+   This is applicable ONLY if the passthrough captures the output fields at sufficient resolution to
+   compute the invariant, or if the source already prints a residual/conservation diagnostic.
+2. **MONOTONICITY** (6.1): If the solver prints per-iteration convergence residuals to stdout in the
+   baseline execution, MONOTONICITY is the most reliably applicable relation for this class. It is
+   weak (a code can converge monotonically to a wrong answer), but it is better than an aborted trial.
+3. **SCALING** (3.2 joint-scaling): ONLY in the rare case where (a) the flow is effectively linear
+   (Stokes limit, Re → 0), (b) ALL driving terms — including all non-homogeneous BCs and the full
+   initial condition — are scaled simultaneously by the same α, AND (c) the convergence criterion is
+   relative (`|r|/|r₀| < tol`). If any of these three conditions is absent, do not propose SCALING.
+
+**If none of the above is applicable** (no conservation law checkable from passthrough statistics,
+no residual history in stdout, nonlinear coupling, non-homogeneous BCs, zero body forces), propose
+zero relations. This causes Stage 0 to abort — which is the correct outcome. It is better to abort
+than to propose relations that will all fail the source filter, consuming pipeline time with no
+verification benefit.
 
 ### Linear Algebra (Dense Solve, Matrix Multiply)
 Priority order:
