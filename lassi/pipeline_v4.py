@@ -262,6 +262,9 @@ def auto_code_llmgeneration_pipeline(prompts,
     tier1_exhausted = False                    # Set when T1 per-code budget exhausted; reset each iteration
     tier1_verdict = "SKIP"          # Most recent Tier 1 verdict for the current code
     tier1_diagnostic = {}           # Most recent Tier 1 assertion diagnostic
+    _last_failing_t1_instr = ""    # T1 instrumented labels of the most recently popped T1-failing code; consumed
+                                   # by the top-of-loop exhaustion safety-net handler (the failing code itself
+                                   # has been popped from code_blocks by then, so labels cannot be re-extracted).
     force_new_plan = False          # Set when any per-code tier exhaustion requires a new refactoring plan
     exe_output_source = ""
     source_orig_stdout = ""    # stdout from SOURCE_orig execution (Stage 0)
@@ -935,12 +938,15 @@ def auto_code_llmgeneration_pipeline(prompts,
                   + " (global: " + str(self_correction_verify_counter) + ")" + color.END + " -----")
             print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
 
-            # Increment per-code T1 counter and check exhaustion BEFORE generating another SC attempt.
-            self_correction_tier1_counter_code += 1
-            tier1_sc_count += 1  # Table 1 ★ per-type SC counter (count even on exhaustion — it IS a SC event)
-            iteration_log.setdefault("v" + str(len(code_blocks) - 1), {"self_correction_count": 0, "energy_refactor_count": 0, "LLM_temperature": round(code_gen_temp, 1)})
-            iteration_log["v" + str(len(code_blocks) - 1)]["self_correction_count"] += 1
-
+            # NOTE: self_correction_tier1_counter_code, tier1_sc_count, and iteration_log are
+            # incremented in the mid-loop T1 FAIL detection branch (the site of the actual failure
+            # event). Incrementing again here on SC entry produced a double-count that halved the
+            # effective per-code T1 budget and caused exhaustion to fall through to this branch
+            # rather than the mid-loop exhaustion branch below — which in turn made cb-index
+            # attribution wrong (the failing code had already been popped by mid-loop).
+            # This branch is now a defensive safety net: it should never normally trigger because
+            # mid-loop handles exhaustion correctly. The cb-index recovery code below still uses
+            # `len(code_blocks)` (not -1) so any safety-net firing is also attributed correctly.
             if self_correction_tier1_counter_code > self_correction_tier1_counter_code_max:
                 # Per-code T1 budget exhausted: this code cannot satisfy invariant assertions.
                 # Keep code in code_blocks as a research artifact (it ran — T1 assertions detected a flaw).
@@ -951,9 +957,14 @@ def auto_code_llmgeneration_pipeline(prompts,
                 energy_efficiency_refactor_success = False  # ensure EE SC branch fires on next iteration
                 force_new_plan = True                       # force new refactoring plan
                 bad_refactor_plans.append(refactoring_plan) # record so plan LLM avoids repeating this strategy
-                # Write final attempt record for the exhausted T1-failing code before continuing
-                _cb_idx = len(code_blocks) - 1
-                _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
+                # Write final attempt record for the exhausted T1-failing code before continuing.
+                # IMPORTANT: the failing code was already popped by the mid-loop T1 FAIL branch on
+                # the prior iteration, so `len(code_blocks) - 1` here points to the previous
+                # surviving keeper — NOT the failing code. The correct cb-index for the failing
+                # code is the next-append slot, i.e. `len(code_blocks)`. Labels cannot be re-
+                # extracted (code is gone); reuse `_last_failing_t1_instr` saved by mid-loop.
+                _cb_idx = len(code_blocks)
+                _t1_instr = _last_failing_t1_instr
                 _rec = _build_attempt_record(
                     app_name=file_name, trial_number=trial_number,
                     code_block_index=_cb_idx, attempt_number=attempt_number,
@@ -1152,18 +1163,39 @@ def auto_code_llmgeneration_pipeline(prompts,
 
             tier3_diag_summary  = tier3_diagnostic.get("summary", "(no diagnostic available)")
             tier3_relation_name = tier3_diagnostic.get("relation_name", "(unknown)")
+            tier3_diag_reason   = tier3_diagnostic.get("reason", "")
 
-            error_correction_prompt_intro = (
-                "\n\nThe above code passed Tier 2 empirical equivalence checking but FAILED "
-                "LASSI-Verify Tier 3 metamorphic testing.\n\n"
-                "The metamorphic relation that failed: " + tier3_relation_name + "\n\n"
-                "=== TIER 3 DIAGNOSTIC ===\n"
-                + tier3_diag_summary +
-                "\n=== END TIER 3 DIAGNOSTIC ===\n\n"
-                "Fix the generated code so that it satisfies this mathematical property. "
-                "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
-                "The issue is a structural property of the computation, not a single output value difference."
-            )
+            if tier3_diag_reason == "instrument_error":
+                # The MT variant itself failed to compile or execute after all repair attempts —
+                # this is an instrumentation failure, NOT a mathematical property violation.
+                # A fresh code generation gives the variant insertion a clean shot at success.
+                error_correction_prompt_intro = (
+                    "\n\nThe above code could not be verified by LASSI-Verify Tier 3 metamorphic "
+                    "testing due to an instrumentation failure (the metamorphic variant could not "
+                    "be compiled or executed after repeated repair attempts).\n\n"
+                    "Metamorphic relation that could not be instrumented: " + tier3_relation_name + "\n\n"
+                    "=== TIER 3 DIAGNOSTIC ===\n"
+                    + tier3_diag_summary +
+                    "\n=== END TIER 3 DIAGNOSTIC ===\n\n"
+                    "This is NOT a mathematical correctness failure in your code — the optimization "
+                    "logic itself may be correct. However, verification cannot be confirmed without "
+                    "a working metamorphic variant. Please regenerate the optimized code. "
+                    "A structurally simpler optimization may allow the metamorphic variant to "
+                    "instrument correctly. "
+                    "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks."
+                )
+            else:
+                error_correction_prompt_intro = (
+                    "\n\nThe above code passed Tier 2 empirical equivalence checking but FAILED "
+                    "LASSI-Verify Tier 3 metamorphic testing.\n\n"
+                    "The metamorphic relation that failed: " + tier3_relation_name + "\n\n"
+                    "=== TIER 3 DIAGNOSTIC ===\n"
+                    + tier3_diag_summary +
+                    "\n=== END TIER 3 DIAGNOSTIC ===\n\n"
+                    "Fix the generated code so that it satisfies this mathematical property. "
+                    "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
+                    "The issue is a structural property of the computation, not a single output value difference."
+                )
 
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
             error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
@@ -1700,6 +1732,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         # Table 2 ★ intermediate attempt row — log before pop overwrites this code_block_index
                         _cb_idx = len(code_blocks) - 1
                         _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
+                        _last_failing_t1_instr = _t1_instr  # cache for top-of-loop exhaustion safety net
                         _rec = _build_attempt_record(
                             app_name=file_name, trial_number=trial_number,
                             code_block_index=_cb_idx, attempt_number=attempt_number,
@@ -1751,6 +1784,11 @@ def auto_code_llmgeneration_pipeline(prompts,
                         current_sc_trigger = None  # exhausted → next iteration is fresh
                         valid_code_flag = "INVALID"
                         compile_result = "energy_efficiency"  # drive fresh generation next iteration
+                        # Match T2 (line 1873-1874) and T3 (line 1973-1974) exhaustion paths:
+                        # the refactoring strategy has structurally failed under T1, so force a
+                        # new plan and record this one as bad so the plan LLM avoids repeating it.
+                        force_new_plan = True
+                        bad_refactor_plans.append(refactoring_plan)
                         # CRITICAL: must append to all history arrays before continuing.
                         # code_blocks.append() ran at the keeper block (above); if we continue
                         # without appending here, code_blocks grows but history arrays do not —
