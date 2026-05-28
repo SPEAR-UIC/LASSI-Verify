@@ -31,5 +31,5 @@ pipeline:
   verifyprompt: true
 experiment:
   trial_number: 1
-  total_trials: 10
+  total_trials: 3
   label: ''

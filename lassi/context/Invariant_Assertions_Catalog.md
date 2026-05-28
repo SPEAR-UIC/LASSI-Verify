@@ -53,6 +53,7 @@ Properties tied to specific execution patterns:
 - **Verifying that GPU and CPU produce the same result** — this is handled separately and is not a Tier 1 concern
 - **Checking specific domain-correct values** — do not assert that a field equals a known boundary condition value, a known analytical solution, or any particular number
 - **Re-running the computation to verify it** — do not add a serial CPU fallback and compare to GPU output
+- **Asserting properties of an existing CPU reference buffer** — many benchmarks contain a built-in CPU verification path (buffers often named `*_ref`, `*_cpu`, `*_serial`, `*_expected`). These buffers are off-limits for Tier 1 assertions; checking their finiteness or comparing them to the GPU output will fail the instrumented source. Assert only properties of the GPU output buffer itself.
 
 ### The one-sentence rule:
 > **Check that values exist, are finite, and are in a plausible range. Do NOT check that they equal anything specific.**
@@ -447,6 +448,72 @@ cudaMemcpy(h_out, d_out, numKeys * sizeof(uint64_t), cudaMemcpyDeviceToHost);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
+
+### ❌ WRONG: Asserting on Benchmark-Embedded CPU Reference Buffers
+
+Many scientific CUDA benchmarks contain an embedded CPU verification path — a serial host-side implementation of the same computation that runs alongside the GPU kernel and whose result is compared to the GPU output to validate correctness. These CPU verification buffers are part of the benchmark's own testing logic, not added by the LLM. They appear in the source code as host-side arrays, typically named with identifiers such as `output_ref`, `h_ref`, `cpu_out`, `ref_result`, `expected_output`, `serial_result`, or any buffer allocated on the host, filled by a CPU loop computing the same function as the GPU kernel, and then compared against the GPU result buffer using `memcmp`, element-wise difference, or absolute error.
+
+The LLM will naturally treat these existing buffers as a convenient ground truth for Tier 1 assertions, either by checking finiteness of both the GPU and CPU buffers together, or by asserting that the two agree. This entire class of assertion is **always wrong** and will cause the instrumented source to fail its own Tier 1 checks.
+
+```cpp
+// BAD — source code has an existing output_ref CPU buffer; assertion bundles GPU and CPU validity
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!(isfinite(output_ref[i]) && output_ref[i] >= 0.0f &&
+              isfinite(output[i])     && output[i]     >= 0.0f)) {
+            _t1_pass = false; break;
+        }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [final_buffers_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+
+// ALSO BAD — compares GPU output to existing CPU reference buffer
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (fabs(output[i] - output_ref[i]) > tol) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_matches_ref]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+**WHY THIS IS WRONG:**
+
+1. **The CPU reference path evaluates to non-finite values for legitimate inputs.** Any computation involving `log`, `log2`, `sqrt`, `1/x`, or integer division can produce ±inf or NaN on certain valid inputs (e.g., `log2(0) = -inf` whenever a histogram bin is empty, `sqrt(-0.0f)` under signed-zero rules, `1/n` when a count is zero). The GPU kernel may handle these cases with clamping, conditional logic, or a different evaluation path that produces a valid finite result, while the CPU reference path does not. An assertion that checks `isfinite(cpu_ref[i])` — even without comparing it to the GPU output — will FAIL for the valid source code.
+
+2. **The CPU reference is not a specification; it is auxiliary test code.** Many benchmark CPU verification paths are simplified or unoptimized serial implementations written purely for testing. They may contain bugs, handle edge cases differently, or silently produce incorrect results for certain input patterns. An assertion that depends on the CPU reference's correctness inherits all of its failure modes.
+
+3. **CPU and GPU floating-point evaluation order differ.** Even without bugs, the CPU serial computation and the GPU parallel computation accumulate floating-point rounding errors differently due to operation ordering. Equality or near-equality checks across CPU and GPU results do not hold in general and will fail on correct source code with certain inputs.
+
+4. **This check belongs to Tier 2, not Tier 1.** Tier 2 performs empirical equivalence checking by comparing the GPU output of the generated code against the GPU output of the instrumented source. Tier 1 asserts only structural properties — that the computation ran, that pointers are valid, that values are numerically well-formed — without any reference to expected output values.
+
+**How to identify embedded verification buffers in unfamiliar source code:** Look for host-side arrays that are (a) allocated with `malloc`, `new`, or `cudaMallocHost`; (b) populated by a CPU loop that computes the same function as the GPU kernel; and (c) compared to the GPU result buffer in a final check, often gated by a success flag or printed as a "PASS/FAIL" message by the benchmark itself. Variable names containing `ref`, `cpu`, `host`, `serial`, `expected`, `gt` ("ground truth"), or `check` are a strong signal.
+
+**CORRECT:** Ignore the CPU reference buffer entirely. Assert only structural properties of the GPU output:
+```cpp
+cudaMemcpy(h_output, d_output, N * sizeof(float), cudaMemcpyDeviceToHost);
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - GPU output pointer valid and values finite after transfer
+{
+    bool _t1_pass = (h_output != NULL && N > 0);
+    printf("LASSI-VERIFY ASSERTIONS [output_ptr_valid]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - GPU output values are finite (no NaN or Inf)
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (!isfinite(h_output[i])) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_finite]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+> **Invariant rule for reference buffers:** If the condition you are asserting requires reading any buffer populated by a CPU computation of the same kernel function — whether added by you or already present in the source code — that condition must be removed. Replace it with a structural check on the GPU output buffer alone.
+
+---
 
 ### ❌ WRONG: Asserting on a Host Buffer Before the Device-to-Host Copy
 ```cpp
