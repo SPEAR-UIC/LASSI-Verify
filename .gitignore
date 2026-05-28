@@ -33,3 +33,9 @@ test_codes/**/*-cuda_main_verify
 
 # Best clean run — uninstrumented best LASSI code (generated at pipeline end, not tracked)
 *_best_clean.cu
+
+# Deprecated notebook (functionality moved to run_lassi.py / lassiapp.py); kept locally only
+LASSI_power_pipeline_v4.ipynb
+
+# Runtime-generated benchmark output data files
+source_codes/**/*.dat
