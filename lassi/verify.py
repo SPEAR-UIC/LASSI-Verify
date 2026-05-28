@@ -1246,7 +1246,8 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
 
 def code_insert_metamorphic_variant(source_code, relation, llm_source, model, num_ctx,
                                      system_prompt, display_response,
-                                     template_code=None, feedback=None, verifyprompt=False):
+                                     template_code=None, feedback=None, verifyprompt=False,
+                                     repair_mode=False):
     """
     Tier 3: Produce a metamorphic variant of source_code for one relation.
 
@@ -1357,12 +1358,45 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         )
     elif relation_type == "MONOTONICITY":
         block_format = (
-            "**METAMORPHIC output block format** (print per-iteration inside the solver loop, "
-            "using 'Residual:' field):\n\n"
+            "**METAMORPHIC output block format** (using 'Residual:' field):\n\n"
             "```\n"
             "=== BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_<k>] ===\n"
             "Relation: monotonicity\nIteration: <k>\nResidual: %.17g\n"
             "=== END LASSI-VERIFY METAMORPHIC [residual_iter_<k>] ===\n"
+            "```\n\n"
+            "**CRITICAL — Block placement depends on the loop structure:**\n\n"
+            "If the solver has a TWO-LEVEL loop (outer timestep/sweep loop wrapping an inner "
+            "solver loop), place the block AFTER the inner loop exits, once per outer iteration. "
+            "Placing it inside the inner loop would emit O(timesteps × inner_iterations) lines — "
+            "potentially millions — and will crash the pipeline.\n\n"
+            "```cpp\n"
+            "// TWO-LEVEL: block goes OUTSIDE the inner loop\n"
+            "for (int t = 0; t < num_timesteps; ++t) {\n"
+            "    double final_res = 0.0;\n"
+            "    for (int iter = 0; iter < max_iter; ++iter) {\n"
+            "        // ... solver kernels ...\n"
+            "        if (final_res < tol) break;\n"
+            "    }\n"
+            "    // ✅ ONE block per timestep, after inner loop\n"
+            "    printf(\"=== BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\\n\", t);\n"
+            "    printf(\"Relation: monotonicity\\nIteration: %d\\nResidual: %.17g\\n\", t, final_res);\n"
+            "    printf(\"=== END LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\\n\", t);\n"
+            "}\n"
+            "```\n\n"
+            "If the solver has only a SINGLE-LEVEL iteration loop, cap the output at 200 "
+            "iterations to prevent stdout overflow:\n\n"
+            "```cpp\n"
+            "// SINGLE-LEVEL: cap at 200\n"
+            "#define LASSI_MT_MAX_PRINT 200\n"
+            "for (int iter = 0; iter < max_iter; ++iter) {\n"
+            "    // ... solver ...\n"
+            "    if (iter < LASSI_MT_MAX_PRINT) {\n"
+            "        printf(\"=== BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\\n\", iter);\n"
+            "        printf(\"Relation: monotonicity\\nIteration: %d\\nResidual: %.17g\\n\", iter, residual);\n"
+            "        printf(\"=== END LASSI-VERIFY METAMORPHIC [residual_iter_%d] ===\\n\", iter);\n"
+            "    }\n"
+            "    if (converged) break;\n"
+            "}\n"
             "```\n"
         )
     else:
@@ -1425,9 +1459,20 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         )
     elif relation_type == "MONOTONICITY":
         transform_instruction = (
-            "**Step 1 — Add per-iteration residual output** inside the solver iteration loop.\n"
-            "After each convergence update, compute the current residual and print a METAMORPHIC block.\n"
-            "No input transformation is needed.\n"
+            "No input transformation is needed.\n\n"
+            "**Step 1 — Identify the loop structure before inserting any blocks:**\n"
+            "Read the source code and determine whether the solver uses:\n"
+            "  (A) A single-level iteration loop (the solver loop is the outermost loop), OR\n"
+            "  (B) A two-level loop structure (outer timestep/sweep loop wrapping an inner "
+            "solver/SOR loop).\n\n"
+            "**If (A) — single-level loop:** Insert the METAMORPHIC block inside the loop "
+            "but guard it with `if (iter < LASSI_MT_MAX_PRINT)` (define LASSI_MT_MAX_PRINT 200 "
+            "above the loop). This caps stdout at 200 blocks regardless of max_iter.\n\n"
+            "**If (B) — two-level loop:** Insert the METAMORPHIC block AFTER the inner loop "
+            "exits, inside the outer loop body. Print once per outer iteration using the outer "
+            "loop counter as the iteration index and the inner loop's final convergence "
+            "residual as the value. NEVER place the block inside the inner loop — this "
+            "would print O(outer_iterations × inner_iterations) lines and overflow the pipeline.\n"
         )
     else:
         transform_instruction = (
@@ -1445,54 +1490,90 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             "=== END PREVIOUS ATTEMPT FEEDBACK ===\n\n"
         )
 
-    content_prompt = _feedback_prefix + (
-        "You are preparing a metamorphic variant of a GPU-accelerated source code for "
-        "Tier 3 empirical verification as part of the LASSI-Verify framework.\n\n"
-        "Your task: modify the source code below to produce a variant that tests the "
-        "following metamorphic relation.\n\n"
-        "=== METAMORPHIC RELATION ===\n"
-        + rel_spec +
-        "===========================\n\n"
-        "**CRITICAL PRESERVATION REQUIREMENT:**\n"
-        "The source code already contains LASSI-VERIFY ASSERTIONS and LASSI-VERIFY "
-        "PASSTHROUGH blocks. You MUST preserve ALL existing blocks marked with:\n"
-        "    // >>> BEGIN LASSI-VERIFY ASSERTIONS ... >>>\n"
-        "    // <<< END LASSI-VERIFY ASSERTIONS <<<\n"
-        "and ALL existing blocks marked with:\n"
-        "    // >>> BEGIN LASSI-VERIFY PASSTHROUGH ... >>>\n"
-        "    // <<< END LASSI-VERIFY PASSTHROUGH <<<\n"
-        "Do NOT modify, remove, or restructure any of these blocks.\n\n"
-        "**MODIFICATION INSTRUCTIONS:**\n"
-        + transform_instruction + "\n"
-        + block_format + "\n"
-        f"**OUTPUT INSTRUCTIONS:**\n"
-        f"The source code below has exactly {input_lines} lines. Your output MUST have MORE than "
-        f"{input_lines} lines — you are inserting instrumentation, so the output must be longer.\n"
-        "Always provide the complete and fully functional instrumented code without placeholders, "
-        "comments, or references suggesting that parts of the original code should be included. "
-        "Ensure every part of the instrumented code is explicitly written out. "
-        "Do NOT use ellipsis (...), shorthand like '// [other kernels unchanged]', "
-        "'// ... rest of code ...', '// same as before', or ANY comment or notation suggesting "
-        "sections were omitted or skipped. "
-        "Output ONLY the complete, modified source code ready to compile. "
-        "Do NOT include explanatory text or commentary outside of a single code fence. "
-        "The output must compile with nvcc or hipcc.\n\n"
-        + (
-            "[REFERENCE TEMPLATE — how this metamorphic relation was inserted into the SOURCE_verify version]\n"
-            "The following shows the validated strategy used to insert this same relation into the "
-            "reference (SOURCE_verify) version of this code. Use it as a guide for WHERE and HOW "
-            "to apply the input transformation and insert the METAMORPHIC output block. "
-            "Do NOT copy it verbatim — the source code below may be structured differently. "
-            "Replicate the strategy, not the exact lines.\n\n"
-            + template_code +
-            "\n[END REFERENCE TEMPLATE]\n\n"
-            if template_code else ""
+    if repair_mode:
+        # repair_mode: fix syntax errors in a broken variant; do NOT restructure.
+        # source_code = the broken variant to patch.
+        # template_code = the source variant that compiled successfully (structural reference).
+        content_prompt = _feedback_prefix + (
+            "You are fixing a metamorphic variant that failed to compile or execute.\n\n"
+            "Your task: find and fix ONLY the syntax or compilation errors in the broken variant "
+            "below. This is a bug-fix-only task — do NOT change the metamorphic transformation "
+            "logic, observation points, METAMORPHIC block labels, or block format.\n\n"
+            "**CRITICAL CONSTRAINTS:**\n"
+            "- Fix ONLY syntax errors (missing braces, missing semicolons, malformed expressions, "
+            "undeclared variables, wrong types, etc.)\n"
+            "- Do NOT change the input transformation code or its scope\n"
+            "- Do NOT change METAMORPHIC output block labels or format\n"
+            "- Do NOT restructure or reorganize the code\n"
+            "- Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks\n"
+            "- The output must be the same program with only the syntax bugs corrected\n\n"
+            + (
+                "[STRUCTURAL REFERENCE — the same metamorphic variant compiled successfully "
+                "for the source code version]\n"
+                "Use this to identify what the correct structure should look like. "
+                "Your fix should make the broken variant follow this structural pattern closely "
+                "without copying it verbatim (the generated code may differ from the source).\n\n"
+                + template_code +
+                "\n[END STRUCTURAL REFERENCE]\n\n"
+                if template_code else ""
+            )
+            + "[BROKEN VARIANT — fix the syntax errors in this code]\n"
+            + source_code
+            + "\n[END BROKEN VARIANT]\n\n"
+            "Output ONLY the complete, fixed source code ready to compile. "
+            "Do NOT include explanatory text or commentary outside of a single code fence. "
+            "The output must compile with nvcc or hipcc.\n"
         )
-        + "[BEGIN SOURCE CODE]\n" + source_code + "\n[END SOURCE CODE]\n"
-    )
+    else:
+        content_prompt = _feedback_prefix + (
+            "You are preparing a metamorphic variant of a GPU-accelerated source code for "
+            "Tier 3 empirical verification as part of the LASSI-Verify framework.\n\n"
+            "Your task: modify the source code below to produce a variant that tests the "
+            "following metamorphic relation.\n\n"
+            "=== METAMORPHIC RELATION ===\n"
+            + rel_spec +
+            "===========================\n\n"
+            "**CRITICAL PRESERVATION REQUIREMENT:**\n"
+            "The source code already contains LASSI-VERIFY ASSERTIONS and LASSI-VERIFY "
+            "PASSTHROUGH blocks. You MUST preserve ALL existing blocks marked with:\n"
+            "    // >>> BEGIN LASSI-VERIFY ASSERTIONS ... >>>\n"
+            "    // <<< END LASSI-VERIFY ASSERTIONS <<<\n"
+            "and ALL existing blocks marked with:\n"
+            "    // >>> BEGIN LASSI-VERIFY PASSTHROUGH ... >>>\n"
+            "    // <<< END LASSI-VERIFY PASSTHROUGH <<<\n"
+            "Do NOT modify, remove, or restructure any of these blocks.\n\n"
+            "**MODIFICATION INSTRUCTIONS:**\n"
+            + transform_instruction + "\n"
+            + block_format + "\n"
+            f"**OUTPUT INSTRUCTIONS:**\n"
+            f"The source code below has exactly {input_lines} lines. Your output MUST have MORE than "
+            f"{input_lines} lines — you are inserting instrumentation, so the output must be longer.\n"
+            "Always provide the complete and fully functional instrumented code without placeholders, "
+            "comments, or references suggesting that parts of the original code should be included. "
+            "Ensure every part of the instrumented code is explicitly written out. "
+            "Do NOT use ellipsis (...), shorthand like '// [other kernels unchanged]', "
+            "'// ... rest of code ...', '// same as before', or ANY comment or notation suggesting "
+            "sections were omitted or skipped. "
+            "Output ONLY the complete, modified source code ready to compile. "
+            "Do NOT include explanatory text or commentary outside of a single code fence. "
+            "The output must compile with nvcc or hipcc.\n\n"
+            + (
+                "[REFERENCE TEMPLATE — how this metamorphic relation was inserted into the SOURCE_verify version]\n"
+                "The following shows the validated strategy used to insert this same relation into the "
+                "reference (SOURCE_verify) version of this code. Use it as a guide for WHERE and HOW "
+                "to apply the input transformation and insert the METAMORPHIC output block. "
+                "Do NOT copy it verbatim — the source code below may be structured differently. "
+                "Replicate the strategy, not the exact lines.\n\n"
+                + template_code +
+                "\n[END REFERENCE TEMPLATE]\n\n"
+                if template_code else ""
+            )
+            + "[BEGIN SOURCE CODE]\n" + source_code + "\n[END SOURCE CODE]\n"
+        )
 
+    _mode_label = "REPAIRING" if repair_mode else "Inserting"
     print("\n----- " + color.BOLD + color.PURPLE +
-          f"STARTING Tier 3: Inserting metamorphic variant ({relation_name})" +
+          f"STARTING Tier 3: {_mode_label} metamorphic variant ({relation_name})" +
           color.END + " -----\n")
 
     # Override with the verification insertion system prompt — preserves all existing code,
@@ -1552,17 +1633,20 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
 
         # Sanity check: instrumentation only adds lines — same or fewer lines means the LLM
         # omitted sections via placeholder comments (e.g. "// ... [other kernels unchanged] ...").
-        output_lines = len(extracted_code.splitlines())
-        if extracted_code and output_lines <= input_lines:
-            _prev_output_lines = output_lines
-            retry_msg = "Retrying with explicit line count correction." if _attempt == 0 else "Rejecting output."
-            print(f"\n[WARNING] Metamorphic variant line count check FAILED: "
-                  f"input={input_lines} lines, output={output_lines} lines. "
-                  f"LLM likely omitted code via placeholder comments. {retry_msg}")
-            if _attempt == 0:
-                continue  # retry
-            else:
-                return ""  # two failures — give up
+        # Skipped in repair_mode: a syntax-only fix may not change the line count, and the
+        # broken variant itself is already at or above the original line count.
+        if not repair_mode:
+            output_lines = len(extracted_code.splitlines())
+            if extracted_code and output_lines <= input_lines:
+                _prev_output_lines = output_lines
+                retry_msg = "Retrying with explicit line count correction." if _attempt == 0 else "Rejecting output."
+                print(f"\n[WARNING] Metamorphic variant line count check FAILED: "
+                      f"input={input_lines} lines, output={output_lines} lines. "
+                      f"LLM likely omitted code via placeholder comments. {retry_msg}")
+                if _attempt == 0:
+                    continue  # retry
+                else:
+                    return ""  # two failures — give up
 
         return extracted_code
     return ""  # should not be reached
@@ -2328,11 +2412,18 @@ def run_metamorphic_variants(source_code, active_relations, contract,
     # or {"feedback_text": str, "failed_code": str|None}.
     # Covers both SKIP (code quality issues) and FAIL (math check failure — may be a code bug).
     _retry_info = {}
+    # Max repair attempts for main-loop compile/execute failures (3 total: 1 original + 2 repairs).
+    # Stage 0 is unaffected — it uses the separate Stage 0 retry block below.
+    _MAX_VARIANT_REPAIR_RETRIES = 2
 
     for relation in active_relations:
         relation_name = relation.get("name", "unknown")
         relation_type = relation.get("type", "UNKNOWN")
         print(f"\n----- Tier 3: testing relation '{relation_name}' ({relation_type}) -----")
+        # Set per-iteration flag — repair loop sets this True to skip the normal execute block
+        # when the repaired variant has already been compiled and executed successfully.
+        _skip_execute = False
+        _repaired_variant_stdout = None
 
         # Skip null-factor SCALING/SYMMETRY (spatial reflection etc. require element-wise
         # comparison across the full array — deferred to Phase 3).
@@ -2427,80 +2518,215 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                     f"```\n{compile_err[:400]}\n```\n"
                     f"Fix the compile error(s) and output the corrected complete source."
                 ),
-                "failed_code": variant_code,  # compiled but failed — show LLM the actual code
+                "failed_code": variant_code,
             }
-            if code_version is not None:  # Fix B: active relation untestable → FAIL
+            if code_version is None:  # Stage 0: skip relation, continue to next
+                continue
+            # Main loop: attempt repair before marking as instrument_error.
+            # Use repair_mode=True so the LLM patches the broken variant (not regenerates from scratch).
+            # template_code (the validated source variant) is the structural reference.
+            _repair_succeeded = False
+            _current_broken = variant_code
+            _current_compile_err = compile_err
+            for _repair_idx in range(_MAX_VARIANT_REPAIR_RETRIES):
+                print(f"  [Tier 3] Compile repair attempt {_repair_idx + 1}/{_MAX_VARIANT_REPAIR_RETRIES} "
+                      f"for '{relation_name}'...")
+                _repair_feedback = (
+                    f"The previous variant failed to compile:\n"
+                    f"```\n{_current_compile_err[:400]}\n```"
+                    f"\n\n[PREVIOUS BROKEN VARIANT]\n```cpp\n{_current_broken}\n```"
+                )
+                _repaired_code = code_insert_metamorphic_variant(
+                    _current_broken, relation,
+                    llm_source, model, num_ctx, system_prompt, display_response,
+                    template_code=template_code,
+                    feedback=_repair_feedback,
+                    verifyprompt=verifyprompt,
+                    repair_mode=True,
+                )
+                if not _repaired_code:
+                    print(f"  [Tier 3] Repair {_repair_idx + 1}: no code extracted — retrying")
+                    continue
+                _current_broken = _repaired_code
+                with open(variant_path, 'w') as _rvf:
+                    _rvf.write(_repaired_code)
+                _r_compile_err, _r_variant_exe = lassi.code_manager.compile_code(
+                    variant_path, target_lang, code_compiler, code_compiler_kwds
+                )
+                if _r_compile_err:
+                    print(f"  [Tier 3] Repair {_repair_idx + 1}: still compile error")
+                    _current_compile_err = _r_compile_err
+                    continue
+                # Repair compiled — execute immediately so we can fall through to Step 5.
+                print(f"  [Tier 3] Repair {_repair_idx + 1}: compile OK — executing...")
+                try:
+                    _r_exe_abs = os.path.abspath(_r_variant_exe)
+                    _r_exe_dir = os.path.dirname(_r_exe_abs)
+                    _r_exe_base = os.path.basename(_r_exe_abs)
+                    _r_result = subprocess.run(
+                        ["./" + _r_exe_base] + list(exe_input_parameters),
+                        cwd=_r_exe_dir,
+                        capture_output=True, text=True, timeout=120
+                    )
+                    _repaired_variant_stdout = _r_result.stdout
+                    any_ran = True
+                    print(f"\n----- < BEGIN: Tier 3 repaired variant stdout > -----\n")
+                    print(_repaired_variant_stdout)
+                    print(f"----- < END: Tier 3 repaired variant stdout > -----\n")
+                    if _r_result.returncode != 0:
+                        print(f"  [Tier 3] Repair {_repair_idx + 1}: execution warning: "
+                              f"return code {_r_result.returncode}")
+                    _repair_succeeded = True
+                    # Remove the SKIP result appended above — repair succeeded, proceed to check.
+                    results.pop()
+                    break
+                except (subprocess.TimeoutExpired, Exception) as _re:
+                    print(f"  [Tier 3] Repair {_repair_idx + 1}: execute failed: {_re}")
+                    # Repaired code compiled but didn't run — treat repaired code as next broken base.
+                    continue
+            if _repair_succeeded:
+                # Repair compiled and executed — skip the normal execute block (Step 4) and
+                # fall through to Step 5 with the repaired stdout.
+                _skip_execute = True
+                variant_stdout = _repaired_variant_stdout
+            else:
+                # All repair attempts failed — cannot verify this relation; instrument_error.
+                print(f"  [Tier 3] All {_MAX_VARIANT_REPAIR_RETRIES} repair attempts failed "
+                      f"for '{relation_name}' — instrument_error")
+                # Update the last SKIP result to reflect the final state.
+                if results and results[-1].get("name") == relation_name:
+                    results[-1]["reason"] = f"compile failed (instrument_error after {_MAX_VARIANT_REPAIR_RETRIES} repair attempts)"
                 first_failure_diagnostic = {
                     "verdict": "FAIL", "relation_name": relation_name,
-                    "reason": results[-1]["reason"],
-                    "summary": f"FAIL: active relation '{relation_name}' could not be tested on generated code ({results[-1]['reason']}).",
+                    "reason": "instrument_error",
+                    "summary": (
+                        f"FAIL: active relation '{relation_name}' could not be tested on generated "
+                        f"code (compile error; instrument_error after {_MAX_VARIANT_REPAIR_RETRIES} "
+                        f"repair attempts). This is an instrumentation failure, not a mathematical "
+                        f"property violation."
+                    ),
                 }
                 break
-            continue
 
         # --- Step 4: Execute (lightweight — no power measurement, no wait time) ---
         # Variants run from the binary's directory to match execute_code behavior.
-        any_ran = True
-        try:
-            exe_abs = os.path.abspath(variant_exe)
-            exe_dir = os.path.dirname(exe_abs)
-            exe_base = os.path.basename(exe_abs)
-            result = subprocess.run(
-                ["./" + exe_base] + list(exe_input_parameters),
-                cwd=exe_dir,
-                capture_output=True, text=True, timeout=120
-            )
-            variant_stdout = result.stdout
-            print(f"\n----- < BEGIN: STANDARD OUTPUT FROM Tier 3 VARIANT EXECUTION > -----\n")
-            print(variant_stdout)
-            print(f"----- < END: Tier 3 Variant Output > -----\n")
-            if result.returncode != 0:
-                print(f"  [Tier 3] Execution warning: return code {result.returncode}")
-                if result.stderr:
-                    print(f"  stderr: {result.stderr[:400]}")
-        except subprocess.TimeoutExpired:
-            print(f"  [Tier 3] Execution TIMEOUT for '{relation_name}' — SKIP")
-            if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
-                relation["source_status"] = "SKIP"
-            results.append({"name": relation_name, "verdict": "SKIP",
-                             "reason": "execution timeout"})
-            _retry_info[relation_name] = {
-                "feedback_text": (
-                    "Your previous attempt timed out during execution (>120s). "
-                    "Check for infinite loops, incorrect cudaDeviceSynchronize placement, "
-                    "or unbounded memory access patterns in the instrumentation."
-                ),
-                "failed_code": variant_code,
-            }
-            if code_version is not None:  # Fix B: active relation untestable → FAIL
-                first_failure_diagnostic = {
-                    "verdict": "FAIL", "relation_name": relation_name,
-                    "reason": results[-1]["reason"],
-                    "summary": f"FAIL: active relation '{relation_name}' could not be tested on generated code ({results[-1]['reason']}).",
+        # Skipped when _skip_execute=True (repair loop already compiled and executed the variant).
+        if not _skip_execute:
+            _exec_error_str = None
+            try:
+                exe_abs = os.path.abspath(variant_exe)
+                exe_dir = os.path.dirname(exe_abs)
+                exe_base = os.path.basename(exe_abs)
+                result = subprocess.run(
+                    ["./" + exe_base] + list(exe_input_parameters),
+                    cwd=exe_dir,
+                    capture_output=True, text=True, timeout=120
+                )
+                variant_stdout = result.stdout
+                any_ran = True
+                print(f"\n----- < BEGIN: STANDARD OUTPUT FROM Tier 3 VARIANT EXECUTION > -----\n")
+                print(variant_stdout)
+                print(f"----- < END: Tier 3 Variant Output > -----\n")
+                if result.returncode != 0:
+                    print(f"  [Tier 3] Execution warning: return code {result.returncode}")
+                    if result.stderr:
+                        print(f"  stderr: {result.stderr[:400]}")
+            except subprocess.TimeoutExpired:
+                _exec_error_str = "execution timeout (>120s)"
+            except Exception as e:
+                _exec_error_str = f"execution error: {e}"
+
+            if _exec_error_str:
+                print(f"  [Tier 3] Execution FAILED for '{relation_name}' ({_exec_error_str}) — SKIP")
+                if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
+                    relation["source_status"] = "SKIP"
+                results.append({"name": relation_name, "verdict": "SKIP",
+                                 "reason": _exec_error_str})
+                _retry_info[relation_name] = {
+                    "feedback_text": (
+                        f"Your previous attempt failed at runtime: {_exec_error_str}. "
+                        "Check for infinite loops, incorrect cudaDeviceSynchronize placement, "
+                        "or unbounded memory access patterns in the instrumentation."
+                    ),
+                    "failed_code": variant_code,
                 }
-                break
-            continue
-        except Exception as e:
-            print(f"  [Tier 3] Execution ERROR for '{relation_name}': {e} — SKIP")
-            if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
-                relation["source_status"] = "SKIP"
-            results.append({"name": relation_name, "verdict": "SKIP",
-                             "reason": f"execution error: {e}"})
-            _retry_info[relation_name] = {
-                "feedback_text": (
-                    f"Your previous attempt failed at runtime: {e}. "
-                    f"Fix the error and output the corrected complete source."
-                ),
-                "failed_code": variant_code,
-            }
-            if code_version is not None:  # Fix B: active relation untestable → FAIL
-                first_failure_diagnostic = {
-                    "verdict": "FAIL", "relation_name": relation_name,
-                    "reason": results[-1]["reason"],
-                    "summary": f"FAIL: active relation '{relation_name}' could not be tested on generated code ({results[-1]['reason']}).",
-                }
-                break
-            continue
+                if code_version is None:  # Stage 0: skip relation, continue to next
+                    continue
+                # Main loop: attempt repair before marking as instrument_error.
+                _repair_succeeded = False
+                _current_broken = variant_code
+                for _repair_idx in range(_MAX_VARIANT_REPAIR_RETRIES):
+                    print(f"  [Tier 3] Execute repair attempt {_repair_idx + 1}/{_MAX_VARIANT_REPAIR_RETRIES} "
+                          f"for '{relation_name}'...")
+                    _repair_feedback = (
+                        f"The previous variant failed at runtime: {_exec_error_str}.\n"
+                        "Check for infinite loops, incorrect cudaDeviceSynchronize placement, "
+                        "or unbounded memory access in the instrumentation code."
+                        f"\n\n[PREVIOUS BROKEN VARIANT]\n```cpp\n{_current_broken}\n```"
+                    )
+                    _repaired_code = code_insert_metamorphic_variant(
+                        _current_broken, relation,
+                        llm_source, model, num_ctx, system_prompt, display_response,
+                        template_code=template_code,
+                        feedback=_repair_feedback,
+                        verifyprompt=verifyprompt,
+                        repair_mode=True,
+                    )
+                    if not _repaired_code:
+                        print(f"  [Tier 3] Execute repair {_repair_idx + 1}: no code extracted")
+                        continue
+                    _current_broken = _repaired_code
+                    with open(variant_path, 'w') as _rvf:
+                        _rvf.write(_repaired_code)
+                    _r_compile_err, _r_variant_exe = lassi.code_manager.compile_code(
+                        variant_path, target_lang, code_compiler, code_compiler_kwds
+                    )
+                    if _r_compile_err:
+                        print(f"  [Tier 3] Execute repair {_repair_idx + 1}: compile error after fix")
+                        continue
+                    try:
+                        _r_exe_abs = os.path.abspath(_r_variant_exe)
+                        _r_exe_dir = os.path.dirname(_r_exe_abs)
+                        _r_exe_base = os.path.basename(_r_exe_abs)
+                        _r_result = subprocess.run(
+                            ["./" + _r_exe_base] + list(exe_input_parameters),
+                            cwd=_r_exe_dir,
+                            capture_output=True, text=True, timeout=120
+                        )
+                        _repaired_variant_stdout = _r_result.stdout
+                        any_ran = True
+                        print(f"\n----- < BEGIN: Tier 3 execute-repaired variant stdout > -----\n")
+                        print(_repaired_variant_stdout)
+                        print(f"----- < END: Tier 3 execute-repaired variant stdout > -----\n")
+                        if _r_result.returncode != 0:
+                            print(f"  [Tier 3] Execute repair {_repair_idx + 1}: warning: "
+                                  f"return code {_r_result.returncode}")
+                        _repair_succeeded = True
+                        # Remove the SKIP result appended above — repair succeeded.
+                        results.pop()
+                        variant_stdout = _repaired_variant_stdout
+                        break
+                    except (subprocess.TimeoutExpired, Exception) as _re:
+                        print(f"  [Tier 3] Execute repair {_repair_idx + 1}: still failing: {_re}")
+                        _exec_error_str = str(_re)
+                        continue
+                if not _repair_succeeded:
+                    print(f"  [Tier 3] All {_MAX_VARIANT_REPAIR_RETRIES} execute repair attempts failed "
+                          f"for '{relation_name}' — instrument_error")
+                    if results and results[-1].get("name") == relation_name:
+                        results[-1]["reason"] = (f"{_exec_error_str} "
+                                                  f"(instrument_error after {_MAX_VARIANT_REPAIR_RETRIES} repair attempts)")
+                    first_failure_diagnostic = {
+                        "verdict": "FAIL", "relation_name": relation_name,
+                        "reason": "instrument_error",
+                        "summary": (
+                            f"FAIL: active relation '{relation_name}' could not be tested on generated "
+                            f"code ({_exec_error_str}; instrument_error after {_MAX_VARIANT_REPAIR_RETRIES} "
+                            f"repair attempts). This is an instrumentation failure, not a mathematical "
+                            f"property violation."
+                        ),
+                    }
+                    break  # stop testing further relations for this code
 
         # --- Step 5: Check metamorphic relation ---
         tolerance = relation.get("tolerance", 1e-5)
