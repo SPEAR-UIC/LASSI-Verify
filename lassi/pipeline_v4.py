@@ -11,6 +11,7 @@ import sys
 import csv
 import json
 import re
+import math
 import time
 import gc
 from datetime import datetime
@@ -1102,16 +1103,31 @@ def auto_code_llmgeneration_pipeline(prompts,
                     _table_lines.append(f"{label:<22} | {f.get('stat','?'):<10} | {_sv} | {_gv} | {rel_pct}")
                 _failure_table_str = "\n".join(_table_lines)
 
-                # Add pattern hint if relative error is consistent across failures
+                # Add pattern hint if relative error is consistent across failures.
+                # Guards against extreme/non-finite values: a generated code that produces
+                # garbage (uninitialized memory reads, NaN, Inf, ~1e+300) yields rel_errs
+                # large enough to overflow when squared in the variance computation. Skip
+                # any non-finite spec/generated/rel_err so the pattern detector sees only
+                # numerically tractable inputs — and if too few remain, just skip the hint.
                 _rel_errs = []
                 for f in _failures[:12]:
                     s, g = f.get("spec", 0.0), f.get("generated", 0.0)
-                    if isinstance(s, float) and abs(s) > 1e-10:
-                        _rel_errs.append(abs(s - g) / abs(s))
+                    if not (isinstance(s, float) and isinstance(g, (int, float))
+                            and math.isfinite(s) and math.isfinite(g)
+                            and abs(s) > 1e-10):
+                        continue
+                    _re = abs(s - g) / abs(s)
+                    # Cap at 1e6 (i.e. 100,000,000% error): anything beyond this is already
+                    # "totally wrong"; including it adds no signal and risks overflow.
+                    if math.isfinite(_re) and _re < 1e6:
+                        _rel_errs.append(_re)
                 if len(_rel_errs) >= 3:
                     avg_rel = sum(_rel_errs) / len(_rel_errs)
-                    std_rel = (sum((r - avg_rel) ** 2 for r in _rel_errs) / len(_rel_errs)) ** 0.5
-                    if std_rel < 0.005:  # consistent within 0.5% — likely a systematic factor
+                    try:
+                        std_rel = (sum((r - avg_rel) ** 2 for r in _rel_errs) / len(_rel_errs)) ** 0.5
+                    except OverflowError:
+                        std_rel = float('inf')  # defensive: skip the hint if math still blows up
+                    if math.isfinite(std_rel) and std_rel < 0.005:  # consistent within 0.5% — likely a systematic factor
                         _failure_table_str += (
                             f"\n\nPattern: All failing statistics show a consistent ~{avg_rel * 100:.1f}% relative error. "
                             "This strongly suggests a systematic factor difference — e.g., a wrong constant, "
