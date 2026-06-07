@@ -1235,6 +1235,114 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
                           f"unresolvable observation_points; {len(valid_relations)} remain.")
                 contract["relations"] = valid_relations
 
+            # --- Post-parse validation: drop relations with degenerate type/factor pairings ---
+            # The relation type defines what the factor must mean. For transformation-style
+            # relations, certain factor values reduce the relation to an identity that any
+            # code (including broken ones) trivially passes — zero discriminating power.
+            #
+            #   SCALING    → factor is the OUTPUT scaling ratio (variant ≈ factor * baseline).
+            #                factor == 1.0 is identity scaling. Drop unless the description
+            #                indicates legitimate algorithmic invariance (catalog defines
+            #                rare factor=1.0 cases for co-normalized group scaling on
+            #                normalized-distance kernels).
+            #   ADDITIVITY → factor is the OUTPUT change ratio for a given input offset.
+            #                factor == 0.0 with offset == 0 is the additivity analog of the
+            #                SCALING degeneracy: adding zero to a zero-initialized input
+            #                trivially produces the same output. Same invariance-keyword
+            #                carve-out applies.
+            #   SYMMETRY   → factor is fixed at -1.0 (negation/reflection). Any other factor
+            #                contradicts the type definition. Drop unconditionally.
+            #
+            # Catch-all: even when factor passes the type-specific check, the description
+            # may openly admit the transformation is a no-op (e.g. "transformed input is
+            # identical", "adding zero", "identity transformation", "leaves unchanged").
+            # Drop these regardless of type/factor — the LLM has confessed the relation is
+            # vacuous in its own words.
+            if contract.get("relations"):
+                _invariance_keywords = (
+                    "invariance", "invariant", "co-normalized", "co_normalized",
+                    "normalization-preserving", "normalization_preserving",
+                )
+                # Phrases that indicate the LLM admits the input transformation is a no-op.
+                # Matched case-insensitively against description + expected_relationship.
+                # Additions over time (cat-and-mouse — LLM keeps inventing new degenerate
+                # framings once the obvious ones are blocked):
+                #   - "identity replay" / "identity_replay": LLM mislabels as MONOTONICITY
+                #     and proposes running source twice with no input change ("self-replay").
+                #   - "= 1.0 * original" / "= original_output": exact phrasing the LLM uses
+                #     in expected_relationship when the relation is literal identity.
+                #   - "unchanged-input", "follow-up execution", "second execution",
+                #     "repeated execution": describe re-running the source without any
+                #     transformation, the structural signature of identity_replay relations.
+                _noop_phrases = (
+                    "transformed input is identical",
+                    "input is unchanged", "input unchanged",
+                    "leaves the input unchanged", "leaves the input identical",
+                    "identity transformation",
+                    "leaves the mathematical problem unchanged",
+                    "adding zero offset", "adding an offset of zero",
+                    "adding zero is", "scaling by 1 is",
+                    "any finite factor leaves",
+                    "identity replay", "identity_replay",
+                    "unchanged-input", "unchanged input",
+                    "follow-up execution", "second execution", "repeated execution",
+                    "= 1.0 * original", "= original_output", "= 1.0*original",
+                )
+                non_degenerate = []
+                for rel in contract["relations"]:
+                    rel_type = rel.get("type", "")
+                    rel_name = rel.get("name", "unknown")
+                    rel_factor = rel.get("factor", None)
+                    rel_desc = (rel.get("description", "") + " "
+                                + rel.get("expected_relationship", "")).lower()
+                    _has_invariance_kw = any(
+                        kw in rel_name.lower() or kw in rel_desc
+                        for kw in _invariance_keywords
+                    )
+
+                    if rel_type == "SCALING" and rel_factor == 1.0 and not _has_invariance_kw:
+                        print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
+                              f"SCALING with factor=1.0 is identity (no test power) and "
+                              f"description does not indicate algorithmic invariance. "
+                              f"Description: {rel.get('description', '(none)')[:120]}")
+                        continue
+                    if rel_type == "ADDITIVITY" and rel_factor == 0.0 and not _has_invariance_kw:
+                        print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
+                              f"ADDITIVITY with factor=0.0 is identity (no test power) and "
+                              f"description does not indicate algorithmic invariance. "
+                              f"Description: {rel.get('description', '(none)')[:120]}")
+                        continue
+                    if rel_type == "SYMMETRY" and rel_factor != -1.0:
+                        print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
+                              f"SYMMETRY requires factor=-1.0 (negation), got factor={rel_factor}.")
+                        continue
+                    # Structural check: SCALING/SYMMETRY/ADDITIVITY are transformation-style
+                    # relations — they require at least one input variable to transform.
+                    # An empty input_variables list means "no transformation defined", which
+                    # is the structural signature of an identity-replay degenerate relation
+                    # (the LLM sometimes mislabels these as MONOTONICITY too, but for the
+                    # transformation types it's an outright contradiction with the type).
+                    # MONOTONICITY/CONSERVATION legitimately have empty input_variables
+                    # (they observe the existing solver run), so this check excludes them.
+                    if (rel_type in ("SCALING", "SYMMETRY", "ADDITIVITY")
+                            and not rel.get("input_variables")):
+                        print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
+                              f"{rel_type} requires at least one input_variable to transform; "
+                              f"empty input_variables means no transformation is defined.")
+                        continue
+                    # Catch-all: description openly admits the transformation is a no-op
+                    if any(phrase in rel_desc for phrase in _noop_phrases):
+                        print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
+                              f"description openly admits the transformation is a no-op. "
+                              f"Description: {rel.get('description', '(none)')[:140]}")
+                        continue
+                    non_degenerate.append(rel)
+                n_dropped_deg = len(contract["relations"]) - len(non_degenerate)
+                if n_dropped_deg:
+                    print(f"[Tier 3 contract] {n_dropped_deg} degenerate relation(s) dropped; "
+                          f"{len(non_degenerate)} remain.")
+                contract["relations"] = non_degenerate
+
         except (json.JSONDecodeError, ValueError) as e:
             print(f"\n----- Tier 3 contract JSON parse failed: {e} — Tier 3 disabled -----")
             contract = {}
