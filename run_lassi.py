@@ -503,6 +503,11 @@ def experimental_setup(cfg):
         "lassiee_clean_runtime_diff",
         "lassiee_clean_energy_J",
         "lassiee_clean_energy_diff",
+        "basellm_verify_status",     # ★ instrumented basellm: compile/execute status
+        "basellm_verify_runtime_s",  # ★ instrumented basellm runtime (apples-to-apples vs LASSI)
+        "basellm_verify_runtime_diff",  # ★ % vs SOURCE_orig (uninstrumented baseline)
+        "basellm_verify_energy_J",   # ★ instrumented basellm energy (EE mode only)
+        "basellm_verify_energy_diff", # ★ % vs source energy
         "zeroshot_tier1_verdict",    # ★ T1 invariant assertion verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_tier2_verdict",    # ★ T2 empirical equivalence verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_tier3_verdict",    # ★ T3 metamorphic testing verdict for zero-shot code (PASS/FAIL/SKIP)

@@ -523,6 +523,17 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["zeroshot_tier3_verdict"] = "SKIP"
     experiment_data["zeroshot_empirical_verdict"] = "SKIP"
 
+    # basellm-verify: instrumented compile+execute of the zero-shot (vanilla LLM) code
+    # using the SOURCE_verify (T1+T2) template — mirror of SOURCE_orig vs SOURCE_verify
+    # but for the vanilla-LLM-generated code. Lets the vanilla code be compared against
+    # LASSI codes on an apples-to-apples (both-instrumented) basis. Computed inside the
+    # verify_zeroshot block (one extra compile+execute per trial).
+    experiment_data["basellm_verify_status"] = "skipped"
+    experiment_data["basellm_verify_runtime_s"] = "NA"
+    experiment_data["basellm_verify_runtime_diff"] = "NA"
+    experiment_data["basellm_verify_energy_J"] = "NA"
+    experiment_data["basellm_verify_energy_diff"] = "NA"
+
 
     # -----------------------------------------------------------
     # ----- STAGE 1: INSERT VERIFY INSTRUMENTATION -----
@@ -2264,6 +2275,68 @@ def auto_code_llmgeneration_pipeline(prompts,
                 print(f"\n----- Zero-Shot Empirical Verdict: {zs_empirical_verdict} "
                       f"(T1={zs_tier1_verdict}, T2={zs_tier2_verdict}, T3={zs_tier3_verdict}) -----")
 
+                # --- BASELLM-VERIFY: instrumented basellm runtime/energy (fair comparison) ---
+                # The basellm code stored in code_blocks[2] is UNINSTRUMENTED (vanilla LLM
+                # works from original_input_code), so its runtime in runtime_history[2] is
+                # NOT directly comparable to LASSI codes (which carry T1+T2 instrumentation).
+                # Mirror of how SOURCE_orig -> SOURCE_verify is built: instrument the basellm
+                # code with the full SOURCE_verify (T1+T2) template, compile, and execute it
+                # once to capture runtime/energy/power on an apples-to-apples basis vs LASSI.
+                # One extra compile+execute per trial; gated on verify_zeroshot for now since
+                # it shares the same instrumentation infrastructure as the empirical verify.
+                print(f"\n----- Zero-Shot Basellm-Verify: instrumenting basellm with SOURCE_verify template -----")
+                _bv_instr = lassi.verify.code_insert_instrumentation_from_template(
+                    _zs_code, _sv_code,  # _sv_code = input_code = SOURCE_verify (full T1+T2 if run_tier2)
+                    llm_source, model, num_ctx, system_prompt,
+                    display_response, verifyprompt=verifyprompt,
+                )
+                if not _bv_instr:
+                    print(color.RED + "[Basellm-Verify] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
+                    experiment_data["basellm_verify_status"] = "instrument_error"
+                else:
+                    _bv_path = os.path.join(experiment_data_directory,
+                                            file_name + "_basellm_verify_Trial" + str(trial_number) + _zs_src_ext)
+                    with open(_bv_path, 'w') as _f:
+                        _f.write(_bv_instr)
+                    _bv_compile, _bv_exe = lassi.code_manager.compile_code(
+                        _bv_path, target_lang, code_compiler, code_compiler_kwds
+                    )
+                    if _bv_compile != "":
+                        print(color.RED + "[Basellm-Verify] Compile failed." + color.END)
+                        experiment_data["basellm_verify_status"] = "compile_error"
+                    else:
+                        (_bv_result, _bv_stdout, _bv_energy, _bv_avg_power, _bv_std_power,
+                         _bv_duration, _bv_metrics) = lassi.code_manager.execute_code_selectvendor(
+                            experiment_data_directory, code_version, True, trial_number,
+                            directory, _bv_exe, exe_input_parameters,
+                            power_measure, "basellm_verify", target_lang, build_script, make_script,
+                            gpu_vendor="auto", wait=5,
+                        )
+                        if _bv_result != "0":
+                            print(color.RED + "[Basellm-Verify] Execute failed." + color.END)
+                            experiment_data["basellm_verify_status"] = "execute_error"
+                        else:
+                            experiment_data["basellm_verify_status"] = "success"
+                            experiment_data["basellm_verify_runtime_s"] = round(_bv_duration, 4)
+                            # Diff vs SOURCE_orig (uninstrumented baseline) — same reference
+                            # `lassiee_clean_runtime_diff` uses, so the two are directly comparable.
+                            _src_rt0 = runtime_history[0] if runtime_history and runtime_history[0] > 0 else None
+                            if _src_rt0:
+                                experiment_data["basellm_verify_runtime_diff"] = round(
+                                    100.0 * (_bv_duration - _src_rt0) / _src_rt0, 2)
+                            if power_measure and _bv_energy > 0:
+                                experiment_data["basellm_verify_energy_J"] = round(_bv_energy, 4)
+                                if sourcecode_total_energy_joules and sourcecode_total_energy_joules > 0:
+                                    experiment_data["basellm_verify_energy_diff"] = round(
+                                        100.0 * (_bv_energy - sourcecode_total_energy_joules)
+                                        / sourcecode_total_energy_joules, 2)
+                            # Use duration_refactor (this iteration's basellm uninstrumented
+                            # runtime, about to be appended to runtime_history later in the
+                            # same iteration) — runtime_history[2] is not yet populated here.
+                            print(f"[Basellm-Verify] runtime={round(_bv_duration, 4)}s instrumented "
+                                  f"(basellm uninstrumented={round(duration_refactor, 4)}s, "
+                                  f"SOURCE_verify={round(runtime_history[1], 4)}s)")
+
             # --- FRAMEWORK FINAL VERDICT DERIVATION (judge-as-baseline) ---
             # The framework verdict (valid_code_flag) is derived from tier verdicts alone for
             # LASSI codes; the LLM judge baseline (judge_raw_verdict) does NOT participate.
@@ -2397,7 +2470,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             if not zero_shot:
                 valid_code_history.append(valid_code_flag)
             else:
-                valid_code_history.append("basellm_" + stage + "_" + valid_code_flag)
+                valid_code_history.append("basellm_" + valid_code_flag)
             
             # Substract out idle metrics: we do this during the power data collection
             total_energy_joules_lessidle = total_energy_joules_refactor - idle_energy_joules
@@ -3139,15 +3212,19 @@ def auto_code_llmgeneration_pipeline(prompts,
         # Runtime: use uninstrumented values wherever available.
         # - Source code: runtime_history[0] = SOURCE_orig (uninstrumented; no Tier 1/2 overhead)
         # - Base LLM code: runtime_history[2] = zero-shot output (generated from SOURCE_orig, no LASSI-VERIFY blocks)
+        # - Base LLM code (instrumented): basellm_verify_runtime_s (full T1+T2 instrumentation,
+        #   apples-to-apples vs LASSI codes which always carry instrumentation)
         # - Best refactored code: prefer lassiee_clean_runtime_s (strip-and-rerun) if available;
         #   fall back to instrumented runtime_history[best_index] with a note.
         # Idle runtime is omitted — not meaningful for runtime-performance mode.
         _base_llm_rt = str(round(runtime_history[2], 4)) if len(runtime_history) > 2 else "NA"
+        _base_llm_rt_instr = experiment_data.get("basellm_verify_runtime_s", "NA")
         _best_rt_val = lassiee_clean_runtime_s if lassiee_clean_runtime_s != "NA" else runtime_history[best_index]
         _best_rt_note = " (uninstrumented)" if lassiee_clean_runtime_s != "NA" else " (instrumented — clean run unavailable)"
         meta_data_file += "Runtime (s): "
         meta_data_file += "  Source code (uninstrumented): " + str(round(runtime_history[0], 4))
         meta_data_file += "  Base LLM code: " + _base_llm_rt
+        meta_data_file += "  Base LLM code (instrumented): " + str(_base_llm_rt_instr)
         meta_data_file += "  Best Refactored code: " + str(round(_best_rt_val, 4)) + _best_rt_note
     if yes_execute:
         meta_data_file += "\n\n\n----- SOURCE: EXECUTION OUTPUT -----\n"
