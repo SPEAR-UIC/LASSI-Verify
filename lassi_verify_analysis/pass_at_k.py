@@ -144,7 +144,7 @@ def compute_judge_lassi_pass_vector(
     Uses Table 2 is_best_code==True rows (pre-joined with Table 1 runtime cols).
     A trial passes iff:
     1. There is an is_best_code==True row in Table 2 for this trial
-    2. That row's judge_verdict == "VALID" (pre-override judge verdict)
+    2. That row's judge_baseline_verdict == "VALID" (pre-override judge verdict)
 
     Runtime improvement is intentionally excluded: pass@k measures functional
     correctness only.  Performance is a separate metric.
@@ -183,7 +183,7 @@ def compute_judge_lassi_pass_vector(
     pass_map: dict[tuple, bool] = {}
     for _, row in bc_kernel.iterrows():
         key = (row.get("app_name"), row.get("trial_number"))
-        judge = row.get("judge_verdict")
+        judge = row.get("judge_baseline_verdict")
         pass_map[key] = str(judge).strip().upper() == "VALID"
 
     # Map back to the trial order in df_kernel using the compound key
@@ -213,7 +213,7 @@ def compute_judge_zeroshot_pass_vector(
     """Variant 3: judge-pass@k (zero-shot).
 
     A trial passes iff the LLM judge said VALID for the zero-shot code,
-    using the *raw pre-override* judge_verdict from the attempt log
+    using the *raw pre-override* judge_baseline_verdict from the attempt log
     (generation_type == 'zeroshot' rows).
 
     This is the correct source for V3 because the pipeline can apply an
@@ -233,16 +233,16 @@ def compute_judge_zeroshot_pass_vector(
     Returns:
         Boolean numpy array of shape (n_trials,).
     """
-    # Prefer raw judge_verdict from the attempt log.
+    # Prefer raw judge_baseline_verdict from the attempt log.
     # generation_type is uppercased by the data_loader normalization step.
     if not df_attempts.empty and "generation_type" in df_attempts.columns:
         zs_rows = df_attempts[df_attempts["generation_type"] == "ZEROSHOT"]
-        if not zs_rows.empty and "judge_verdict" in zs_rows.columns:
+        if not zs_rows.empty and "judge_baseline_verdict" in zs_rows.columns:
             # Build (app_name, trial_number) → raw judge verdict mapping
             judge_map: dict[tuple, bool] = {}
             for _, row in zs_rows.iterrows():
                 key = (row.get("app_name"), row.get("trial_number"))
-                judge_map[key] = str(row.get("judge_verdict", "")).strip().upper() == "VALID"
+                judge_map[key] = str(row.get("judge_baseline_verdict", "")).strip().upper() == "VALID"
 
             compound_keys = list(zip(df_kernel["app_name"], df_kernel["trial_number"]))
             result = pd.Series(

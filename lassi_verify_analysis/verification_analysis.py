@@ -336,7 +336,7 @@ def _compute_tier_detection_cases(df: pd.DataFrame) -> pd.DataFrame:
                     continue
 
                 is_final = row.get("is_final_attempt") == True
-                judge_raw = row.get("judge_verdict") if is_final else None
+                judge_raw = row.get("judge_baseline_verdict") if is_final else None
                 judge_str = (
                     str(judge_raw).strip().upper()
                     if judge_raw and not pd.isna(judge_raw)
@@ -363,7 +363,7 @@ def _compute_tier_detection_cases(df: pd.DataFrame) -> pd.DataFrame:
                     "failed_labels_or_relation": row.get(label_col, ""),
                     "self_correction_trigger":   row.get("self_correction_trigger", ""),
                     "is_final_attempt":          is_final,
-                    "judge_verdict":             judge_str,
+                    "judge_baseline_verdict":             judge_str,
                     "judge_agreed_with_fail":    judge_agreed,
                     "next_attempt_fixed":        next_fixed,
                 })
@@ -381,8 +381,8 @@ def _summarise_detection(cases: pd.DataFrame) -> dict:
     # Judge comparison — only final attempts where judge actually ran
     final_judged = cases[
         (cases["is_final_attempt"] == True)
-        & cases["judge_verdict"].notna()
-        & ~cases["judge_verdict"].isin(["NONE", "NAN", ""])
+        & cases["judge_baseline_verdict"].notna()
+        & ~cases["judge_baseline_verdict"].isin(["NONE", "NAN", ""])
     ]
     n_judged = len(final_judged)
     n_agreed = int(final_judged["judge_agreed_with_fail"].sum()) if n_judged > 0 else 0
@@ -397,8 +397,8 @@ def _summarise_detection(cases: pd.DataFrame) -> dict:
     for kernel, grp in cases.groupby("kernel_name"):
         kfj = grp[
             (grp["is_final_attempt"] == True)
-            & grp["judge_verdict"].notna()
-            & ~grp["judge_verdict"].isin(["NONE", "NAN", ""])
+            & grp["judge_baseline_verdict"].notna()
+            & ~grp["judge_baseline_verdict"].isin(["NONE", "NAN", ""])
         ]
         kn = len(kfj)
         ka = int(kfj["judge_agreed_with_fail"].sum()) if kn > 0 else 0
@@ -655,7 +655,7 @@ def _compute_confusion_matrix(df: pd.DataFrame) -> dict:
       PASS = T1==PASS AND T2==PASS AND T3==PASS (all three tiers agree code is valid)
       FAIL = any tier failed
 
-    Classifier = judge_verdict (VALID / INVALID).
+    Classifier = judge_baseline_verdict (VALID / INVALID).
 
     Only final LASSI attempts where the judge actually ran are included.
 
@@ -696,7 +696,7 @@ def _compute_confusion_matrix(df: pd.DataFrame) -> dict:
         return s == "VALID"
 
     finals["tiers_pass"] = finals.apply(_tiers_pass, axis=1)
-    finals["judge_valid"] = finals["judge_verdict"].apply(_judge_valid)
+    finals["judge_valid"] = finals["judge_baseline_verdict"].apply(_judge_valid)
 
     # Only include rows where judge produced an actual verdict
     has_judge = finals[finals["judge_valid"].notna()].copy()

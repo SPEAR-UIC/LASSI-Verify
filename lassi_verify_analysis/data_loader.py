@@ -30,6 +30,8 @@ from .config import (
     FLOAT_COLUMNS_TRIALS,
     INT_COLUMNS_ATTEMPTS,
     INT_COLUMNS_TRIALS,
+    JUDGE_BASELINE_COLUMN,
+    LEGACY_JUDGE_COLUMN,
     LIST_COLUMNS_ATTEMPTS,
     LIST_COLUMNS_TRIALS,
     VERDICT_COLUMNS_ATTEMPTS,
@@ -50,7 +52,7 @@ _REQUIRED_TRIALS_M1 = [
     "base_v1_valid",
 ]
 _OPTIONAL_TRIALS_M1 = ["zeroshot_empirical_verdict"]  # absent → Variant 4 skipped
-_REQUIRED_ATTEMPTS_M1 = ["app_name", "trial_number", "is_best_code", "judge_verdict"]
+_REQUIRED_ATTEMPTS_M1 = ["app_name", "trial_number", "is_best_code", JUDGE_BASELINE_COLUMN]
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +269,7 @@ def _normalize_attempts(df: pd.DataFrame) -> pd.DataFrame:
     """Apply all normalization steps to Table 2 (df_attempts)."""
     df = df.copy()
     df = _derive_kernel_name(df)
+    df = _migrate_legacy_judge_column(df)
     df = _normalize_verdict_strings(df, VERDICT_COLUMNS_ATTEMPTS)
     df = _parse_list_columns(df, LIST_COLUMNS_ATTEMPTS)
     df = _cast_float_columns(df, FLOAT_COLUMNS_ATTEMPTS)
@@ -276,6 +279,37 @@ def _normalize_attempts(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = _parse_bool_column(df[col], nullable=False)
 
+    return df
+
+
+def _migrate_legacy_judge_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Map the legacy ``judge_verdict`` column onto the canonical ``judge_baseline_verdict``.
+
+    Pre-June-2026 attempt-log CSVs used ``judge_verdict`` and applied tier-vs-judge
+    overrides; the column held a verdict that could have been mutated by overrides.
+    Post-rework CSVs use ``judge_baseline_verdict`` to make explicit that the value is
+    the raw, never-overridden judge output (baseline measurement only).
+
+    Behavior:
+        - Canonical present, legacy absent: no-op.
+        - Legacy present, canonical absent: rename legacy -> canonical.
+        - Both present: prefer canonical, drop legacy (mixed-vintage merge).
+        - Neither present: no-op; the required-column check warns downstream.
+    """
+    has_canonical = JUDGE_BASELINE_COLUMN in df.columns
+    has_legacy = LEGACY_JUDGE_COLUMN in df.columns
+    if has_canonical and has_legacy:
+        log.info(
+            "Both '%s' and '%s' columns present; using the canonical column and dropping the legacy one.",
+            JUDGE_BASELINE_COLUMN, LEGACY_JUDGE_COLUMN,
+        )
+        df = df.drop(columns=[LEGACY_JUDGE_COLUMN])
+    elif has_legacy and not has_canonical:
+        log.info(
+            "Renaming legacy '%s' column to '%s' (pre-judge-as-baseline CSV).",
+            LEGACY_JUDGE_COLUMN, JUDGE_BASELINE_COLUMN,
+        )
+        df = df.rename(columns={LEGACY_JUDGE_COLUMN: JUDGE_BASELINE_COLUMN})
     return df
 
 

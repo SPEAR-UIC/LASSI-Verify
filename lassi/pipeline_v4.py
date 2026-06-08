@@ -60,7 +60,7 @@ def _build_attempt_record(app_name, trial_number, code_block_index, attempt_numb
                           tier1_verdict, tier1_instrumented_labels, tier1_diagnostic,
                           tier2_verdict, tier2_instrumented_labels, tier2_diagnostic,
                           tier3_verdict, tier3_diagnostic,
-                          judge_verdict, final_verdict, override_applied,
+                          judge_baseline_verdict, final_verdict, override_applied,
                           is_best_code=False):
     """Build one Table 2 (per-attempt) row dict for the attempt log CSV.
     Called at each self-correction overwrite (intermediate attempt) and after the
@@ -123,8 +123,14 @@ def _build_attempt_record(app_name, trial_number, code_block_index, attempt_numb
         "tier3_relations_failed": t3d.get("relations_failed", 0),
         "tier3_failed_relation": t3d.get("relation_name") or None,
         "tier3_failed_type": t3d.get("relation_type") or None,
-        # --- Judge + combined verdict (final attempt only; None for intermediate) ---
-        "judge_verdict": judge_verdict,
+        # --- Judge baseline + framework verdict (judge-as-baseline design) ---
+        # judge_baseline_verdict: raw LLM judge output captured PRE-tier; never overridden.
+        #   Populated on every attempt that reached the judge (compile+execute success);
+        #   None on rows where the judge was not invoked (compile/execute SC failures).
+        # final_verdict: framework verdict derived from tier verdicts alone (LASSI codes)
+        #   or from the empirical verdict / judge baseline (zero-shot codes). Judge baseline
+        #   does NOT participate in deciding this for LASSI codes.
+        "judge_baseline_verdict": judge_baseline_verdict,
         "final_verdict": final_verdict,
         "override_applied": override_applied,
         "is_best_code": is_best_code,
@@ -150,8 +156,8 @@ ATTEMPT_LOG_FIELDNAMES = [
     "tier3_verdict", "tier3_tested_relation_names",
     "tier3_relations_tested", "tier3_relations_passed", "tier3_relations_failed",
     "tier3_failed_relation", "tier3_failed_type",
-    # Judge + combined verdict
-    "judge_verdict", "final_verdict", "override_applied", "is_best_code",
+    # Judge baseline + framework verdict
+    "judge_baseline_verdict", "final_verdict", "override_applied", "is_best_code",
 ]
 
 
@@ -493,8 +499,12 @@ def auto_code_llmgeneration_pipeline(prompts,
     verification_log["tier2_spec_output"] = ""          # populated after Stage 1 execution
     verification_log["tier2_results"] = []              # per-iteration list of {code_version, verdict, diagnostic}
     verification_log["tier2_pass_count"] = 0             # count of iterations where Tier 2 PASS (key matches CSV column and experiment_data field)
-    verification_log["judge_discrepancies"] = []        # cases where LLM judge and three-tier verdict disagree
-    # judge_discrepancy entry schema: {code_version, zero_shot, type ("false_positive"|"false_negative"), judge_verdict, tier2_verdict, final_verdict}
+    verification_log["judge_discrepancies"] = []        # per-attempt log of (judge baseline vs framework verdict)
+    # judge_discrepancy entry schema (judge-as-baseline design):
+    #   {code_version, zero_shot, judge_baseline_verdict, tier1_verdict, tier2_verdict, tier3_verdict, final_verdict}
+    # One entry per final attempt that reached the judge. No `type` tag — downstream analysis
+    # computes false positives (judge VALID + final INVALID) and false negatives (judge INVALID
+    # + final VALID) directly from the raw verdict pair.
     # Tier 3 verification log fields (initialized here; populated after Stage 0 contract generation)
     verification_log["tier3_enabled"] = run_tier3
     verification_log["tier3_tolerance"] = tier3_tolerance
@@ -978,7 +988,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier1_diagnostic=tier1_diagnostic,
                     tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                     tier3_verdict="SKIP", tier3_diagnostic={},
-                    judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_t1_sc_budget",
+                    judge_baseline_verdict=None, final_verdict="INVALID", override_applied="exhausted_t1_sc_budget",
                 )
                 attempt_log_buffer.append(_rec)
                 continue  # Skip remainder of loop body (T2, T3, judge, metrics, stagnation)
@@ -1566,7 +1576,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 tier1_verdict="SKIP", tier1_instrumented_labels="", tier1_diagnostic={},
                 tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                 tier3_verdict="SKIP", tier3_diagnostic={},
-                judge_verdict=None, final_verdict=None, override_applied=None,
+                judge_baseline_verdict=None, final_verdict=None, override_applied=None,
             )
             attempt_log_buffer.append(_rec)
             current_sc_trigger = "compile_error"  # Table 2 ★ carry into next iteration's record
@@ -1609,7 +1619,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier1_verdict="SKIP", tier1_instrumented_labels="", tier1_diagnostic={},
                         tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                         tier3_verdict="SKIP", tier3_diagnostic={},
-                        judge_verdict=None, final_verdict=None, override_applied=None,
+                        judge_baseline_verdict=None, final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
                     current_sc_trigger = "execute_error"  # Table 2 ★ carry into next iteration's record
@@ -1657,7 +1667,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 tier1_verdict="SKIP", tier1_instrumented_labels="", tier1_diagnostic={},
                 tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                 tier3_verdict="SKIP", tier3_diagnostic={},
-                judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_sc_budget",
+                judge_baseline_verdict=None, final_verdict="INVALID", override_applied="exhausted_sc_budget",
             )
             attempt_log_buffer.append(_rec)
 
@@ -1708,7 +1718,74 @@ def auto_code_llmgeneration_pipeline(prompts,
             # else:
             # Do not enable feedback iteration in baseline mode
             #self_correction_power_counter = self_correction_power_counter_max + 1
-            
+
+            # --- LLM JUDGE: PRE-TIER BASELINE MEASUREMENT ---
+            # The judge is a *baseline comparator* representing current LLM-only practice; it is NOT a
+            # framework tier. It runs here, before Tier 1/2/3, so it sees only what the executed code
+            # produced (the generated code and its stdout) and nothing from tier analysis. The judge's
+            # verdict is recorded as `judge_raw_verdict` for downstream discrepancy logging; the tier
+            # verdicts alone decide `valid_code_flag` (the framework verdict) further below.
+            #
+            # Judge runs only on candidate code generations — i.e., when compile AND execute succeed.
+            # Compile/execute failures are routed back into the existing self-correction loop without
+            # ever invoking the judge (those code paths use the earlier `continue` branches).
+            #
+            # For zero_shot codes, the judge compares the vanilla LLM output against the uninstrumented
+            # original source (SOURCE_orig) — matching the "what vanilla-LLM-workflow practice would
+            # see" baseline measurement intent.
+            # For LASSI codes, the judge sees the LASSI pipeline's actual output: the generated code
+            # with its LASSI-VERIFY instrumentation, run-time stdout including passthrough blocks, and
+            # runtime/energy metrics, compared against SOURCE_orig. Pipeline-applied stdout/code strips
+            # for instrumentation noise are preserved so the judge focuses on the algorithmic change.
+            judge_raw_verdict = "SKIP"
+            judge_response_text = ""
+            code_analysis = "None"
+            if run_llm_judge or zero_shot:
+                if zero_shot:
+                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy to avoid mutating the shared dict
+                    judge_dict["source_code"] = code_blocks[0]      # compare vanilla LLM against original (uninstrumented) source
+                    judge_dict["source_stdout"] = source_orig_stdout  # use uninstrumented stdout; source_verify_stdout has passthrough dump noise
+                else:
+                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy so strip below does not mutate the shared dict
+                    judge_dict["source_code"] = code_blocks[0]      # compare LASSI code against SOURCE_orig (uninstrumented)
+                    judge_dict["source_stdout"] = source_orig_stdout  # uninstrumented baseline; source_verify_stdout has Tier 2 passthrough noise
+                    # Strip T1 + T2 LASSI-VERIFY blocks from the generated code body so the judge sees
+                    # only the algorithmic transformation — instrumentation is pipeline noise, not the
+                    # vanilla-practice signal the baseline judge is meant to measure.
+                    judge_dict["refactored_code"] = lassi.verify._strip_t2_blocks(
+                        lassi.verify._strip_t1_blocks(judge_dict.get("refactored_code", ""))
+                    )
+                # Strip Tier 1 + Tier 2 LASSI-VERIFY instrumentation from refactored stdout so the
+                # judge sees only the benchmark's primary output — matches the original (pre-LASSI)
+                # judge design and prevents context-window overflow from loop-inserted passthrough blocks.
+                judge_dict["refactored_stdout"] = _strip_lassi_verify_stdout(judge_dict.get("refactored_stdout", ""))
+                judge_raw_verdict, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(
+                    target_lang, llm_source, model_judge, num_ctx, system_prompt, judge_dict,
+                    power_measure, run_code_analysis, verification_log["sourcecode_analysis"],
+                    display_response, verifyprompt
+                )
+                # Normalize: judge prompt only allows "VALID" or "INVALID". Anything else is treated
+                # as INVALID and counted against the 3-strike judge_api_error safety net (preserved
+                # from the prior pre-rework design — still applies under judge-as-baseline).
+                if judge_raw_verdict != "VALID":
+                    if judge_raw_verdict != "INVALID":
+                        judge_api_error_count += 1
+                        print(f"\n----- LLM judge returned unexpected verdict '{judge_raw_verdict}' — normalizing to INVALID (judge API error count: {judge_api_error_count}/3) -----")
+                        if judge_api_error_count >= 3:
+                            raise RuntimeError(
+                                f"LLM judge returned a non-verdict ('{judge_raw_verdict}') 3 times in a row. "
+                                "This likely indicates a persistent API error (e.g. context-window overflow, "
+                                "network timeout). Stopping pipeline to prevent further wasted iterations. "
+                                "Check the monitor log for the error details, fix the root cause "
+                                "(e.g. reduce prompt size), then restart."
+                            )
+                    judge_raw_verdict = "INVALID"
+            else:
+                # Pure three-tier mode (LASSI only): judge is disabled for LASSI codes; tier verdicts
+                # decide validity exclusively. Discrepancy entry is skipped (no judge baseline exists).
+                judge_response_text = "LLM judge disabled (run_llm_judge=False)"
+                print("\n----- LLM judge disabled: LASSI code validity decided by Tier 1 + Tier 2 + Tier 3 alone -----")
+
             # --- TIER 1: Invariant Assertion Check (fail-fast before Tier 2) ---
             # Parses stdout for LASSI-VERIFY ASSERTIONS [label]: FAIL lines.
             # All assertions are checked before deciding (code runs to completion), giving the
@@ -1761,7 +1838,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier1_diagnostic=tier1_diagnostic,
                             tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                             tier3_verdict="SKIP", tier3_diagnostic={},
-                            judge_verdict=None, final_verdict=None, override_applied=None,
+                            judge_baseline_verdict=judge_raw_verdict, final_verdict=None, override_applied=None,
                         )
                         attempt_log_buffer.append(_rec)
                         current_sc_trigger = ("tier1_skip:sentinel_missing" if tier1_verdict == "SKIP"
@@ -1794,9 +1871,21 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier1_diagnostic=tier1_diagnostic,
                             tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                             tier3_verdict="SKIP", tier3_diagnostic={},
-                            judge_verdict=None, final_verdict="INVALID", override_applied="tier1_exhausted",
+                            judge_baseline_verdict=judge_raw_verdict, final_verdict="INVALID", override_applied="tier1_exhausted",
                         )
                         attempt_log_buffer.append(_rec)
+                        # Judge-as-baseline discrepancy record for this final attempt: judge ran on the
+                        # executed code; framework verdict is INVALID due to T1 exhaustion. Skipped if
+                        # the judge was disabled (no baseline to compare against).
+                        if run_llm_judge or zero_shot:
+                            verification_log["judge_discrepancies"].append({
+                                "code_version": code_version, "zero_shot": zero_shot,
+                                "judge_baseline_verdict": judge_raw_verdict,
+                                "tier1_verdict": tier1_verdict,
+                                "tier2_verdict": "SKIP",
+                                "tier3_verdict": "SKIP",
+                                "final_verdict": "INVALID",
+                            })
                         current_sc_trigger = None  # exhausted → next iteration is fresh
                         valid_code_flag = "INVALID"
                         compile_result = "energy_efficiency"  # drive fresh generation next iteration
@@ -1880,7 +1969,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                         tier2_diagnostic=tier2_diagnostic,
                         tier3_verdict="SKIP", tier3_diagnostic={},
-                        judge_verdict=None, final_verdict=None, override_applied=None,
+                        judge_baseline_verdict=judge_raw_verdict, final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
                     _t2_fail_label = (tier2_diagnostic.get("failures", [{}])[0].get("label", "unknown")
@@ -1985,7 +2074,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                         tier2_diagnostic=tier2_diagnostic,
                         tier3_verdict=tier3_verdict, tier3_diagnostic=tier3_diagnostic,
-                        judge_verdict=None, final_verdict=None, override_applied=None,
+                        judge_baseline_verdict=judge_raw_verdict, final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
                     current_sc_trigger = f"tier3_fail:{tier3_diagnostic.get('relation_name', 'unknown')}"
@@ -2009,60 +2098,8 @@ def auto_code_llmgeneration_pipeline(prompts,
             if run_tier3 and not zero_shot and "tier3_pass_count" in verification_log and tier3_verdict == "PASS":
                 verification_log["tier3_pass_count"] += 1
 
-            # Call LLM-as-a-judge to review SOURCE CODE and REFACTORED CODE to evaluate if likely valid.
-            # Judge always runs for zero_shot (vanilla LLM has no Tier 1/2 instrumentation — the judge
-            # is its only correctness gate). For LASSI codes, judge is controlled by run_llm_judge:
-            #   run_llm_judge=True:  judge runs; three-tier verdict can override it (see below)
-            #   run_llm_judge=False: pure three-tier mode for LASSI codes; judge skipped; vanilla still judged
-            # For the zero-shot (vanilla LLM) pass, judge against the original uninstrumented source code.
-            # For the LASSI pipeline (not zero_shot), judge against the assertion-instrumented source code.
-            # code_blocks[0]=SOURCE_orig, code_blocks[1]=SOURCE_verify (both always pre-populated before while loop).
-            if run_llm_judge or zero_shot:
-                if zero_shot:
-                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy to avoid mutating the shared dict
-                    judge_dict["source_code"] = code_blocks[0]      # compare vanilla LLM against original (uninstrumented) source
-                    judge_dict["source_stdout"] = source_orig_stdout  # use uninstrumented stdout; source_verify_stdout has passthrough dump noise
-                else:
-                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy so strip below does not mutate the shared dict
-                    judge_dict["source_code"] = code_blocks[0]      # compare LASSI code against SOURCE_orig (uninstrumented); T1+T2 verified by this point so the judge should see the clean algorithm, not the LASSI-VERIFY blocks
-                    judge_dict["source_stdout"] = source_orig_stdout  # uninstrumented baseline; source_verify_stdout has Tier 2 passthrough noise
-                    # Strip T1 + T2 LASSI-VERIFY blocks from the generated code body so the
-                    # judge sees only the algorithmic transformation — correctness is already
-                    # established by the three tiers, so instrumentation is now noise.
-                    judge_dict["refactored_code"] = lassi.verify._strip_t2_blocks(
-                        lassi.verify._strip_t1_blocks(judge_dict.get("refactored_code", ""))
-                    )
-                # Strip Tier 1 + Tier 2 LASSI-VERIFY instrumentation from refactored stdout
-                # so the judge sees only the benchmark's primary output — matching the
-                # original (pre-LASSI) judge design and preventing context-window overflow
-                # from loop-inserted passthrough blocks (which can produce thousands of lines).
-                judge_dict["refactored_stdout"] = _strip_lassi_verify_stdout(judge_dict.get("refactored_stdout", ""))
-                valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(target_lang, llm_source, model_judge, num_ctx, system_prompt, judge_dict, power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt)
-            else:
-                # Pure three-tier mode (LASSI only, never zero_shot): Tier 1 + Tier 2 determine validity.
-                valid_code_flag = "VALID"
-                judge_response_text = "LLM judge disabled (run_llm_judge=False)"
-                code_analysis = "None"
-                print("\n----- LLM judge disabled: LASSI code accepted by Tier 1 + Tier 2 deterministic gates -----")
-
-            # Capture the raw judge verdict immediately after the judge call, before zero-energy guard
-            # or three-tier overrides can modify valid_code_flag. Used for discrepancy logging below.
-            judge_raw_verdict = valid_code_flag
-            # Normalize: the judge prompt only allows "VALID" or "INVALID". Any other response
-            # (e.g. "NONE", malformed output) is treated as INVALID.
-            if valid_code_flag != "VALID":
-                if valid_code_flag != "INVALID":
-                    judge_api_error_count += 1
-                    print(f"\n----- LLM judge returned unexpected verdict '{valid_code_flag}' — normalizing to INVALID (judge API error count: {judge_api_error_count}/3) -----")
-                    if judge_api_error_count >= 3:
-                        raise RuntimeError(
-                            f"LLM judge returned a non-verdict ('{valid_code_flag}') 3 times in a row. "
-                            "This likely indicates a persistent API error (e.g. context-window overflow, "
-                            "network timeout). Stopping pipeline to prevent further wasted iterations. "
-                            "Check the monitor log for the error details, fix the root cause "
-                            "(e.g. reduce prompt size), then restart."
-                        )
-                valid_code_flag = "INVALID"
+            # (LLM judge ran earlier as a pre-tier baseline measurement — see PRE-TIER section.)
+            # Tier verdicts now decide the framework verdict; see derivation block below.
 
             # --- ZERO-SHOT EMPIRICAL VERIFICATION ---
             # Run Tier 1 → Tier 2 → Tier 3 on the zero-shot code as additional empirical data.
@@ -2072,10 +2109,13 @@ def auto_code_llmgeneration_pipeline(prompts,
             # SOURCE_verify with T1 blocks stripped. This avoids T2 insertion messing up T1
             # blocks and gives each tier a clean start from the original code.
             # Single attempt only — no retries, no self-correction feedback.
-            # Override policy: if empirical verdict is FAIL, it overrides the judge
-            # (VALID → INVALID). If empirical is PASS or SKIP, the judge verdict stands.
-            # The attempt log records both the raw judge_verdict and the override_applied
-            # field, so the analysis script can recover the raw judge opinion for V3.
+            # Judge-as-baseline design: the empirical verdict IS the framework verdict for the
+            # zero-shot code when verify_zeroshot=True; the LLM judge baseline is recorded
+            # separately as judge_baseline_verdict for downstream comparison. There is no
+            # FAIL-flips-VALID override — judge and empirical are independent measurements.
+            # When verify_zeroshot=False, only the judge baseline exists for the zero-shot
+            # code (Mode A's strictest "vanilla LLM + judge only" baseline) — the
+            # final_verdict derivation block below falls back to it in that case.
             _, _zs_src_ext = os.path.splitext(source_file_path)
             if verify_zeroshot and zero_shot:
                 print("\n\n----- " + color.BOLD + color.PURPLE +
@@ -2224,108 +2264,87 @@ def auto_code_llmgeneration_pipeline(prompts,
                 print(f"\n----- Zero-Shot Empirical Verdict: {zs_empirical_verdict} "
                       f"(T1={zs_tier1_verdict}, T2={zs_tier2_verdict}, T3={zs_tier3_verdict}) -----")
 
-            # Empirical verdict overrides LLM judge for zero-shot code.
-            # If empirical verification ran and found a failure, the code is INVALID
-            # regardless of what the judge said. If empirical was SKIP (verify_zeroshot
-            # disabled or no active tiers ran), fall back to the judge verdict.
-            if verify_zeroshot and zero_shot and zs_empirical_verdict == "FAIL":
-                if valid_code_flag == "VALID":
-                    print(color.YELLOW + f"[Zero-Shot] Empirical verification FAIL overrides judge VALID → marking INVALID" + color.END)
-                valid_code_flag = "INVALID"
-            elif verify_zeroshot and zero_shot and zs_empirical_verdict == "PASS":
-                pass  # judge and empirical agree (or empirical confirms VALID — keep as-is)
-            # zs_empirical_verdict == "SKIP": keep judge verdict unchanged
+            # --- FRAMEWORK FINAL VERDICT DERIVATION (judge-as-baseline) ---
+            # The framework verdict (valid_code_flag) is derived from tier verdicts alone for
+            # LASSI codes; the LLM judge baseline (judge_raw_verdict) does NOT participate.
+            # For zero-shot codes when verify_zeroshot=True, the empirical (T1/T2/T3) verdict
+            # IS the framework verdict — independent of the judge baseline (no override). When
+            # verify_zeroshot=False, the judge baseline IS the framework verdict (Mode A's
+            # strictest "vanilla LLM + judge only" baseline; no empirical was run).
+            # T1 SKIP/FAIL/exhaustion already exited via `continue` paths above, so by the time
+            # we reach here for a LASSI code, either all active tiers ran cleanly or T2/T3
+            # budget was exhausted on this attempt.
+            _tier2_was_exhausted = tier2_exhausted  # captured for the override_applied tag below
+            _tier3_was_exhausted = tier3_exhausted
+
+            if not zero_shot:
+                _t3_ok = (tier3_verdict == "PASS" or not (run_tier3 and tier3_active_relations))
+                if tier2_exhausted:
+                    valid_code_flag = "INVALID"
+                    _final_override_label = "tier2_exhausted"
+                    judge_response_text = (f"Tier 2 self-correction budget exhausted "
+                                           f"({self_correction_verify_counter_code_max} attempts): "
+                                           f"code marked INVALID; fresh generation next.")
+                elif tier3_exhausted:
+                    valid_code_flag = "INVALID"
+                    _final_override_label = "tier3_exhausted"
+                    judge_response_text = (f"Tier 3 metamorphic testing budget exhausted "
+                                           f"({self_correction_tier3_counter_code_max} attempts): "
+                                           f"code marked INVALID.")
+                elif tier1_verdict == "PASS" and tier2_verdict == "PASS" and _t3_ok:
+                    valid_code_flag = "VALID"
+                    _final_override_label = "none"
+                else:
+                    # Defensive: any other state (unexpected SKIP/FAIL that escaped the continue
+                    # paths) lands here as INVALID. Should be unreachable in normal flow.
+                    valid_code_flag = "INVALID"
+                    _final_override_label = "none"
+                tier2_exhausted = False   # reset for next iteration
+                tier3_exhausted = False
+            elif zero_shot:
+                # Zero-shot: empirical verdict is the framework verdict when verify_zeroshot=True.
+                # When verify_zeroshot=False (or empirical was SKIP — e.g., all tiers inactive),
+                # fall back to the judge baseline (Mode A's "vanilla LLM + judge only" path).
+                # Judge baseline is recorded independently as judge_raw_verdict / discrepancy log
+                # — no override semantics; the two are parallel measurements.
+                if verify_zeroshot and zs_empirical_verdict == "PASS":
+                    valid_code_flag = "VALID"
+                elif verify_zeroshot and zs_empirical_verdict == "FAIL":
+                    valid_code_flag = "INVALID"
+                else:
+                    # SKIP (empirical inactive) or verify_zeroshot=False — judge baseline is the only signal.
+                    valid_code_flag = "VALID" if judge_raw_verdict == "VALID" else "INVALID"
+                _final_override_label = "none"
 
             # Handle scenario where we might have a bad power measurement
             # (only applies in EE mode; in runtime mode energy is always 0)
             if power_measure and total_energy_joules_refactor == 0:
                 valid_code_flag = "INVALID"
 
-            # --- THREE-TIER PRIORITY OVERRIDES ---
-            # Three-tier verdict takes priority over the LLM judge for LASSI codes (not zero_shot).
-            # Discrepancies are logged to verification_log["judge_discrepancies"] for research analysis:
-            # they reveal cases where the LLM judge was wrong in either direction.
-            # Capture exhausted flags BEFORE overrides reset them (needed for override_applied in Table 2 ★)
-            _tier2_was_exhausted = tier2_exhausted
-            _tier3_was_exhausted = tier3_exhausted
-            _override2_fired = False
-
-            # Override 1 (false positive): Tier 2 budget exhausted → INVALID even if judge said VALID.
-            # T2 per-code limit exhausted: the code has a fundamental numerical equivalence flaw.
-            # T1 exhaustion uses a continue path (see T1 SC branch) and never reaches this override block.
-            if tier2_exhausted and not zero_shot:
-                if judge_raw_verdict == "VALID":
-                    verification_log["judge_discrepancies"].append({
-                        "code_version": code_version, "zero_shot": zero_shot,
-                        "type": "false_positive",
-                        "judge_verdict": judge_raw_verdict, "tier2_verdict": "FAIL_exhausted",
-                        "final_verdict": "INVALID",
-                    })
-                    print(f"\n----- Three-tier override: judge=VALID overridden to INVALID (Tier 2 exhausted — judge false positive) -----")
-                valid_code_flag = "INVALID"
-                judge_response_text = f"Tier 2 self-correction budget exhausted ({self_correction_verify_counter_code_max} attempts): code marked INVALID; fresh generation next."
-                code_analysis = "None"
-                tier2_exhausted = False  # reset for next iteration
-
-            # Override 2 (false negative): Tier 1 PASS + Tier 2 PASS + Tier 3 PASS/ok-SKIP → VALID even if judge said INVALID.
-            # All active tiers must be satisfied: Tier 2 PASS alone is insufficient if Tier 1 or Tier 3 is active.
-            # tier1_verdict == "SKIP" is NOT acceptable here and cannot reach this point: any T1 SKIP/FAIL causes
-            # a `continue` back to the top of the while loop (lines 1727, 1763) before the judge or overrides run.
-            # The T1 check here therefore only needs to allow PASS.
-            # tier3_verdict == "SKIP" is only acceptable when T3 is genuinely inactive (run_tier3=False).
-            # When run_tier3=True, Stage 0 guarantees at least one active relation (aborts trial otherwise),
-            # so tier3_active_relations is never empty in the main loop — the T3 fallback below only covers
-            # the run_tier3=False configuration opt-out.
-            # Tier 1 exhausted is handled inline (continue before judge); Tier 3 exhausted by Override 3.
-            # Only applies to LASSI codes (zero_shot has no instrumentation → SKIP, no override).
-            _t3_ok = (tier3_verdict == "PASS" or not (run_tier3 and tier3_active_relations))
-            if (tier1_verdict == "PASS" and tier2_verdict == "PASS"
-                    and _t3_ok
-                    and valid_code_flag != "VALID" and not zero_shot):
-                _t1_label = (f"Tier 1 {tier1_verdict}" if not zero_shot else "Tier 1 inactive")
-                _t3_label = (f"Tier 3 {tier3_verdict}" if (run_tier3 and tier3_active_relations)
-                             else "Tier 3 inactive")
+            # --- DISCREPANCY RECORD (per final-attempt, when the judge ran) ---
+            # Captures the raw (judge_baseline, tier verdicts, final_verdict) tuple for every
+            # attempt that reached the judge. Used by downstream analysis to compute judge
+            # FP/FN counts vs the framework verdict — no override semantics are involved.
+            if run_llm_judge or zero_shot:
+                if not zero_shot:
+                    _disc_t1, _disc_t2, _disc_t3 = tier1_verdict, tier2_verdict, tier3_verdict
+                else:
+                    _disc_t1 = zs_tier1_verdict if verify_zeroshot else "SKIP"
+                    _disc_t2 = zs_tier2_verdict if verify_zeroshot else "SKIP"
+                    _disc_t3 = zs_tier3_verdict if verify_zeroshot else "SKIP"
                 verification_log["judge_discrepancies"].append({
                     "code_version": code_version, "zero_shot": zero_shot,
-                    "type": "false_negative",
-                    "judge_verdict": judge_raw_verdict, "tier1_verdict": tier1_verdict,
-                    "tier2_verdict": tier2_verdict, "tier3_verdict": tier3_verdict,
-                    "final_verdict": "VALID",
+                    "judge_baseline_verdict": judge_raw_verdict,
+                    "tier1_verdict": _disc_t1,
+                    "tier2_verdict": _disc_t2,
+                    "tier3_verdict": _disc_t3,
+                    "final_verdict": valid_code_flag,
                 })
-                print(f"\n----- Three-tier override: judge={judge_raw_verdict} overridden to VALID "
-                      f"({_t1_label} + Tier 2 PASS + {_t3_label} — judge false negative) -----")
-                valid_code_flag = "VALID"
-                _override2_fired = True
 
-            # Override 3 (false positive): Tier 3 budget exhausted → INVALID regardless of judge or Tier 2.
-            # Tier 3 is the final authority: a code that cannot satisfy a metamorphic relation after
-            # self_correction_tier3_counter_code_max attempts has a structural mathematical flaw.
-            # This override runs AFTER Override 2 so it has the last word.
-            if tier3_exhausted and not zero_shot:
-                if valid_code_flag == "VALID":
-                    verification_log["judge_discrepancies"].append({
-                        "code_version": code_version, "zero_shot": zero_shot,
-                        "type": "false_positive",
-                        "judge_verdict": judge_raw_verdict, "tier3_verdict": "FAIL_exhausted",
-                        "final_verdict": "INVALID",
-                    })
-                    print(f"\n----- Three-tier override: verdict=VALID overridden to INVALID (Tier 3 exhausted — false positive) -----")
-                valid_code_flag = "INVALID"
-                judge_response_text = (f"Tier 3 metamorphic testing budget exhausted "
-                                       f"({self_correction_tier3_counter_code_max} attempts): code marked INVALID.")
-                code_analysis = "None"
-                tier3_exhausted = False  # reset for next iteration
-
-            # Table 2 ★ final attempt row — emitted after all overrides have settled valid_code_flag.
-            # LASSI codes and (now) the zero-shot code each get one row here.
-            # Compile/execute errors use the earlier continue paths and never reach here.
+            # Table 2 ★ final attempt row — emitted after the tier-derived framework verdict is set.
+            # LASSI codes and the zero-shot code each get one row here. Compile/execute errors
+            # use the earlier continue paths and never reach here.
             if not zero_shot:
-                _override_applied = (
-                    "judge_override_tier3_exhausted" if _tier3_was_exhausted else
-                    "judge_override_tiers_pass"      if _override2_fired     else
-                    "judge_override_tier2_exhausted" if _tier2_was_exhausted else
-                    "none"
-                )
                 _cb_idx = len(code_blocks) - 1
                 _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
                 _t2_instr = lassi.verify.extract_tier2_labels(code_blocks[-1])
@@ -2342,8 +2361,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                     tier2_diagnostic=tier2_diagnostic,
                     tier3_verdict=tier3_verdict, tier3_diagnostic=tier3_diagnostic,
-                    judge_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
-                    override_applied=_override_applied,
+                    judge_baseline_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
+                    override_applied=_final_override_label,
                 )
                 attempt_log_buffer.append(_rec)
                 current_sc_trigger = None  # reset; next fresh generation starts clean
@@ -2352,6 +2371,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # (zs_tier1/2/3_verdict) from the separate T1/T2 compile+execute runs, or "SKIP"
                 # if verify_zeroshot=False. The zero-shot code has no inline instrumentation so
                 # tier{1,2}_instrumented_labels are empty strings.
+                # judge-as-baseline: judge_baseline_verdict and final_verdict are independent
+                # measurements (no override). override_applied stays "none" for zero-shot now;
+                # the discrepancy log captures the (judge, framework) pair for downstream
+                # comparison.
                 _rec = _build_attempt_record(
                     app_name=file_name, trial_number=trial_number,
                     code_block_index=len(code_blocks) - 1, attempt_number=1,
@@ -2365,13 +2388,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_verdict=zs_tier2_verdict, tier2_instrumented_labels="",
                     tier2_diagnostic={},
                     tier3_verdict=zs_tier3_verdict, tier3_diagnostic={},
-                    judge_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
-                    override_applied=(
-                        "zs_empirical_fail→INVALID"
-                        if (verify_zeroshot and zs_empirical_verdict == "FAIL"
-                            and judge_raw_verdict == "VALID")
-                        else "none"
-                    ),
+                    judge_baseline_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
+                    override_applied="none",
                 )
                 attempt_log_buffer.append(_rec)
 
@@ -3049,8 +3067,17 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["tier2_fail_total"] = sum(1 for r in attempt_log_buffer
                                               if str(r.get("tier2_verdict", "")).startswith("FAIL")
                                               and r.get("is_final_attempt", False))
-    experiment_data["judge_false_positives"] = sum(1 for d in discrepancies if d.get("type") == "false_positive")
-    experiment_data["judge_false_negatives"] = sum(1 for d in discrepancies if d.get("type") == "false_negative")
+    # Judge FP/FN recomputed from the raw (judge_baseline, final) verdict pair per the
+    # judge-as-baseline design — no override semantics. A false positive is "judge said VALID
+    # but framework (tier-derived) said INVALID"; a false negative is the inverse.
+    experiment_data["judge_false_positives"] = sum(
+        1 for d in discrepancies
+        if d.get("judge_baseline_verdict") == "VALID" and d.get("final_verdict") == "INVALID"
+    )
+    experiment_data["judge_false_negatives"] = sum(
+        1 for d in discrepancies
+        if d.get("judge_baseline_verdict") == "INVALID" and d.get("final_verdict") == "VALID"
+    )
     tier3_results_vlog = verification_log.get("tier3_results", [])
     experiment_data["tier3_pass_count"] = sum(1 for r in attempt_log_buffer
                                               if str(r.get("tier3_verdict", "")).startswith("PASS")

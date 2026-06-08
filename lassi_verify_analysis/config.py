@@ -23,8 +23,14 @@ TIER_NOT_RUN: set[str] = {"SKIP", "NA"}           # tier was not meaningfully te
 # --- Judge verdict vocabulary ---
 JUDGE_VALID: str = "VALID"
 JUDGE_INVALID: str = "INVALID"
-# judge_verdict values that mean "no usable verdict was produced"
+# judge_baseline_verdict values that mean "no usable verdict was produced"
 JUDGE_NO_VERDICT: set = {"NONE", None}
+
+# Canonical attempt-log column name for the (raw, unmodified) LLM-judge verdict.
+# Renamed from "judge_verdict" (pre-judge-as-baseline schema). The data loader maps
+# the legacy name onto this canonical name when reading older CSVs.
+JUDGE_BASELINE_COLUMN: str = "judge_baseline_verdict"
+LEGACY_JUDGE_COLUMN: str = "judge_verdict"
 
 # --- Verdict columns to normalize (strip whitespace + uppercase) ---
 # Applied in data_loader to both df_trials and df_attempts where columns exist.
@@ -49,7 +55,7 @@ VERDICT_COLUMNS_ATTEMPTS: list[str] = [
     "tier1_verdict",
     "tier2_verdict",
     "tier3_verdict",
-    "judge_verdict",
+    "judge_baseline_verdict",   # canonical (post-rename); legacy "judge_verdict" is mapped on load
     "final_verdict",
     "override_applied",
     "generation_type",
