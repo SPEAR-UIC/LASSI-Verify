@@ -37,6 +37,9 @@ DISCREPANCY_COLUMNS = [
     "tier2_verdict",
     "tier3_verdict",
     "final_verdict",
+    # Verbatim LLM judge prose for this attempt. Populated by the pipeline starting
+    # with the judge_response_text feature commit; empty/absent in older sidecars.
+    "judge_response_text",
 ]
 
 # Filename pattern for verification-log JSON sidecars; trial number is captured.
@@ -117,6 +120,8 @@ def load_discrepancies(data_dir: str) -> pd.DataFrame:
                 "tier2_verdict":           entry.get("tier2_verdict"),
                 "tier3_verdict":           entry.get("tier3_verdict"),
                 "final_verdict":           entry.get("final_verdict"),
+                # Empty when missing — pre-feature sidecars don't carry this field.
+                "judge_response_text":     entry.get("judge_response_text", ""),
             })
 
     if missing_field:

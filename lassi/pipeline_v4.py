@@ -61,6 +61,7 @@ def _build_attempt_record(app_name, trial_number, code_block_index, attempt_numb
                           tier2_verdict, tier2_instrumented_labels, tier2_diagnostic,
                           tier3_verdict, tier3_diagnostic,
                           judge_baseline_verdict, final_verdict, override_applied,
+                          judge_response_text="",
                           is_best_code=False):
     """Build one Table 2 (per-attempt) row dict for the attempt log CSV.
     Called at each self-correction overwrite (intermediate attempt) and after the
@@ -131,6 +132,12 @@ def _build_attempt_record(app_name, trial_number, code_block_index, attempt_numb
         #   or from the empirical verdict / judge baseline (zero-shot codes). Judge baseline
         #   does NOT participate in deciding this for LASSI codes.
         "judge_baseline_verdict": judge_baseline_verdict,
+        # Full LLM judge prose (verbatim) for this attempt's judge call. Empty string
+        # when the judge wasn't invoked (compile/execute failed before the judge stage,
+        # or run_llm_judge=False and not zero-shot). Persisted on every attempt that
+        # reached the judge, including SC intermediates, so cross-attempt verdict
+        # shifts can be inspected. Multi-line prose; CSV writers quote it with QUOTE_MINIMAL.
+        "judge_response_text": judge_response_text,
         "final_verdict": final_verdict,
         "override_applied": override_applied,
         "is_best_code": is_best_code,
@@ -157,7 +164,8 @@ ATTEMPT_LOG_FIELDNAMES = [
     "tier3_relations_tested", "tier3_relations_passed", "tier3_relations_failed",
     "tier3_failed_relation", "tier3_failed_type",
     # Judge baseline + framework verdict
-    "judge_baseline_verdict", "final_verdict", "override_applied", "is_best_code",
+    "judge_baseline_verdict", "judge_response_text",
+    "final_verdict", "override_applied", "is_best_code",
 ]
 
 
@@ -501,10 +509,12 @@ def auto_code_llmgeneration_pipeline(prompts,
     verification_log["tier2_pass_count"] = 0             # count of iterations where Tier 2 PASS (key matches CSV column and experiment_data field)
     verification_log["judge_discrepancies"] = []        # per-attempt log of (judge baseline vs framework verdict)
     # judge_discrepancy entry schema (judge-as-baseline design):
-    #   {code_version, zero_shot, judge_baseline_verdict, tier1_verdict, tier2_verdict, tier3_verdict, final_verdict}
+    #   {code_version, zero_shot, judge_baseline_verdict, judge_response_text,
+    #    tier1_verdict, tier2_verdict, tier3_verdict, final_verdict}
     # One entry per final attempt that reached the judge. No `type` tag — downstream analysis
     # computes false positives (judge VALID + final INVALID) and false negatives (judge INVALID
-    # + final VALID) directly from the raw verdict pair.
+    # + final VALID) directly from the raw verdict pair. judge_response_text is the verbatim
+    # LLM judge prose for the attempt, persisted so the WHY behind each verdict is inspectable.
     # Tier 3 verification log fields (initialized here; populated after Stage 0 contract generation)
     verification_log["tier3_enabled"] = run_tier3
     verification_log["tier3_tolerance"] = tier3_tolerance
@@ -1750,6 +1760,12 @@ def auto_code_llmgeneration_pipeline(prompts,
             # for instrumentation noise are preserved so the judge focuses on the algorithmic change.
             judge_raw_verdict = "SKIP"
             judge_response_text = ""
+            # judge_raw_response captures the verbatim LLM judge prose for this attempt
+            # and is NEVER overwritten by downstream tier-exhaustion descriptive strings
+            # (judge_response_text gets reused for those messages). Persisted into the
+            # attempt log + sidecar discrepancy entries for grep-able post-hoc inspection
+            # of WHY the judge issued whatever verdict it did. See planning/fix_judge_ordering_plan.md.
+            judge_raw_response = ""
             code_analysis = "None"
             if run_llm_judge or zero_shot:
                 if zero_shot:
@@ -1775,6 +1791,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                     power_measure, run_code_analysis, verification_log["sourcecode_analysis"],
                     display_response, verifyprompt
                 )
+                # Snapshot the raw judge prose immediately, before downstream code paths
+                # (tier-exhaustion blocks) reuse `judge_response_text` for their own messages.
+                judge_raw_response = judge_response_text
                 # Normalize: judge prompt only allows "VALID" or "INVALID". Anything else is treated
                 # as INVALID and counted against the 3-strike judge_api_error safety net (preserved
                 # from the prior pre-rework design — still applies under judge-as-baseline).
@@ -1849,7 +1868,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier1_diagnostic=tier1_diagnostic,
                             tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                             tier3_verdict="SKIP", tier3_diagnostic={},
-                            judge_baseline_verdict=judge_raw_verdict, final_verdict=None, override_applied=None,
+                            judge_baseline_verdict=judge_raw_verdict,
+                            judge_response_text=judge_raw_response,
+                            final_verdict=None, override_applied=None,
                         )
                         attempt_log_buffer.append(_rec)
                         current_sc_trigger = ("tier1_skip:sentinel_missing" if tier1_verdict == "SKIP"
@@ -1882,7 +1903,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier1_diagnostic=tier1_diagnostic,
                             tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                             tier3_verdict="SKIP", tier3_diagnostic={},
-                            judge_baseline_verdict=judge_raw_verdict, final_verdict="INVALID", override_applied="tier1_exhausted",
+                            judge_baseline_verdict=judge_raw_verdict,
+                            judge_response_text=judge_raw_response,
+                            final_verdict="INVALID", override_applied="tier1_exhausted",
                         )
                         attempt_log_buffer.append(_rec)
                         # Judge-as-baseline discrepancy record for this final attempt: judge ran on the
@@ -1892,6 +1915,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                             verification_log["judge_discrepancies"].append({
                                 "code_version": code_version, "zero_shot": zero_shot,
                                 "judge_baseline_verdict": judge_raw_verdict,
+                                "judge_response_text": judge_raw_response,
                                 "tier1_verdict": tier1_verdict,
                                 "tier2_verdict": "SKIP",
                                 "tier3_verdict": "SKIP",
@@ -1980,7 +2004,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                         tier2_diagnostic=tier2_diagnostic,
                         tier3_verdict="SKIP", tier3_diagnostic={},
-                        judge_baseline_verdict=judge_raw_verdict, final_verdict=None, override_applied=None,
+                        judge_baseline_verdict=judge_raw_verdict,
+                        judge_response_text=judge_raw_response,
+                        final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
                     _t2_fail_label = (tier2_diagnostic.get("failures", [{}])[0].get("label", "unknown")
@@ -2085,7 +2111,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                         tier2_diagnostic=tier2_diagnostic,
                         tier3_verdict=tier3_verdict, tier3_diagnostic=tier3_diagnostic,
-                        judge_baseline_verdict=judge_raw_verdict, final_verdict=None, override_applied=None,
+                        judge_baseline_verdict=judge_raw_verdict,
+                        judge_response_text=judge_raw_response,
+                        final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
                     current_sc_trigger = f"tier3_fail:{tier3_diagnostic.get('relation_name', 'unknown')}"
@@ -2408,6 +2436,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 verification_log["judge_discrepancies"].append({
                     "code_version": code_version, "zero_shot": zero_shot,
                     "judge_baseline_verdict": judge_raw_verdict,
+                    "judge_response_text": judge_raw_response,
                     "tier1_verdict": _disc_t1,
                     "tier2_verdict": _disc_t2,
                     "tier3_verdict": _disc_t3,
@@ -2434,7 +2463,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                     tier2_diagnostic=tier2_diagnostic,
                     tier3_verdict=tier3_verdict, tier3_diagnostic=tier3_diagnostic,
-                    judge_baseline_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
+                    judge_baseline_verdict=judge_raw_verdict,
+                    judge_response_text=judge_raw_response,
+                    final_verdict=valid_code_flag,
                     override_applied=_final_override_label,
                 )
                 attempt_log_buffer.append(_rec)
@@ -2461,7 +2492,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_verdict=zs_tier2_verdict, tier2_instrumented_labels="",
                     tier2_diagnostic={},
                     tier3_verdict=zs_tier3_verdict, tier3_diagnostic={},
-                    judge_baseline_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
+                    judge_baseline_verdict=judge_raw_verdict,
+                    judge_response_text=judge_raw_response,
+                    final_verdict=valid_code_flag,
                     override_applied="none",
                 )
                 attempt_log_buffer.append(_rec)
