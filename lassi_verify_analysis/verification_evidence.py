@@ -204,7 +204,7 @@ def compute(df_trials: pd.DataFrame, df_attempts: pd.DataFrame) -> dict:
             "t3_relations_tested":  row.get("tier3_relations_tested", "N/A"),
             "t3_relations_passed":  row.get("tier3_relations_passed", "N/A"),
             "t3_relation_names":    "; ".join(t3_rels),
-            # Judge
+            # Judge baseline (independent of tier verdicts under judge-as-baseline)
             "judge_baseline_verdict":        str(row.get("judge_baseline_verdict", "N/A")).strip().upper(),
         })
 

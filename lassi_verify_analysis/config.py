@@ -47,6 +47,10 @@ VERDICT_COLUMNS_TRIALS: list[str] = [
     "zeroshot_tier2_verdict",
     "zeroshot_tier3_verdict",
     "zeroshot_empirical_verdict",
+    # Status of the basellm-verify compile+execute (instrumented basellm with the
+    # SOURCE_verify T1+T2 template). One of: "skipped" / "instrument_error" /
+    # "compile_error" / "execute_error" / "success".
+    "basellm_verify_status",
 ]
 
 VERDICT_COLUMNS_ATTEMPTS: list[str] = [
@@ -100,6 +104,13 @@ FLOAT_COLUMNS_TRIALS: list[str] = [
     "pipeline_runtime_min",
     "tier2_max_relative_error",
     "zeroshot_runtime_s",
+    # basellm-verify: instrumented basellm runtime/energy (mirror of SOURCE_orig ->
+    # SOURCE_verify but for the vanilla-LLM-generated code). Enables apples-to-apples
+    # vs LASSI codes on equivalent instrumentation footing.
+    "basellm_verify_runtime_s",
+    "basellm_verify_runtime_diff",
+    "basellm_verify_energy_J",
+    "basellm_verify_energy_diff",
 ]
 
 # --- Float columns (Table 2) ---
