@@ -496,6 +496,9 @@ def experimental_setup(cfg):
         "tier3_fail_total",
         "tier3_active_relations",
         "tier3_inactive_relations",  # ★
+        "tier1_test_count",          # ★ Stage 1 per-trial: # T1 assertions instrumented in SOURCE_verify
+        "tier2_test_count",          # ★ Stage 1 per-trial: # T2 passthrough blocks instrumented in SOURCE_verify
+        "tier3_test_count",          # ★ Stage 1 per-trial: # T3 relations active after source filter
         "judge_false_positives",
         "judge_false_negatives",
         "lassiee_clean_status",

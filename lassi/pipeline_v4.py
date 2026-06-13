@@ -544,6 +544,17 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["basellm_verify_energy_J"] = "NA"
     experiment_data["basellm_verify_energy_diff"] = "NA"
 
+    # Stage 1 per-trial test counts: how many tests of each tier were successfully
+    # instrumented in SOURCE_verify and made active for THIS trial. Captures the
+    # stochastic Stage 1 LLM behavior (insertion + contract generation + source filter)
+    # so cross-trial drift in test coverage is visible in the data — supports
+    # per-trial verify-pass@k as the framework's correctness metric. Defaults to 0;
+    # each value is populated as its Stage 1 step succeeds. Trials that abort before
+    # a step keep the 0 default for the unreached tier.
+    experiment_data["tier1_test_count"] = 0
+    experiment_data["tier2_test_count"] = 0
+    experiment_data["tier3_test_count"] = 0
+
 
     # -----------------------------------------------------------
     # ----- STAGE 1: INSERT VERIFY INSTRUMENTATION -----
@@ -573,6 +584,11 @@ def auto_code_llmgeneration_pipeline(prompts,
               "Cannot run LASSI-Verify without Tier 1 coverage. Exiting pipeline." + color.END)
         experiment_data["stage0_abort_reason"] = "no_t1_assertions"
         return False
+    # Per-trial T1 test count: how many distinct T1 assertion labels Stage 1
+    # successfully instrumented into SOURCE_verify for this trial.
+    _t1_labels_str = lassi.verify.extract_tier1_labels(input_code)
+    experiment_data["tier1_test_count"] = len(
+        [s for s in _t1_labels_str.split(",") if s.strip()]) if _t1_labels_str else 0
 
     # --- Tier 2: Insert passthrough data dump blocks into the already-asserted code ---
     # code_insert_passthrough() is called on the Tier-1-instrumented code so both assertion
@@ -589,6 +605,11 @@ def auto_code_llmgeneration_pipeline(prompts,
             input_code = passthrough_code
             input_content_llmjudge_dict["source_code"] = input_code
             print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify -----")
+            # Per-trial T2 test count: how many distinct passthrough labels Stage 1
+            # successfully instrumented into SOURCE_verify for this trial.
+            _t2_labels_str = lassi.verify.extract_tier2_labels(input_code)
+            experiment_data["tier2_test_count"] = len(
+                [s for s in _t2_labels_str.split(",") if s.strip()]) if _t2_labels_str else 0
         else:
             print(color.RED + color.BOLD +
                   "\n[ABORT] Tier 2: code_insert_passthrough() returned empty — cannot run "
@@ -794,6 +815,9 @@ def auto_code_llmgeneration_pipeline(prompts,
 
         verification_log["tier3_contract"] = tier3_contract
         verification_log["tier3_active_relations"] = [r["name"] for r in tier3_active_relations]
+        # Per-trial T3 test count: how many metamorphic relations made it through
+        # Stage 0's source filter and are active for this trial.
+        experiment_data["tier3_test_count"] = len(tier3_active_relations)
     elif run_tier3 and not run_tier2:
         print(f"\n----- LASSI-Verify Tier 3: Tier 2 is disabled — Tier 3 requires Tier 2 passthrough baseline; Tier 3 disabled -----")
         run_tier3 = False

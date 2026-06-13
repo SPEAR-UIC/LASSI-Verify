@@ -140,6 +140,11 @@ INT_COLUMNS_TRIALS: list[str] = [
     "tier3_fail_total",
     "judge_false_positives",
     "judge_false_negatives",
+    # Stage 1 per-trial test counts (T1 assertions, T2 passthroughs, T3 active relations
+    # successfully instrumented for this trial). Captures Stage 1 LLM stochasticity.
+    "tier1_test_count",
+    "tier2_test_count",
+    "tier3_test_count",
 ]
 
 # --- Nullable int columns (Table 2) ---
