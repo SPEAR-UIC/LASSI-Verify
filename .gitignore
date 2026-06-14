@@ -12,6 +12,12 @@ generated_codes/
 # Planning docs (local only, not for repo)
 planning/
 
+# Per-experiment config (changes every run; not a tracked template)
+config.yaml
+
+# Local agent-instruction notes (not for repo)
+AGENTS.md
+
 # Experiment result CSV files
 *.csv
 
