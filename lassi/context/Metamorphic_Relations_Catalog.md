@@ -52,8 +52,7 @@ marked **inactive** and silently skipped for all generated codes.
 
 **Why:** The source is the ground truth. A relation that fails on the source is inapplicable or
 requires refinement — it is not a valid requirement for generated codes. This achieves zero false
-positives from inapplicable MRs. This mechanizes the "manual MR validation" step identified as
-future work by Li et al. 2025 (survey of 81 MR generation papers, Directions 2–3).
+positives from inapplicable MRs.
 
 ### Separate Variant Files
 
@@ -111,11 +110,30 @@ observation point, **SKIP** that relation check — do not report FAIL. Floating
 values are edge cases where the MR cannot distinguish correct from incorrect behavior
 (GENMORPH, Ayerdi et al. 2024, Section 8.5).
 
-### 7. 3–6 Diverse MRs: The Gold Standard
+### 7. Coverage Principle (How Many Relations to Propose)
 
-Three to six diverse MRs reveal approximately 90% of faults detectable by a full oracle
-(Liu et al., confirmed by Segura 2016, Chen et al. 2019, and independent replication studies).
-Target **3 to 6 relations** per generated code.
+**The source code IS the correctness specification.** Propose every relation that
+(i) is applicable to this specific source code AND (ii) probes a fault detection
+capability not already covered by another proposed relation. No more, no less.
+Leaving an applicable property untested means the framework's verification claim
+is weaker than it could be.
+
+**Two rules determine the contract:**
+
+1. **Type coverage.** For every Tier 3 relation type applicable to the source code,
+   propose at least one relation of that type before considering a second relation
+   of a type already covered.
+2. **Within-type distinctness.** Propose a second (or third, fourth, ...) relation
+   of the same type ONLY when it transforms a different input dimension AND would
+   detect a fault class the first relation cannot. Two relations that catch the
+   same fault class are not distinct — keep the stronger and drop the weaker.
+
+**Reference range.** As a descriptive prior observed across many kernels, 3 to 6
+diverse MRs typically reveal approximately 90% of faults. This is **a prior, not a
+per-kernel target**. Some kernels yield 2 distinct relations under the rules above;
+some yield 8 or more. Do NOT pad to 3 by inventing a weak third relation. Do NOT
+cap at 6 by dropping an applicable, distinct relation. Propose exactly what the two
+rules above produce — no fewer, no more.
 
 ---
 
@@ -134,18 +152,21 @@ Every catalog entry specifies a relation as a 3-tuple:
 
 ## Selection Framework
 
-When generating a contract, work through these analysis questions. Stop at 3 to 6 relations — do not
-add more simply because they appear in the catalog.
+When generating a contract, work through these analysis questions. Apply the Coverage
+Principle (§7 above) to decide how many relations belong in the contract — propose
+every relation that covers an applicable type AND probes a distinct fault class,
+no more and no fewer.
 
 ### Analysis Question 1: What is the core computation type?
 
 - **Linear algebra** (matrix multiply, dense solve): SCALING → ADDITIVITY → PERMUTATIVE
-- **Iterative solver** (Jacobi, CG, GMRES): SCALING (on source term if BCs allow) → PERMUTATIVE
+- **Iterative linear solver** (stationary methods, Krylov-subspace methods): SCALING (on source term if BCs allow) → PERMUTATIVE
 - **Stencil / linear CFD** (Laplace, isotropic diffusion, heat conduction with homogeneous BCs): CONSERVATION (flux balance) → SYMMETRY → ROTATION (if isotropic) → SCALING (if PDE is linear and BCs are homogeneous)
 - **Coupled nonlinear iterative CFD** (Navier-Stokes, SOR/Red-Black pressure solvers, projection methods, driven-cavity flow, multi-field u-v-p coupling): CONSERVATION (incompressibility or momentum residual, if checkable from passthrough) → MONOTONICITY (residual history, if printed to stdout) — **SCALING and SYMMETRY are typically NOT applicable** (see ⚠️ Coupled Nonlinear CFD guidance in Domain-Specific section)
 - **Reduction kernel** (sum, dot product, norm): SCALING → ADDITIVITY → CONSERVATION (decomposition) → PERMUTATIVE
 - **Particle / N-body**: CONSERVATION (energy) → PERMUTATIVE (particle index) → SCALING
-- **Normalized distance / correlation kernel** (z-score normalized DTW, LB_Keogh, cross-correlation, standardized regression): SCALING on the **co-normalized group** (raw data + precomputed mean + precomputed std, all by the same α) → output UNCHANGED (factor = 1.0); PERMUTATIVE (inner sum index permutation) → output UNCHANGED (factor = 1.0) — SCALING on any **single** input variable IS NOT APPLICABLE (see normalization warning below)
+- **Categorical / equality-based kernel** (output depends only on equality/inequality of discrete attribute values, not on their magnitudes — e.g., pairwise mismatch counting, hash-based comparison, set membership, equality-driven aggregation): INVARIANCE (under attribute-position permutation, value relabeling that preserves equality classes, uniform value shift, value negation — output is determined by equality structure, not magnitudes) → PERMUTATIVE (instance / row swap, if rows are interchangeable instances)
+- **Normalized distance / correlation kernel** (z-score normalized DTW, LB_Keogh, cross-correlation, standardized regression): INVARIANCE on the **co-normalized group** (raw data + precomputed mean + precomputed std, all scaled by the same α → normalized value `(x−mean)/std` unchanged → output unchanged); PERMUTATIVE (inner sum index permutation, output unchanged) — SCALING on any **single** input variable IS NOT APPLICABLE (see normalization warning below)
 - **Dynamic programming / path algorithms** (shortest path, DP table fill, wavefront, graph BFS/DFS): PERMUTATIVE (row/column index permutation) → MONOTONICITY (result non-decreasing with iterations) — **SCALING IS NOT APPLICABLE** (see below)
 - **Sorting / ranking / selection**: PERMUTATIVE (input permutation → permuted output) — SCALING IS NOT APPLICABLE (sort of 2×input is NOT 2× sort of input in index rank)
 - **Thresholding / clamping / activation**: SCALING IS NOT APPLICABLE for any input scale that crosses a threshold; CONSERVATION may apply if the operation conserves sum under special conditions
@@ -208,18 +229,24 @@ that is NOT a simple scaling of the original because the mean-subtraction breaks
 and `stats_std` are precomputed arrays passed as separate kernel arguments.
 
 **Rules for co-normalized groups:**
-- Do NOT propose SCALING on `buffer` alone, `stats_mean` alone, or `stats_std` alone.
-- The valid SCALING is: scale **all three** (`buffer`, `stats_mean`, `stats_std`) by the same
-  positive factor α → the normalized value is unchanged → output is unchanged (factor = 1.0).
-- This `factor = 1.0` MR is a strong correctness test: any code that drops the mean subtraction
-  or std division will produce wrong output under this transformation.
+- Do NOT propose SCALING on `buffer` alone, `stats_mean` alone, or `stats_std` alone — the source
+  filter will reject it.
+- The valid relation is `type = INVARIANCE` with input transformation "scale all three
+  (`buffer`, `stats_mean`, `stats_std`) by the same positive factor α" → the normalized value
+  `(x − mean)/std` is unchanged → output is unchanged. (Use the INVARIANCE category for this;
+  do NOT express it as SCALING with `factor = 1.0`.)
+- This is a strong correctness test: any code that drops the mean subtraction or std division
+  will produce wrong output under this transformation.
 
-**If only division is present (mean = 0):** scaling `x` and `std` together by α gives `α·x / α·std = x / std` → output unchanged (factor = 1.0). Scale both.
+**If only division is present (mean = 0):** scaling `x` and `std` together by α gives
+`α·x / α·std = x / std` → output unchanged. Again, express as `type = INVARIANCE` (joint α-scaling
+on the co-normalized pair), not as SCALING.
 
 **Clamped-squared deviation pattern** (common in distance kernels): `val² × (val > 0)` or
 `max(0, val)²` where `val = (x - mean)/std - envelope`. Scaling the co-normalized group
-(x + mean + std together) leaves `val` unchanged → output unchanged. Scaling only `x` changes
-`val` in a position-dependent, nonlinear way because which values are clamped to zero also changes.
+(x + mean + std together) leaves `val` unchanged → output unchanged. Express as INVARIANCE.
+Scaling only `x` changes `val` in a position-dependent, nonlinear way because which values are
+clamped to zero also changes — do not propose it.
 
 ### Analysis Question 3: Are there physical conservation laws?
 
@@ -320,6 +347,25 @@ Sample_first10: %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g
 The checker verifies: `Z_stat ≈ Y_stat + offset` for each statistic and sample.
 The `offset` value is taken from the contract's `factor` field.
 
+**For INVARIANCE** (compare variant output to original output; expected ratio is unity; the variant
+input has been transformed by some non-trivial transformation T, but the output must be unchanged):
+```
+=== BEGIN LASSI-VERIFY METAMORPHIC [label] ===
+Relation: <relation_name>
+Invariance_under: <one-line name of the input transformation, e.g. attribute_order_reversal>
+Buffer: h_output
+Elements: 1024
+Statistics: min=%.17g, max=%.17g, mean=%.17g
+Sample_first10: %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g
+=== END LASSI-VERIFY METAMORPHIC [label] ===
+```
+
+The checker verifies: `Z_stat ≈ Y_stat` for each statistic and each sample (allclose-style
+tolerance, same as SCALING with factor=1.0). The `Invariance_under` line is informational —
+the checker does not parse it but it documents which transformation produced the variant.
+The `[label]` MUST match the corresponding PASSTHROUGH block label so the checker can pair
+the variant output Z with the original output Y at the same observation point.
+
 **For MONOTONICITY** (per-iteration residual):
 ```
 === BEGIN LASSI-VERIFY METAMORPHIC [residual_iter_0] ===
@@ -416,12 +462,18 @@ Identify:
 - Literal constants in the kernel: grid spacing `dx`, timestep `dt`, element count `N`,
   convergence threshold `tol`, domain length `L`
 
-### Step 2: Select 3 to 6 Relations from the Catalog
+### Step 2: Select Relations from the Catalog (Apply the Coverage Principle)
 
-Use the Selection Framework above. Apply BOTH approaches:
+Use the Selection Framework above. Apply the Coverage Principle from §7:
+for every applicable type, propose at least one relation; within a type, propose
+additional relations only when each catches a distinct fault class. Typical
+contracts produce 3 to 6 relations as a result — that is an observation, not a target.
 
-**Input-driven** (for SCALING, ADDITIVITY, PERMUTATIVE, SYMMETRY, ROTATION): Ask "If I change
-this input parameter in this way, what exactly should change in the output?"
+Apply BOTH approaches:
+
+**Input-driven** (for SCALING, ADDITIVITY, PERMUTATIVE, SYMMETRY, ROTATION, INVARIANCE):
+Ask "If I change this input parameter in this way, what exactly should the output be?"
+For INVARIANCE the answer is "unchanged."
 
 **Output-driven** (for CONSERVATION): Ask "What aggregation of the output should be preserved?
 What input structure allows me to decompose it?"
@@ -436,19 +488,22 @@ Example — incorrect reasoning (keogh failure):
 - Trace: `value = (α·subject - avg) / std` → value is NOT `α·(subject-avg)/std` → ratio is
   input-position-dependent → SCALING on `subject` alone is INVALID.
 
-Example — correct reasoning (keogh):
-- Scale `subject`, `avgs`, `stds` all by α: `value = (α·s - α·avg)/(α·std) = (s-avg)/std`
-  → value unchanged → output unchanged → factor = 1.0 ✓
+Example — correct reasoning (keogh, expressed as INVARIANCE):
+- Scale `subject`, `avgs`, `stds` all by α: `value = (α·s − α·avg)/(α·std) = (s − avg)/std`
+  → value unchanged → output unchanged → propose this as `type = INVARIANCE` (joint α-scaling
+  of the co-normalized group), NOT as SCALING with factor=1.0.
 
-If you cannot write a symbolic trace that confirms the exact output ratio for at least one
-representative input value, do NOT propose the relation. A relation that cannot be verified
-symbolically will fail the source filter and waste a contract slot.
+If you cannot write a symbolic trace that confirms the exact output relationship (ratio for
+SCALING, shift for ADDITIVITY, equality for INVARIANCE, ...) for at least one representative
+input value, do NOT propose the relation. A relation that cannot be verified symbolically will
+fail the source filter and waste a contract slot.
 
-**IMPORTANT — null-factor relations are not supported in Phase 1/2:** Only propose relations where
+**IMPORTANT — null-factor relations are not currently supported:** Only propose relations where
 `factor` is a concrete non-null number (e.g., `2.0`, `-1.0`, `1.0`). Any relation requiring
 element-wise array comparison — including reflection symmetry, general permutations, and
 SYMMETRY/SCALING entries where you cannot state a single scalar `factor` — must be omitted.
-These are Phase 3 future work. See the ❌ Null-Factor Anti-Pattern below. Proposing a null-factor
+These are deferred for future implementation. See the ❌ Null-Factor Anti-Pattern below.
+Proposing a null-factor
 relation wastes a contract slot; the pipeline will SKIP it without verification benefit.
 
 ### Step 3: Use Constants from the Kernel
@@ -487,6 +542,17 @@ Return a single JSON block with this structure:
       "expected_relationship": "output = factor * original_output",
       "tolerance": 1e-5,
       "cost": "cheap"
+    },
+    {
+      "name": "attribute_order_invariance",
+      "type": "INVARIANCE",
+      "description": "Kernel computes a sum of per-attribute equality counts; reversing the attribute order within every input row preserves the set of per-position mismatches, so the output buffer is unchanged",
+      "factor": 1.0,
+      "input_variables": ["h_data"],
+      "observation_points": ["final_distance"],
+      "expected_relationship": "output = original_output (within tolerance)",
+      "tolerance": 1e-5,
+      "cost": "cheap"
     }
   ]
 }
@@ -495,9 +561,12 @@ Return a single JSON block with this structure:
 **Field descriptions:**
 - `name`: short identifier used in variant filename (`{file_name}_mt_{name}.cu`). Use lowercase with
   underscores, no spaces.
-- `type`: one of `CONSERVATION`, `SYMMETRY`, `SCALING`, `ADDITIVITY`, `PERMUTATIVE`, `ROTATION`, `MONOTONICITY`
-- `description`: one sentence explaining the mathematical or physical basis of the relation
-- `factor`: scaling factor (for SCALING/SYMMETRY), additive offset c (for ADDITIVITY), or `null`
+- `type`: one of `CONSERVATION`, `SYMMETRY`, `SCALING`, `ADDITIVITY`, `PERMUTATIVE`, `ROTATION`, `MONOTONICITY`, `INVARIANCE`
+- `description`: one sentence explaining the mathematical or physical basis of the relation. For
+  INVARIANCE, name the specific input transformation being applied (e.g., "reverse the attribute
+  order within every instance").
+- `factor`: scaling factor (for SCALING/SYMMETRY), additive offset c (for ADDITIVITY),
+  `1.0` for INVARIANCE (output ratio is unity by definition), or `null`
 - `input_variables`: C++ variable names of host arrays/scalars to transform (from the source code)
 - `observation_points`: METAMORPHIC block label(s); must match PASSTHROUGH labels when comparing
   scaled output to original. **MUST be the primary output array** (e.g., `["final_solution"]`,
@@ -568,7 +637,7 @@ BAD: ADDITIVITY on y = α*x when α ≠ 1 (shift in output = α*c, not c)
 BAD: ADDITIVITY on iterative solver with fixed Dirichlet BCs (BCs pin boundary values, interior shift ≠ c)
 ```
 
-ADDITIVITY (Phase 1/2) requires the output to shift by exactly `c` when all inputs shift by `c`.
+ADDITIVITY requires the output to shift by exactly `c` when all inputs shift by `c`.
 This holds for reductions (mean shifts by c, sum shifts by N*c but mean stays shifted by c),
 and pointwise operations with unit coefficient. For a general linear operator A, the shift in
 output mean is `c × mean(row_sums(A))` — if row sums ≠ 1, ADDITIVITY with expected shift = c is
@@ -583,32 +652,35 @@ BAD priority: use MONOTONICITY for a linear PDE when SCALING clearly applies
 
 MONOTONICITY is the last resort. Always prefer equality/quantitative-ratio relations.
 
-### ❌ Null-Factor Relations (Phase 3 Only — Not Yet Supported)
+### ❌ Null-Factor SYMMETRY/SCALING Relations (Not Currently Supported)
 
 ```
-BAD (Phase 1/2): { "type": "SYMMETRY", "factor": null, "name": "horizontal_reflection" }
-BAD (Phase 1/2): { "type": "SCALING",  "factor": null, "name": "negation_symmetry" }
+BAD: { "type": "SYMMETRY", "factor": null, "name": "horizontal_reflection" }
+BAD: { "type": "SCALING",  "factor": null, "name": "negation_symmetry" }
 ```
 
-**What a null-factor relation is:** A relation with `"factor": null` requires element-wise array
-comparison between the original output Y and the transformed variant output Z. This is a Phase 3
-capability that is not yet implemented in the LASSI-Verify pipeline.
+**What a null-factor relation is:** A SYMMETRY or SCALING relation with `"factor": null`
+requires element-wise array comparison between the original output Y and the transformed
+variant output Z. This capability is not currently implemented for these two relation types.
 
-**Why to avoid it:** Relations with `factor: null` are **automatically SKIP'd** during the Stage 0
-source filter — the pipeline detects the null factor and marks them inactive before even attempting
-to compile or run the variant. Every null-factor relation you propose wastes a contract slot and
-produces zero verification value for any trial.
+**Why to avoid it:** Such relations are **automatically SKIP'd** during the Stage 0 source
+filter — the pipeline detects the null factor and marks them inactive before even attempting to
+compile or run the variant. Every null-factor SYMMETRY/SCALING relation you propose wastes a
+contract slot.
 
 **What to do instead:** For SYMMETRY relations, only propose relations where `factor` is a known
-non-null scalar (e.g., `factor: -1.0` for antisymmetric negation, `factor: 1.0` for element-wise
-equivalence under permutation with a paired PERMUTATIVE check). If the symmetry you have in mind
-requires inspecting individual array elements rather than comparing aggregate statistics (min/max/mean)
-scaled by a constant, that is a null-factor relation — skip it and choose a SCALING or CONSERVATION
-relation instead.
+non-null scalar (e.g., `factor: -1.0` for antisymmetric negation). If the symmetry you have in
+mind requires no algebraic transformation of the output but merely "the output is unchanged"
+under some input transformation, that is NOT a SYMMETRY relation — it is an INVARIANCE relation
+(use `type = INVARIANCE`, `factor = 1.0`). If the property requires element-wise comparison that
+no aggregate statistic can capture (e.g., spatial reflection equivariance Z[i] ≈ Y[N−1−i]
+per-element), it is not currently supported — skip it and choose a different relation type.
 
-**Formal note:** The current checker compares `Z_stat ≈ factor × Y_stat` for each scalar statistic
-(min, max, mean). This requires an explicit numeric factor. Element-wise comparison (needed for
-reflection symmetry, general permutations, etc.) is deferred to Phase 3.
+**Formal note:** The current SCALING/SYMMETRY checker compares `Z_stat ≈ factor × Y_stat` for
+each scalar statistic (min, max, mean). This requires an explicit numeric factor. INVARIANCE
+uses the same machinery with factor=1.0 (compares `Z_stat ≈ Y_stat`). Element-wise array
+comparison for non-aggregate properties (reflection, general permutation) is not currently
+supported.
 
 ### ❌ SCALING or SYMMETRY on Zero-Valued Default Parameters
 
@@ -647,13 +719,17 @@ any input parameter. If neither is applicable, it is correct to propose zero rel
 will abort the trial, which is the right outcome: there is no valid T3 verification possible for
 this trial configuration.
 
-### ❌ Composite MRs in Phase 1
+### ❌ Composite MRs (Single-Concern Principle — Intentionally Not Supported)
 
 ```
-BAD (Phase 1): apply SCALING then PERMUTATIVE in the same variant
+BAD: apply SCALING then PERMUTATIVE in the same variant
 ```
 
-Composite MRs (more effective per Qiu et al. 2019) are tagged as Phase 3 future work.
+Each variant must apply **exactly one** relation. This is an intentional design choice, not
+a temporary limitation: combining two transformations in a single variant makes it ambiguous
+which transformation a FAIL diagnoses, defeating the per-relation fault-localization that
+makes Tier 3 actionable. If you want to test two relations, propose them as two separate
+single-concern variants in the contract.
 
 ---
 
@@ -869,9 +945,9 @@ printf("\n=== END LASSI-VERIFY METAMORPHIC [final_output] ===\n");
 `applicable_when`: kernel solves a linear system Ax=b with homogeneous (zero) Dirichlet BCs,
 OR all boundary condition values are also scaled by alpha
 
-**Note:** This is the most common applicable SCALING for iterative solvers (Jacobi, CG, etc.).
-If Dirichlet BCs in the rows of A are fixed at non-zero values and NOT also scaled, this relation
-does not apply — SOURCE_verify will fail it and filter it inactive.
+**Note:** This is the most common applicable SCALING for iterative linear solvers (stationary
+methods, Krylov methods). If Dirichlet BCs in the rows of A are fixed at non-zero values and
+NOT also scaled, this relation does not apply — SOURCE_verify will fail it and filter it inactive.
 
 ⛔ **Do NOT use convergence scalars or residuals as observation points for SCALING/SYMMETRY.**
 Use the primary output array (the converged solution field or vector). The convergence residual
@@ -968,8 +1044,9 @@ std::swap(h_b[swap_idx1], h_b[swap_idx2]);
 **Check:** Aggregate invariance (min/max/mean of Z ≈ Y) + element equivariance
 `Z[swap_idx1] ≈ Y[swap_idx2]` and `Z[swap_idx2] ≈ Y[swap_idx1]`.
 
-**Note for Jacobi:** Choose interior rows only (avoid boundary rows that encode Dirichlet BCs).
-Swapping a boundary row with an interior row changes the problem — SOURCE_verify will catch this.
+**Note for stencil / fixed-BC iterative solvers:** Choose interior rows only (avoid boundary
+rows that encode Dirichlet BCs). Swapping a boundary row with an interior row changes the
+mathematical problem — SOURCE_verify will catch this and the relation will be filtered inactive.
 
 #### 4.2 Particle / Element Index Permutation (Array Equivariance)
 
@@ -1079,7 +1156,7 @@ quantitative equality relation applies.
 
 **Applicable to:**
 - Steepest descent / gradient descent
-- Simple Jacobi iteration with strict convergence
+- Stationary iterative linear solvers with strict monotone convergence guarantees
 
 **Contraindications:**
 - Conjugate gradient (CG): energy can temporarily increase — CG is NOT monotone in residual
@@ -1163,11 +1240,11 @@ subtraction in a centered computation. SCALING would pass; ADDITIVITY would fail
 - `applicable_when`: the kernel computes a reduction (mean, sum) or pointwise-linear transform
   where adding c to all inputs shifts all output statistics by exactly c
 
-**Phase 1/2 restriction:** The checker uses the contract `factor` field as the expected shift for
-ALL statistics (min, max, mean) and per-element samples. This is exact only when the linear
-coefficient is unity: mean(x+c) = mean(x)+c, min(x+c) = min(x)+c, max(x+c) = max(x)+c.
+**Implementation restriction:** The checker uses the contract `factor` field as the expected
+shift for ALL statistics (min, max, mean) and per-element samples. This is exact only when the
+linear coefficient is unity: mean(x+c) = mean(x)+c, min(x+c) = min(x)+c, max(x+c) = max(x)+c.
 For kernels with non-unit coefficients (y = A*x where row sums ≠ 1), output shift ≠ c — do not
-propose ADDITIVITY in Phase 1/2 for such kernels.
+propose ADDITIVITY for such kernels.
 
 **Cost:** Cheap — 1 additional compile + run.
 
@@ -1222,6 +1299,157 @@ printf("\n=== END LASSI-VERIFY METAMORPHIC [output_label] ===\n");
 
 **Check:** `|Z_stat − (Y_stat + offset)| ≤ atol + rtol × max(|Z_stat|, |Y_stat + offset|)` per statistic.
 The `offset` value is taken from the contract's `factor` field (same JSON field, additive interpretation for ADDITIVITY).
+
+---
+
+### Category 8: INVARIANCE (OUTPUT INVARIANCE UNDER INPUT TRANSFORMATION)
+
+**Applicability guard (read first):** INVARIANCE applies when the kernel's output is genuinely
+invariant under some non-trivial input transformation. Do NOT propose INVARIANCE on kernels
+where the output depends on input magnitude (use SCALING), sign (use SYMMETRY), or order
+(use PERMUTATIVE for equivariance under permutation). INVARIANCE is for cases where applying a
+real, non-degenerate transformation T to the input leaves the output mathematically unchanged.
+
+**Formal basis:** Zhou et al. symmetry MRP (the "different viewpoints from which the system
+appears the same" formal hierarchy, confirmed by Li et al. 2025 as a top-level MRP);
+Chen 1998 equivalence partitioning under input-equivalence relations; ML feature-equivalence
+invariance from Segura 2016, 2020. Distinct from PERMUTATIVE (Category 4), which is the more
+specific case where T is a permutation of input elements; INVARIANCE generalizes to ANY
+input transformation (permutation, relabeling, uniform shift, value negation, joint scaling
+of co-normalized groups) so long as the output is unchanged.
+
+**Formal 3-tuple:**
+- `input_relation`: x₂ = T(x₁), where T is a non-trivial input transformation (must actually
+  change x — applying T to a zero-valued input or proposing T = identity is degenerate)
+- `output_relation`: f(x₂) ≈ f(x₁) within tolerance (aggregate stats AND per-element samples)
+- `applicable_when`: the kernel's algorithmic semantics ignore the dimension that T modifies
+  (e.g., the kernel reads inputs only through equality comparisons, so value relabeling does
+  not change the output)
+
+**Cost:** Cheap — 1 additional compile + run.
+
+**Discriminating power: HIGH for kernels where invariance is the natural correctness language.**
+INVARIANCE catches bugs that change *what the algorithm is sensitive to* — a refactor that
+silently introduces sensitivity to attribute order, value magnitude, or input ordering will
+fail an INVARIANCE relation that the source code satisfied. Especially strong for categorical /
+equality-based kernels where SCALING and ADDITIVITY are nonsensical.
+
+**Applicable to:**
+- Categorical / equality-based kernels: pairwise mismatch counting on discrete attributes,
+  hash functions where the output set is order-independent, set membership tests, and any
+  computation whose output depends only on equality/inequality of input values, not their
+  magnitudes
+- Co-normalized distance kernels: z-score-normalized DTW, LB_Keogh, cross-correlation,
+  standardized regression (joint α-scaling of data + mean + std)
+- Sort-as-set computations: bag-of-elements operations where the output is a multiset, not
+  a sequence
+
+**Contraindications:**
+- Any kernel whose output depends on input magnitude (use SCALING instead)
+- Any kernel whose output depends on input sign (use SYMMETRY instead)
+- Any kernel whose output depends on input order in a structured way (use PERMUTATIVE for
+  equivariance instead — i.e., output permutes by the same permutation as the input)
+- Numerical solvers (PDE, optimization) where the output is generally sensitive to almost
+  every input dimension
+- Transformations that are degenerate on the default input configuration (e.g., proposing
+  "scale by α" when the input array is all zeros — see ❌ Zero-Valued Default Parameters)
+
+**Choosing the input transformation T.** The transformation must be:
+1. **Non-trivial** — actually change x; identity replay (no input change) is rejected.
+2. **Algorithmically meaningful** — exercise a specific part of the kernel implementation
+   (different bug surface than other relations already in the contract).
+3. **Source-grounded** — trace through the kernel symbolically and confirm output is
+   unchanged for at least one representative input value before committing to the relation.
+
+The contract `factor` field is **always 1.0** for INVARIANCE (output ratio is unity by
+definition); the input transformation itself is described in the `description` and named
+in the `Invariance_under:` line of the METAMORPHIC block.
+
+#### 8.1 Attribute / Column-Order Invariance
+
+`input_relation`: apply the same permutation σ to the attribute layout within every instance
+  (e.g., reverse column order: `data[i*A + k] ← data[i*A + (A-1-k)]` for every row i)
+`output_relation`: Z ≈ Y (output buffer identical within tolerance)
+`applicable_when`: the kernel reduces over attribute positions in a way that is independent
+  of the order (e.g., counting mismatches, summing pairwise products with no positional
+  weighting); the attribute-order is the inner reduction dimension
+
+**Example (categorical attribute kernel where output is a sum over per-attribute equality
+checks):**
+```cpp
+// Reverse the attribute order within every input row — apply AFTER initialization,
+// BEFORE the first H→D copy.
+for (int i = 0; i < NUM_ROWS; i++) {
+    for (int k = 0; k < ATTRIBUTES_PER_ROW / 2; k++) {
+        std::swap(h_data[i * ATTRIBUTES_PER_ROW + k],
+                  h_data[i * ATTRIBUTES_PER_ROW + (ATTRIBUTES_PER_ROW - 1 - k)]);
+    }
+}
+```
+
+After the final D→H transfer, emit the METAMORPHIC block at the same `[label]` as the
+original PASSTHROUGH block, with `Relation: <relation_name>`,
+`Invariance_under: attribute_order_reversal`, and the standard
+`Statistics: ... / Sample_first10: ...` lines.
+
+#### 8.2 Value-Relabeling Invariance (Categorical Alphabet Bijection)
+
+`input_relation`: apply a fixed bijection π to the categorical alphabet across the entire
+  dataset (e.g., map every value v → (v + k) mod ALPHABET_SIZE for some fixed k ≠ 0)
+`output_relation`: Z ≈ Y
+`applicable_when`: the kernel uses input values only through equality comparisons (==, !=,
+  XOR for char-equality testing) — the specific value labels do not enter the computation,
+  only their equivalence classes
+
+**Example (categorical attribute kernel):**
+```cpp
+// Add a constant shift to every value, then take mod ALPHABET_SIZE — preserves equality
+// structure (a == b  iff  ((a + k) % A) == ((b + k) % A)). For char-data with no explicit
+// alphabet size, simple XOR with a fixed constant works for the same reason.
+const int relabel_shift = 7;
+for (int i = 0; i < NUM_ROWS * ATTRIBUTES_PER_ROW; i++) {
+    h_data[i] = (char)(((int)h_data[i] + relabel_shift) % ALPHABET_SIZE);
+}
+```
+
+#### 8.3 Uniform Value Shift Invariance
+
+`input_relation`: add a constant c to every input value (different c from the relabeling case;
+  here c need not preserve membership in the original alphabet — it just shifts all values
+  by the same amount)
+`output_relation`: Z ≈ Y
+`applicable_when`: the kernel computes pairwise differences or equality predicates where
+  uniform shift cancels (e.g., `data[i] - data[j]` becomes `(data[i] + c) - (data[j] + c)`;
+  `data[i] == data[j]` is unchanged under shared additive shift)
+
+**Example:**
+```cpp
+const int uniform_shift = 5;
+for (int i = 0; i < NUM_ROWS * ATTRIBUTES_PER_ROW; i++) h_data[i] = h_data[i] + uniform_shift;
+```
+
+#### 8.4 Negation Invariance (Equality-Class-Preserving Sign Flip)
+
+`input_relation`: negate or bitwise-NOT every input value (must preserve the equality
+  structure — e.g., bitwise-NOT on integers, sign-flip on signed values where the
+  comparison is on equality not ordering)
+`output_relation`: Z ≈ Y
+`applicable_when`: the kernel uses input values only through equality comparisons AND the
+  negation is a bijection on the input domain (so it preserves equality classes); distinct
+  from SYMMETRY (Category 2.1) where negation produces a NEGATED output, not an unchanged one
+
+#### 8.5 Co-Normalized Group Invariance (Joint α-Scaling)
+
+`input_relation`: multiply every member of a co-normalized group (data, precomputed mean,
+  precomputed std) by the same positive factor α
+`output_relation`: Z ≈ Y
+`applicable_when`: the kernel computes `(x − mean) / std` (z-score normalization) somewhere
+  in its body; the normalized value is unchanged under joint α-scaling, so the output is
+  unchanged
+
+For the co-normalized group case, use `type = INVARIANCE` with `factor = 1.0`. Do NOT
+express it as SCALING with factor=1.0 — the validator will drop SCALING+factor=1.0 as a
+degenerate relation.
 
 ---
 
@@ -1288,16 +1516,19 @@ Priority order:
 2. **PERMUTATIVE** (4.1): row interchange should produce identical solution
 3. **SYMMETRY** (2.1): negation symmetry if the operation is antisymmetric
 
-### Iterative Solvers (Jacobi, Gauss-Seidel)
+### Iterative Linear Solvers (stationary methods, Krylov-subspace methods)
 Priority order:
 1. **PERMUTATIVE** (4.1): row interchange of coefficient matrix and RHS → identical solution
 2. **SCALING** (3.2): scale source term b by alpha → scale solution by alpha (homogeneous BCs only)
 3. **MONOTONICITY** (6.1): ONLY if no quantitative relation applies; note CG is NOT monotone
 
-**Jacobi-specific caution from MEMORY.md:** The pointer-swap bug (jacobi March 11 run) broke
-Dirichlet BCs in the interior but was missed by Tier 2 passthrough because boundary elements
-(indices 0–9) were unchanged. Row interchange using interior rows (row_i = N/4, row_j = N/2)
-would have been more discriminating than boundary-adjacent checks.
+**Stencil-solver caution:** A known weak-spot of Tier 2 passthrough is the pointer-swap bug
+pattern, where the double-buffered swap of input/output pointers is dropped or reordered,
+silently breaking Dirichlet boundary conditions in the interior of the grid. Boundary elements
+remain unchanged so the standard `Sample_first10` capture (indices 0–9, often on a boundary row)
+gives the impression that the output matches. Tier 3 PERMUTATIVE relations using **interior**
+row indices (e.g., row_i = N/4, row_j = N/2) catch this class of bug — pick interior indices
+when proposing row-interchange relations for stencil solvers.
 
 ### Particle / N-Body Simulation
 Priority order:
@@ -1311,7 +1542,25 @@ Priority order:
 2. **CONSERVATION** (1.3): partial sum decomposition (no extra run if passthrough covers full array)
 3. **PERMUTATIVE** (4.3): shuffling input produces same scalar result (generous FP tolerance)
 
-### Dynamic Programming / Shortest Path / Wavefront (e.g., pathfinder, BFS distance, edit distance)
+### Categorical / Equality-Based Kernels (discrete-attribute distance, hash, comparison, set membership)
+Priority order:
+1. **INVARIANCE** (Category 8): output depends only on equality structure, not on values themselves.
+   At least one of: attribute-order invariance (8.1), value-relabeling invariance (8.2),
+   uniform-value-shift invariance (8.3), or equality-class-preserving negation invariance (8.4).
+   Select transformations that exercise different parts of the kernel (e.g., one that probes
+   the attribute-stride memory layout, one that probes the equality predicate).
+2. **PERMUTATIVE** (4.1 or 4.2): if rows / instances are interchangeable (the kernel does not
+   treat position as semantically meaningful), instance-row swap should leave aggregate output
+   statistics invariant.
+3. **SCALING / ADDITIVITY / SYMMETRY**: NOT APPLICABLE — the output depends on equality classes,
+   not on magnitudes, sums, or signs. Do not propose these for this kernel class.
+
+**Caution for kernels that mix categorical inputs with numeric reductions** (e.g., a categorical
+classifier whose output is a weighted sum where the weights are numeric): INVARIANCE on the
+categorical inputs is valid; SCALING/ADDITIVITY may also apply to the numeric weights as a
+separate relation. Treat as two independent input dimensions, one relation per dimension.
+
+### Dynamic Programming / Shortest Path / Wavefront (e.g., grid-based shortest path, BFS distance, edit distance, wavefront accumulation)
 
 **⚠️ SCALING is NEVER applicable to this class.** The accumulated result (minimum path cost,
 shortest distance, edit distance) is computed via `min()` or `max()` at every step, making the
@@ -1324,8 +1573,8 @@ red flag indicating a passthrough placement error, not a correct verification re
 
 Priority order:
 1. **PERMUTATIVE** (4.1): permuting input rows/columns (and corresponding grid values) should produce
-   the permuted output. For pathfinder (ROWS×COLS grid), swapping two columns of the input grid and
-   the same two columns of the output is an equivariance relation.
+   the permuted output. For a 2D wavefront DP over a ROWS×COLS grid, swapping two columns of the
+   input grid and verifying the same two columns of the output are swapped is an equivariance relation.
 2. **MONOTONICITY** (6.1): for shortest-path/DP with non-negative costs, the result accumulated over
    more iterations is non-decreasing (each additional row adds at least 0 to the minimum path cost).
    Use MONOTONICITY as a fallback only — it is the weakest available relation.
@@ -1337,20 +1586,23 @@ final computed output, and if they appear to hold, the passthrough is measuring 
 
 ---
 
-## Example: Jacobi Solver Metamorphic Contract
+## Example: Linear Iterative Stencil Solver Metamorphic Contract
 
-**Context:** Jacobi iteration for Ax = b. Matrix A is diagonally dominant with Dirichlet BCs
-fixed in boundary rows. Interior rows are interchangeable. Source term b drives the solution.
+**Context:** A stationary iterative solver for `A x = b`. Matrix A is diagonally dominant
+with Dirichlet boundary conditions fixed in boundary rows; interior rows are interchangeable.
+The source term `b` drives the solution.
 
 **Analysis:**
 - Computation type: linear iterative solver
-- Linear? Yes (Jacobi solves a linear system)
-- Conservation law? No — Jacobi does not conserve a physical quantity
-- SCALING (source term)? Marginal — boundary condition rows have fixed ±1 values not scaled with b.
-  SOURCE_verify will likely filter this inactive; include conditionally.
-- PERMUTATIVE (row swap)? Yes — swapping two interior rows i and j (and corresponding b entries)
-  should produce the identical solution vector.
-- SYMMETRY (negation)? Yes — if BCs and b are all negated, solution should negate: f(−b) = −f(b).
+- Linear? Yes (the kernel solves a linear system)
+- Conservation law? No — this solver class does not conserve a physical quantity
+- SCALING (source term)? Marginal — boundary-condition rows have fixed values that are NOT
+  scaled with b, so the boundary part of the solution does not scale; SOURCE_verify will
+  likely filter this inactive; include speculatively.
+- PERMUTATIVE (row swap)? Yes — swapping two interior rows i and j (and corresponding b
+  entries) should produce the identical solution vector.
+- SYMMETRY (negation)? Yes — if BCs and b are all negated, the solution should negate:
+  f(−b) = −f(b).
 
 **Generated contract:**
 ```json
@@ -1382,10 +1634,10 @@ fixed in boundary rows. Interior rows are interchangeable. Source term b drives 
 }
 ```
 
-**Note on SCALING for Jacobi:** Scaling only h_b while leaving boundary rows of A unchanged
-changes the mathematical problem — the boundary values constrain the solution independently.
-The SOURCE_verify filter will catch this and mark SCALING inactive. The contract can include it
-speculatively; the filter will exclude it if inapplicable.
+**Note on SCALING for fixed-BC iterative solvers:** Scaling only h_b while leaving boundary
+rows of A unchanged changes the mathematical problem — the boundary values constrain the
+solution independently. The SOURCE_verify filter will catch this and mark SCALING inactive.
+The contract can include it speculatively; the filter will exclude it if inapplicable.
 
 ---
 
@@ -1415,21 +1667,8 @@ speculatively; the filter will exclude it if inapplicable.
 
 6. **One variant per relation.** Do not combine two transformations in a single variant file.
 
-7. **Composite MRs (Phase 3 future work):** Chaining two relations (e.g., SCALING then PERMUTATIVE)
-   is more effective (Qiu et al. 2019: composite MRs catch faults neither component catches alone).
-   Not in Phase 1.
-
-8. **MT false positive caveat:** MT cannot guarantee absence of bugs — both source and follow-up
-   executions may be wrong in the same way (Segura 2020; documented in the jacobi false-positive
-   case in MEMORY.md). Multiple diverse MRs reduce but do not eliminate this risk. Tier 3 PASS
-   is evidence of correctness, not a proof.
-
-9. **Concurrent execution (Phase 3 future):** CUDA kernels are concurrent programs. Thread-
-   interleaving MRs require an extended MR definition (Sun et al. 2023 via Li et al. 2025).
-   Out of scope for Phase 1.
-
-10. **Scientific simulation domain precedents:** Luu et al. (ocean software MT), Raunak & Olsen
-    (simulation model MT), Lidbury et al. (OpenCL compiler fuzzing — 50+ bugs in OpenCL compilers
-    on NVIDIA hardware via MT). LASSI-Verify Tier 3 is consistent with established GPU-MT practice.
+7. **MT false positive caveat:** MT cannot guarantee absence of bugs — both source and follow-up
+   executions may be wrong in the same way. Multiple diverse MRs reduce but do not eliminate this
+   risk. Tier 3 PASS is evidence of correctness, not a proof.
 
 ---

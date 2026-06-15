@@ -1078,7 +1078,9 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
     """
     Tier 3: Generate a metamorphic contract for the given source code.
 
-    Calls the LLM with the metamorphic catalog to select 3 to 6 applicable relations.
+    Calls the LLM with the metamorphic catalog to select applicable relations per the
+    Coverage Principle (catalog §7): at least one relation per applicable type; within
+    a type, additional relations only when each catches a distinct fault class.
     Returns a contract dict with a 'relations' key, or {} on failure.
 
     Called once in Stage 0 after SOURCE_verify is constructed (after Tier 1 + Tier 2
@@ -1092,8 +1094,13 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
     content_prompt = (
         "You are preparing GPU-accelerated scientific code for Tier 3 metamorphic testing "
         "as part of the LASSI-Verify verification framework.\n\n"
-        "Your task is to analyze the source code and select 3 to 6 applicable metamorphic "
-        "relations from the catalog below. Return your selection as a single JSON block.\n\n"
+        "Your task is to analyze the source code and select applicable metamorphic "
+        "relations from the catalog below. Follow the Coverage Principle (catalog §7): "
+        "for every applicable relation type, propose at least one relation; within a "
+        "type, propose additional relations only when each catches a distinct fault "
+        "class. Do NOT pad the count to hit a target number, and do NOT cap the count "
+        "by dropping an applicable, distinct relation. Return your selection as a "
+        "single JSON block.\n\n"
         "----\n\n"
     )
     content_prompt += prompts.get_codeknowledge("metamorphic_catalog")
@@ -1241,28 +1248,31 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
             # code (including broken ones) trivially passes — zero discriminating power.
             #
             #   SCALING    → factor is the OUTPUT scaling ratio (variant ≈ factor * baseline).
-            #                factor == 1.0 is identity scaling. Drop unless the description
-            #                indicates legitimate algorithmic invariance (catalog defines
-            #                rare factor=1.0 cases for co-normalized group scaling on
-            #                normalized-distance kernels).
+            #                factor == 1.0 is identity scaling. Drop unconditionally. Cases
+            #                where the output is genuinely unchanged under an input
+            #                transformation (e.g., co-normalized group scaling on
+            #                normalized-distance kernels) belong in INVARIANCE, not SCALING.
             #   ADDITIVITY → factor is the OUTPUT change ratio for a given input offset.
-            #                factor == 0.0 with offset == 0 is the additivity analog of the
-            #                SCALING degeneracy: adding zero to a zero-initialized input
-            #                trivially produces the same output. Same invariance-keyword
-            #                carve-out applies.
+            #                factor == 0.0 is the additivity analog of the SCALING degeneracy
+            #                (adding zero to inputs trivially produces unchanged output).
+            #                Drop unconditionally — the INVARIANCE category is the right
+            #                home for output-unchanged-under-input-shift relations.
             #   SYMMETRY   → factor is fixed at -1.0 (negation/reflection). Any other factor
             #                contradicts the type definition. Drop unconditionally.
+            #   INVARIANCE → factor is conventionally 1.0 (output ratio is unity by
+            #                definition). Accepted as first-class; the only check that
+            #                applies is the input_variables requirement (a zero-input-var
+            #                INVARIANCE is just identity replay). The no-op-phrase catch-all
+            #                below is BYPASSED for INVARIANCE because legitimate INVARIANCE
+            #                descriptions explicitly say "output unchanged" / "leaves
+            #                unchanged" — that wording is the correct semantic for this type.
             #
             # Catch-all: even when factor passes the type-specific check, the description
             # may openly admit the transformation is a no-op (e.g. "transformed input is
             # identical", "adding zero", "identity transformation", "leaves unchanged").
             # Drop these regardless of type/factor — the LLM has confessed the relation is
-            # vacuous in its own words.
+            # vacuous in its own words. EXCEPTION: INVARIANCE relations are exempt (see above).
             if contract.get("relations"):
-                _invariance_keywords = (
-                    "invariance", "invariant", "co-normalized", "co_normalized",
-                    "normalization-preserving", "normalization_preserving",
-                )
                 # Phrases that indicate the LLM admits the input transformation is a no-op.
                 # Matched case-insensitively against description + expected_relationship.
                 # Additions over time (cat-and-mouse — LLM keeps inventing new degenerate
@@ -1295,43 +1305,46 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
                     rel_factor = rel.get("factor", None)
                     rel_desc = (rel.get("description", "") + " "
                                 + rel.get("expected_relationship", "")).lower()
-                    _has_invariance_kw = any(
-                        kw in rel_name.lower() or kw in rel_desc
-                        for kw in _invariance_keywords
-                    )
 
-                    if rel_type == "SCALING" and rel_factor == 1.0 and not _has_invariance_kw:
+                    if rel_type == "SCALING" and rel_factor == 1.0:
                         print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
-                              f"SCALING with factor=1.0 is identity (no test power) and "
-                              f"description does not indicate algorithmic invariance. "
+                              f"SCALING with factor=1.0 is identity (no test power). "
+                              f"If the kernel's output is genuinely unchanged under an input "
+                              f"transformation, use type=INVARIANCE instead. "
                               f"Description: {rel.get('description', '(none)')[:120]}")
                         continue
-                    if rel_type == "ADDITIVITY" and rel_factor == 0.0 and not _has_invariance_kw:
+                    if rel_type == "ADDITIVITY" and rel_factor == 0.0:
                         print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
-                              f"ADDITIVITY with factor=0.0 is identity (no test power) and "
-                              f"description does not indicate algorithmic invariance. "
+                              f"ADDITIVITY with factor=0.0 is identity (no test power). "
+                              f"If the kernel's output is genuinely unchanged under a uniform "
+                              f"input shift, use type=INVARIANCE instead. "
                               f"Description: {rel.get('description', '(none)')[:120]}")
                         continue
                     if rel_type == "SYMMETRY" and rel_factor != -1.0:
                         print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
                               f"SYMMETRY requires factor=-1.0 (negation), got factor={rel_factor}.")
                         continue
-                    # Structural check: SCALING/SYMMETRY/ADDITIVITY are transformation-style
-                    # relations — they require at least one input variable to transform.
-                    # An empty input_variables list means "no transformation defined", which
-                    # is the structural signature of an identity-replay degenerate relation
-                    # (the LLM sometimes mislabels these as MONOTONICITY too, but for the
-                    # transformation types it's an outright contradiction with the type).
-                    # MONOTONICITY/CONSERVATION legitimately have empty input_variables
-                    # (they observe the existing solver run), so this check excludes them.
-                    if (rel_type in ("SCALING", "SYMMETRY", "ADDITIVITY")
+                    # Structural check: SCALING/SYMMETRY/ADDITIVITY/INVARIANCE are
+                    # transformation-style relations — they require at least one input
+                    # variable to transform. An empty input_variables list means "no
+                    # transformation defined", which is the structural signature of an
+                    # identity-replay degenerate relation (the LLM sometimes mislabels these
+                    # as MONOTONICITY too, but for the transformation types it's an outright
+                    # contradiction with the type). MONOTONICITY/CONSERVATION legitimately
+                    # have empty input_variables (they observe the existing solver run), so
+                    # this check excludes them.
+                    if (rel_type in ("SCALING", "SYMMETRY", "ADDITIVITY", "INVARIANCE")
                             and not rel.get("input_variables")):
                         print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
                               f"{rel_type} requires at least one input_variable to transform; "
                               f"empty input_variables means no transformation is defined.")
                         continue
-                    # Catch-all: description openly admits the transformation is a no-op
-                    if any(phrase in rel_desc for phrase in _noop_phrases):
+                    # Catch-all: description openly admits the transformation is a no-op.
+                    # EXEMPTION: INVARIANCE relations legitimately describe themselves with
+                    # "output unchanged" / "leaves unchanged" wording — that IS the semantic
+                    # of the type, not an admission of degeneracy. Apply the catch-all to
+                    # every type EXCEPT INVARIANCE.
+                    if rel_type != "INVARIANCE" and any(phrase in rel_desc for phrase in _noop_phrases):
                         print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
                               f"description openly admits the transformation is a no-op. "
                               f"Description: {rel.get('description', '(none)')[:140]}")
@@ -1507,6 +1520,33 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             "}\n"
             "```\n"
         )
+    elif relation_type == "INVARIANCE":
+        # Build a one-line label for the Invariance_under: field. Prefer the relation
+        # name itself (which the LLM already chose as a descriptive identifier).
+        _inv_label = relation_name
+        block_format = (
+            f"**METAMORPHIC output block format** "
+            f"(insert AFTER the final D→H transfer and cudaDeviceSynchronize, "
+            f"BEFORE any cudaFree / free calls):\n\n"
+            f"```\n"
+            f"=== BEGIN LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
+            f"Relation: {relation_name}\n"
+            f"Invariance_under: {_inv_label}\n"
+            f"Buffer: <buffer_name>\n"
+            f"Elements: <N>\n"
+            f"Statistics: min=%.17g, max=%.17g, mean=%.17g\n"
+            f"Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)\n"
+            f"=== END LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
+            f"```\n\n"
+            f"Print this block using printf with %.17g format. The label MUST exactly match "
+            f"the corresponding PASSTHROUGH block label for this observation point "
+            f"(e.g., if the PASSTHROUGH label is `[final_solution]`, the METAMORPHIC label "
+            f"must also be `[final_solution]`). The `Invariance_under:` field names the "
+            f"specific input transformation applied — it is informational for diagnostic "
+            f"output and does not affect the check. The checker compares each variant "
+            f"statistic Z_stat to the original statistic Y_stat (factor = 1.0 by definition "
+            f"for INVARIANCE).\n"
+        )
     else:
         block_format = (
             "**METAMORPHIC output block format**: Use labeled blocks with "
@@ -1581,6 +1621,46 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             "loop counter as the iteration index and the inner loop's final convergence "
             "residual as the value. NEVER place the block inside the inner loop — this "
             "would print O(outer_iterations × inner_iterations) lines and overflow the pipeline.\n"
+        )
+    elif relation_type == "INVARIANCE" and input_vars:
+        transform_instruction = (
+            f"**Step 1 — Apply the input transformation:**\n"
+            f"Insert the transformation code AFTER host array initialization but BEFORE "
+            f"the first host-to-device memory copy (cudaMemcpy H→D or hipMemcpy H→D).\n\n"
+            f"The transformation must produce a variant input that is genuinely different "
+            f"from the original (no-op transformations are rejected). The specific "
+            f"transformation is described in the relation description above:\n"
+            f"  {description}\n\n"
+            f"Apply the transformation to ALL of these input arrays/scalars: "
+            f"{', '.join(input_vars)}.\n\n"
+            f"Common INVARIANCE input transformations and their canonical implementations\n"
+            f"(translate the description above into the matching pattern):\n"
+            f"  - Attribute / column-order reversal within every row of a 2D row-major array:\n"
+            f"      for (int r = 0; r < NUM_ROWS; r++)\n"
+            f"          for (int c = 0; c < COLS_PER_ROW / 2; c++)\n"
+            f"              std::swap({input_vars[0]}[r*COLS_PER_ROW + c],\n"
+            f"                        {input_vars[0]}[r*COLS_PER_ROW + (COLS_PER_ROW - 1 - c)]);\n"
+            f"  - Value relabeling preserving equality classes (e.g., bitwise NOT, modular shift):\n"
+            f"      const int K = 7;  // any non-zero constant\n"
+            f"      for (int i = 0; i < N; i++) {input_vars[0]}[i] = ({input_vars[0]}[i] ^ K);\n"
+            f"  - Uniform value shift (adds the same constant to every element):\n"
+            f"      const int SHIFT = 5;\n"
+            f"      for (int i = 0; i < N; i++) {input_vars[0]}[i] += SHIFT;\n"
+            f"  - Joint α-scaling of a co-normalized group (data + mean + std together):\n"
+            f"      const double alpha = 2.0;\n"
+            f"      for (int i = 0; i < N; i++) {{\n"
+            f"          {input_vars[0]}[i] *= alpha;\n"
+            f"          // ... apply the same scaling to each remaining input variable above\n"
+            f"      }}\n\n"
+            f"Pick the pattern that matches the relation's description. Apply ONE transformation\n"
+            f"per variant (do not chain multiple). If the relation specifies a transformation\n"
+            f"not in this list, implement it directly from the description — these patterns are\n"
+            f"common examples, not an exhaustive list.\n\n"
+            f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
+            f"After the final device-to-host transfer, insert a METAMORPHIC block at each\n"
+            f"observation point label listed above. The output buffer values must be the\n"
+            f"computed result on the transformed input — the checker will compare these against\n"
+            f"the original PASSTHROUGH values and expect them to match (output is unchanged).\n"
         )
     else:
         transform_instruction = (
@@ -2448,6 +2528,125 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
 
         return verdict, {
             "verdict": verdict, "relation_name": relation_name, "factor": perm_factor,
+            "blocks_compared": blocks_compared, "failures": failures, "summary": summary,
+        }
+
+    # ==========================================================================
+    # INVARIANCE: check Z_stat ≈ Y_stat (output unchanged under input transformation).
+    # Structurally identical to SCALING with factor pinned to 1.0 — the variant input
+    # has been transformed by some non-trivial T, but the algorithm's correctness
+    # property is that the output is unchanged. Compare aggregate stats (min/max/mean)
+    # and per-element samples; PASS if every check is within tolerance.
+    # ==========================================================================
+    elif relation_type == "INVARIANCE":
+        inv_factor = 1.0  # By definition for INVARIANCE — output ratio is unity.
+        meta_blocks = extract_meta_blocks(variant_stdout)
+        pass_blocks = extract_pass_blocks(original_passthrough_stdout)
+
+        if not meta_blocks and not pass_blocks:
+            return "SKIP", {
+                "verdict": "SKIP", "relation_name": relation_name, "factor": inv_factor,
+                "blocks_compared": 0, "failures": [],
+                "summary": "SKIP: No METAMORPHIC or PASSTHROUGH blocks found in outputs.",
+            }
+
+        failures = []
+        blocks_compared = 0
+
+        labels_to_check = obs_points if obs_points else list(meta_blocks.keys())
+        for label in labels_to_check:
+            if label not in meta_blocks:
+                failures.append({"label": label, "stat": "metamorphic_block_missing",
+                                  "detail": "METAMORPHIC block absent in variant output"})
+                continue
+            if label not in pass_blocks:
+                failures.append({"label": label, "stat": "passthrough_block_missing",
+                                  "detail": "PASSTHROUGH block absent in original output"})
+                continue
+
+            pass_bodies = pass_blocks[label]
+            meta_bodies = meta_blocks[label]
+            n_pairs = min(len(pass_bodies), len(meta_bodies))
+            multi = max(len(pass_bodies), len(meta_bodies)) > 1
+
+            for i in range(n_pairs):
+                failure_label = f"{label}#{i+1}" if multi else label
+                orig_stats = parse_stats(pass_bodies[i])
+                var_stats  = parse_stats(meta_bodies[i])
+                blocks_compared += 1
+
+                if orig_stats is None or var_stats is None:
+                    failures.append({"label": failure_label, "stat": "parse_error",
+                                      "detail": "Could not parse Statistics line in one or both blocks"})
+                    continue
+
+                if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
+                    continue  # NaN/Inf guard
+
+                # atol anchored to |orig_max| * rtol — same convention as SCALING with factor=1.
+                orig_max_val = abs(orig_stats.get('max', 0.0))
+                atol = orig_max_val * rtol
+
+                # Aggregate stats: Z_stat ≈ Y_stat (no factor scaling, no min/max sign-flip).
+                for stat_name, orig_val in orig_stats.items():
+                    var_val = var_stats.get(stat_name)
+                    if var_val is None:
+                        failures.append({"label": failure_label, "stat": stat_name,
+                                          "orig": orig_val, "variant": "(missing)"})
+                        continue
+                    if not both_finite(var_val, orig_val):
+                        continue
+                    if not allclose(var_val, orig_val, rtol, atol):
+                        failures.append({
+                            "label": failure_label, "stat": stat_name,
+                            "orig": orig_val, "expected_variant": orig_val,
+                            "actual_variant": var_val,
+                            "abs_err": abs(var_val - orig_val),
+                            "atol": atol, "rtol": rtol,
+                        })
+
+                # Element-wise sample comparison: Z_sample[i] ≈ Y_sample[i].
+                orig_samples = parse_samples(pass_bodies[i])
+                var_samples  = parse_samples(meta_bodies[i])
+                for idx, (ov, vv) in enumerate(zip(orig_samples, var_samples)):
+                    if not both_finite(ov, vv):
+                        continue
+                    if not allclose(vv, ov, rtol, atol):
+                        failures.append({
+                            "label": failure_label, "stat": f"sample[{idx}]",
+                            "orig": ov, "expected_variant": ov,
+                            "actual_variant": vv,
+                            "abs_err": abs(vv - ov),
+                            "atol": atol, "rtol": rtol,
+                        })
+
+        if failures:
+            lines = []
+            for f in failures:
+                if "detail" in f:
+                    lines.append(f"  [{f['label']}] {f['stat']}: {f['detail']}")
+                else:
+                    lines.append(
+                        f"  [{f['label']}] {f['stat']}: "
+                        f"orig={f.get('orig')}, expected_variant={f.get('expected_variant')}, "
+                        f"actual_variant={f.get('actual_variant')}, "
+                        f"abs_err={f.get('abs_err', '?'):.3e}"
+                    )
+            summary = (
+                f"FAIL: {len(failures)} discrepancy(ies) across {blocks_compared} block(s). "
+                f"Relation: {relation_name} (INVARIANCE, rtol={rtol:.1e})\n"
+                + "\n".join(lines)
+            )
+            verdict = "FAIL"
+        else:
+            summary = (
+                f"PASS: {blocks_compared} block(s) satisfied INVARIANCE relation "
+                f"(output unchanged within rtol={rtol:.1e}, atol=|orig_max|*rtol per block)."
+            )
+            verdict = "PASS"
+
+        return verdict, {
+            "verdict": verdict, "relation_name": relation_name, "factor": inv_factor,
             "blocks_compared": blocks_compared, "failures": failures, "summary": summary,
         }
 
