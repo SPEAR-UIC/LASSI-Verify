@@ -94,6 +94,7 @@ import csv
 import json
 import shutil
 import time
+import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -101,7 +102,7 @@ from zoneinfo import ZoneInfo
 import lassi.llm_config
 import lassi.pipeline_v4
 from lassi.format_colors import color
-from lassi.monitor import log_figure, start_monitor
+from lassi.monitor import log_figure, save_log, start_monitor
 from lassi.prompt_dictionary import PromptDictionary
 
 # ── Monitor (Cell 4) ──────────────────────────────────────────────────────────
@@ -726,64 +727,92 @@ while trial_number <= total_trials:
     print("\n\n" + color.BLUE + color.BOLD + "***** BEGIN THE LASSI ENERGY EFFICIENCY PIPELINE (v4) *****" + color.END + " Trial #: " + str(trial_number) + "\n\n")
 
     # RUN LASSI-EE PIPELINE
-    complete = lassi.pipeline_v4.auto_code_llmgeneration_pipeline(
-        prompts,
-        this_llm_system_prompt,
-        this_llm_refactoredcode_prompt,
-        llm_source,
-        model,
-        model_coder,
-        model_judge,
-        num_ctx,
-        num_ctx_coder,
-        # arrayormatrix_size_range,
-        # thread_count_range,
-        use_context,
-        use_context_summaries_only,
-        few_shot_learning,
-        run_code_analysis,
-        input_context,
-        input_code_file_subdirectory,
-        input_code,
-        lines_of_code,
-        # target_code,
-        target_lang,
-        input_code_extension,
-        source_lang,
-        code_compiler,
-        code_compiler_kwds,
-        build_script,
-        make_script,
-        code_build_script,
-        output_code_directory,
-        output_code_file_name,
-        source_file_path,
-        display_response,
-        test_with_error,
-        generate_test_case,
-        yes_execute,
-        exe_input_parameters,
-        meta_data_file,
-        power_measure,
-        yes_power_feedback,
-        dt_string,
-        baseline_oneshot_goal,
-        use_self_prompting,
-        vary_llm_temp,
-        experiment,
-        verifyprompt,
-        trial_number,
-        experiment_data_directory,
-        experiment_data_file_object,
-        experiment_data,
-        app_name,
-        run_tier2=run_tier2,
-        tier2_tolerance=tier2_tolerance,
-        run_tier3=run_tier3,
-        tier3_tolerance=tier3_tolerance,
-        run_llm_judge=run_llm_judge,
-        attempt_log_file_path=attempt_log_file_path
-    )
+    # Wrapped in try/except so a mid-pipeline exception (post-Stage 0) saves the
+    # monitor log before propagating. Without this, the pipeline's stdout stream
+    # is the only crash record and is lost when the process dies. The trial is
+    # marked as failed (complete=False) but the trial loop continues so a single
+    # bad trial doesn't abort a long multi-trial / multi-day experiment run.
+    try:
+        complete = lassi.pipeline_v4.auto_code_llmgeneration_pipeline(
+            prompts,
+            this_llm_system_prompt,
+            this_llm_refactoredcode_prompt,
+            llm_source,
+            model,
+            model_coder,
+            model_judge,
+            num_ctx,
+            num_ctx_coder,
+            # arrayormatrix_size_range,
+            # thread_count_range,
+            use_context,
+            use_context_summaries_only,
+            few_shot_learning,
+            run_code_analysis,
+            input_context,
+            input_code_file_subdirectory,
+            input_code,
+            lines_of_code,
+            # target_code,
+            target_lang,
+            input_code_extension,
+            source_lang,
+            code_compiler,
+            code_compiler_kwds,
+            build_script,
+            make_script,
+            code_build_script,
+            output_code_directory,
+            output_code_file_name,
+            source_file_path,
+            display_response,
+            test_with_error,
+            generate_test_case,
+            yes_execute,
+            exe_input_parameters,
+            meta_data_file,
+            power_measure,
+            yes_power_feedback,
+            dt_string,
+            baseline_oneshot_goal,
+            use_self_prompting,
+            vary_llm_temp,
+            experiment,
+            verifyprompt,
+            trial_number,
+            experiment_data_directory,
+            experiment_data_file_object,
+            experiment_data,
+            app_name,
+            run_tier2=run_tier2,
+            tier2_tolerance=tier2_tolerance,
+            run_tier3=run_tier3,
+            tier3_tolerance=tier3_tolerance,
+            run_llm_judge=run_llm_judge,
+            attempt_log_file_path=attempt_log_file_path
+        )
+    except Exception as _crash_exc:
+        print("\n\n" + color.RED + color.BOLD +
+              "***** LASSI PIPELINE CRASHED — see traceback below *****\n" + color.END)
+        print(f"[CRASH] {type(_crash_exc).__name__}: {_crash_exc}")
+        traceback.print_exc()
+        # Save monitor log with a _CRASH suffix so it sits next to other Trial
+        # artifacts but is clearly distinguished from successful completion logs.
+        try:
+            _crash_log_path = os.path.join(
+                experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string
+                + "_Trial" + str(trial_number) + "_CRASH.txt"
+            )
+            save_log(_crash_log_path)
+            print(f"[CRASH] Monitor log saved to: {_crash_log_path}")
+        except Exception as _save_exc:
+            print(f"[CRASH] Failed to save monitor log: {_save_exc}")
+        # Record the crash in experiment_data so the abort row written below
+        # carries a stage0_abort_reason field that names the exception type.
+        if isinstance(experiment_data, dict):
+            experiment_data["stage0_abort_reason"] = f"crash:{type(_crash_exc).__name__}"
+        complete = False
 
     # Reset to original working directory
     os.chdir(original_home_directory)
