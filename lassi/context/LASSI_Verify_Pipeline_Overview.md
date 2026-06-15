@@ -310,22 +310,22 @@ A **null-factor** relation is one where no fixed scalar relates the variant outp
 
 ---
 
-## LLM Judge + Three-Tier Override System
+## LLM Judge as Pre-Tier Baseline Measurement
 
-The LLM judge reads both codes and their stdout outputs and returns a functional equivalence verdict (VALID or INVALID). Any other response (e.g. SKIP, malformed output) is normalized to INVALID and counted as an API error; three consecutive API errors halt the pipeline. The raw judge verdict is captured as `judge_raw_verdict` immediately after the judge call, before any tier override logic runs — this is what is stored as `judge_verdict` in Table 2 and is never subsequently modified. For LASSI-generated codes, deterministic tier results take priority over the judge via four override rules applied in order:
+The LLM judge is a **baseline comparator** representing current LLM-only practice — it is NOT a framework tier. It runs immediately after compile+execute succeeds and BEFORE Tier 1/2/3, so it sees only what the executed code actually produced (the generated code and its stdout) and nothing from tier analysis. The judge returns a functional-equivalence verdict (VALID or INVALID); any other response is normalized to INVALID and counted against a 3-strike `judge_api_error_count` safety net that halts the pipeline on persistent API errors.
 
-| Override | Condition | Final verdict | Logged as |
-|----------|-----------|---------------|-----------|
-| **Tier 1 exhausted** (inline) | Per-code Tier 1 budget exhausted | **INVALID** + `continue` (skips judge entirely) | — |
-| **Override 1** | Tier 2 budget exhausted | **INVALID** (overrides judge) | `false_positive` |
-| **Override 2** | Tier 1 PASS/SKIP + Tier 2 PASS + Tier 3 PASS/SKIP | **VALID** (overrides judge) | `false_negative` |
-| **Override 3** (last word) | Tier 3 budget exhausted | **INVALID** (overrides Override 2) | `false_positive` |
+The judge verdict is recorded as `judge_raw_verdict` (stored in Table 2 as `judge_baseline_verdict`) and **does not participate** in deciding the framework verdict. The framework verdict (`valid_code_flag`, written to Table 2 as `final_verdict`) is derived from tier verdicts alone:
 
-Override 3 runs after Override 2 and has final authority: a code that exhausts Tier 3 retries is INVALID regardless of any prior verdict.
+| Path | Condition | Framework verdict | `override_applied` tag |
+|------|-----------|-------------------|------------------------|
+| All tiers PASS | Tier 1 PASS + Tier 2 PASS + Tier 3 PASS-or-inactive | **VALID** | `none` |
+| Tier 1 exhausted (inline) | Per-code T1 budget exhausted | **INVALID** + `continue` | `tier1_exhausted` |
+| Tier 2 exhausted | Per-code T2 budget exhausted | **INVALID** | `tier2_exhausted` |
+| Tier 3 exhausted | Per-code T3 budget exhausted | **INVALID** | `tier3_exhausted` |
 
-The zero-shot (vanilla LLM) code always goes through the judge — it has no Tier 1/2/3 instrumentation, so the judge is its only correctness gate. No overrides apply to zero-shot.
+For the zero-shot (vanilla LLM) code, the empirical verdict from the single-attempt T1→T2→T3 verify (when `verify_zeroshot=True`) IS the framework verdict; the judge baseline is recorded separately with no override semantics. When `verify_zeroshot=False`, the judge baseline is the framework verdict (Mode A "vanilla LLM + judge only" baseline).
 
-Discrepancies are logged in `verification_log["judge_discrepancies"]` and CSV columns `judge_false_positives` / `judge_false_negatives`.
+The per-attempt (judge_baseline, tier-final) pair is logged to `verification_log["judge_discrepancies"]` and used downstream to compute `judge_false_positives` (judge VALID + framework INVALID) and `judge_false_negatives` (judge INVALID + framework VALID) per trial — these are now derived directly from the raw verdict pair, not from a "type" tag set at override time.
 
 **Tier 2 coverage note:** Three sample fields are captured: `Sample_first10` (indices 0–9), `Sample_last10` (N-10..N-1), and `Sample_spread10` (10 evenly-spaced interior indices `(k+1)*N/11`). Together these provide boundary + interior coverage. The original weakness — interior divergence masked by intact boundary elements (observed in a Jacobi pointer-swap bug) — is addressed by `Sample_spread10`. Tier 3 PERMUTATIVE testing provides additional structural coverage for cases where element-level sampling may still miss permutations.
 
@@ -363,7 +363,7 @@ Configured by two notebook flags:
 | File | Contents |
 |------|----------|
 | `lassi-verify_pipeline_data.csv` | **Table 1** — one row per trial; all `experiment_data` fields (final outcomes, aggregated counts) |
-| `lassi-verify_attempt_log.csv` | **Table 2** — one row per code attempt within a trial; per-attempt `judge_verdict`, `final_verdict`, `tier1/2/3_verdict`, `override_applied`, `is_best_code`, runtime/energy |
+| `lassi-verify_attempt_log.csv` | **Table 2** — one row per code attempt within a trial; per-attempt `judge_baseline_verdict`, `judge_response_text`, `final_verdict`, `tier1/2/3_verdict`, `override_applied`, `is_best_code`, runtime/energy |
 | `verification_log_<name>_Trial<N>.json` | Full Tier 2/3 results, judge discrepancies, config |
 | `<name>_Trial<N>.cu` | Each generated code version |
 | `<name>_verify.cu` | Instrumented SOURCE_verify (Tier 1 + Tier 2) |
@@ -386,9 +386,10 @@ Configured by two notebook flags:
 - `judge_false_positives`, `judge_false_negatives`
 
 ### Key CSV columns — Table 2 (`lassi-verify_attempt_log.csv`)
-- `judge_verdict` — raw LLM judge output captured before any override logic; never modified; used for Variant 2 (judge-pass@k LASSI) on the `is_best_code=True` row
-- `final_verdict` — tier-dominant operational result (`VALID` / `INVALID`); starts as judge output, then overrides ensure tiers win when they have a deterministic result; drives winner selection and self-correction
-- `override_applied` — which override fired (`none` / `override1_tier2_exhausted` / `override2_tiers_pass` / `override3_tier3_exhausted` / `global_sc_budget_exhausted` / `tier1_exhausted`); diagnostic only
+- `judge_baseline_verdict` — raw LLM judge output captured as a pre-tier baseline measurement; never overridden by tier verdicts; used for Variant 2 (judge-pass@k LASSI) on the `is_best_code=True` row. Older CSVs use the legacy column name `judge_verdict`; the analysis data loader transparently maps it onto this canonical name.
+- `judge_response_text` — verbatim LLM judge prose (the reasoning the judge produced when it issued its VALID/INVALID verdict). Populated on every attempt that reached the judge, including SC intermediates, so cross-attempt judge-verdict shifts and the *why* behind any single verdict are queryable from the data. Empty on attempts where the judge wasn't invoked (compile/execute failed before the judge stage). Multi-line; CSV writers use `QUOTE_MINIMAL`. Also persisted into the `judge_discrepancies` entries in the sidecar JSON for grep-style access.
+- `final_verdict` — framework verdict for the attempt (`VALID` / `INVALID`). Derived from tier verdicts alone for LASSI codes; equals the empirical verdict (when `verify_zeroshot=True`) or the judge baseline (when `verify_zeroshot=False`) for zero-shot codes. Drives winner selection and self-correction.
+- `override_applied` — exhaustion / pipeline-budget tag for the attempt: `none` (clean tier-derived verdict), `tier1_exhausted`, `tier2_exhausted`, `tier3_exhausted`, `exhausted_t1_sc_budget`, `exhausted_sc_budget`, `global_sc_budget_exhausted`. Tier-vs-judge override tags from earlier schemas (`judge_override_*`) are no longer produced under the judge-as-baseline design.
 - `tier1_verdict`, `tier2_verdict`, `tier3_verdict` — individual tier verdicts per attempt: `PASS` / `FAIL` / `SKIP`. All tiers are fully deterministic; parse errors in Tier 2 output produce `FAIL` and trigger self-correction. Budget exhaustion is encoded in `override_applied`, not in the verdict string.
 - `is_best_code` — True on exactly one row per trial (the winning code's final attempt row)
 - `is_final_attempt` — True for the definitive verdict row per code version; False for mid-retry self-correction rows
