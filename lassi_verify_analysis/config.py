@@ -47,10 +47,11 @@ VERDICT_COLUMNS_TRIALS: list[str] = [
     "zeroshot_tier2_verdict",
     "zeroshot_tier3_verdict",
     "zeroshot_empirical_verdict",
-    # Status of the basellm-verify compile+execute (instrumented basellm with the
-    # SOURCE_verify T1+T2 template). One of: "skipped" / "instrument_error" /
-    # "compile_error" / "execute_error" / "success".
-    "basellm_verify_status",
+    # Status of the basellm_zs_verify compile+execute (combined T1+T2 instrumented
+    # basellm with the SOURCE_verify template — the single binary that produces
+    # both per-tier verdicts and instrumented runtime/energy). One of:
+    # "skipped" / "instrument_error" / "compile_error" / "execute_error" / "success".
+    "basellm_zs_verify_status",
 ]
 
 VERDICT_COLUMNS_ATTEMPTS: list[str] = [
@@ -104,13 +105,12 @@ FLOAT_COLUMNS_TRIALS: list[str] = [
     "pipeline_runtime_min",
     "tier2_max_relative_error",
     "zeroshot_runtime_s",
-    # basellm-verify: instrumented basellm runtime/energy (mirror of SOURCE_orig ->
-    # SOURCE_verify but for the vanilla-LLM-generated code). Enables apples-to-apples
-    # vs LASSI codes on equivalent instrumentation footing.
-    "basellm_verify_runtime_s",
-    "basellm_verify_runtime_diff",
-    "basellm_verify_energy_J",
-    "basellm_verify_energy_diff",
+    # basellm_zs_verify: combined T1+T2 instrumented basellm runtime/energy
+    # (raw data only; no calculated diff vs source — the primary fairness
+    # comparison uses uninstrumented zeroshot_runtime_s vs uninstrumented
+    # lassiee_clean_runtime_s, both of which are already in this list).
+    "basellm_zs_verify_runtime_s",
+    "basellm_zs_verify_energy_J",
 ]
 
 # --- Float columns (Table 2) ---

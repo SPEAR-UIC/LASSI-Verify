@@ -533,16 +533,16 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["zeroshot_tier3_verdict"] = "SKIP"
     experiment_data["zeroshot_empirical_verdict"] = "SKIP"
 
-    # basellm-verify: instrumented compile+execute of the zero-shot (vanilla LLM) code
-    # using the SOURCE_verify (T1+T2) template — mirror of SOURCE_orig vs SOURCE_verify
-    # but for the vanilla-LLM-generated code. Lets the vanilla code be compared against
-    # LASSI codes on an apples-to-apples (both-instrumented) basis. Computed inside the
-    # verify_zeroshot block (one extra compile+execute per trial).
-    experiment_data["basellm_verify_status"] = "skipped"
-    experiment_data["basellm_verify_runtime_s"] = "NA"
-    experiment_data["basellm_verify_runtime_diff"] = "NA"
-    experiment_data["basellm_verify_energy_J"] = "NA"
-    experiment_data["basellm_verify_energy_diff"] = "NA"
+    # basellm_zs_verify: the single combined T1+T2 instrumented compile+execute of
+    # the zero-shot (vanilla LLM) code. This binary serves both purposes — its stdout
+    # is parsed for per-tier verdicts (T1 → T2 → T3 with fail-fast gating) AND its
+    # runtime/energy is captured as raw instrumented data. No calculated diff vs
+    # source — the primary fairness comparison is uninstrumented zs (zeroshot_runtime_s)
+    # vs uninstrumented LASSI best (lassiee_clean_runtime_s). Populated inside the
+    # verify_zeroshot block (one LLM call + one compile+execute per trial).
+    experiment_data["basellm_zs_verify_status"] = "skipped"
+    experiment_data["basellm_zs_verify_runtime_s"] = "NA"
+    experiment_data["basellm_zs_verify_energy_J"] = "NA"
 
     # Stage 1 per-trial test counts: how many tests of each tier were successfully
     # instrumented in SOURCE_verify and made active for THIS trial. Captures the
@@ -2180,18 +2180,34 @@ def auto_code_llmgeneration_pipeline(prompts,
             # (LLM judge ran earlier as a pre-tier baseline measurement — see PRE-TIER section.)
             # Tier verdicts now decide the framework verdict; see derivation block below.
 
-            # --- ZERO-SHOT EMPIRICAL VERIFICATION ---
-            # Run Tier 1 → Tier 2 → Tier 3 on the zero-shot code as additional empirical data.
-            # Each tier starts from the original (uninstrumented) zero-shot code using
-            # code_insert_instrumentation_from_template with a single-tier template derived
-            # from SOURCE_verify: T1 uses SOURCE_verify with T2 blocks stripped; T2 uses
-            # SOURCE_verify with T1 blocks stripped. This avoids T2 insertion messing up T1
-            # blocks and gives each tier a clean start from the original code.
-            # Single attempt only — no retries, no self-correction feedback.
-            # Judge-as-baseline design: the empirical verdict IS the framework verdict for the
-            # zero-shot code when verify_zeroshot=True; the LLM judge baseline is recorded
-            # separately as judge_baseline_verdict for downstream comparison. There is no
-            # FAIL-flips-VALID override — judge and empirical are independent measurements.
+            # --- ZERO-SHOT EMPIRICAL VERIFICATION (consolidated single-binary) ---
+            # Single LLM-generated combined T1+T2 instrumented binary (basellm_zs_verify),
+            # mirroring how LASSI codes are evaluated: one binary, one stdout, per-tier
+            # verdicts extracted in sequence with fail-fast gating.
+            #
+            # Flow:
+            #   1. Instrument the zero-shot code with the full SOURCE_verify (T1+T2)
+            #      template — one LLM call, one compile, one execute.
+            #   2. From the binary's stdout: check_tier1_assertions() → T1 verdict.
+            #   3. Only if T1 PASS: compare_passthrough_outputs() → T2 verdict
+            #      (against the SOURCE_verify spec).
+            #   4. Only if T1 + T2 both PASS: run T3 metamorphic variants (separate
+            #      compiles by design — each relation needs its own input transform).
+            #
+            # Single attempt only — no retries, no self-correction. The zero-shot
+            # baseline measures what the vanilla LLM produces without the LASSI
+            # self-correction loop; adding SC here would muddy the LASSI-vs-baseline
+            # comparison.
+            #
+            # The same binary execution captures instrumented runtime/energy as raw
+            # data (basellm_zs_verify_runtime_s, basellm_zs_verify_energy_J) — kept
+            # for diagnostic visibility but NOT used for a calculated comparison. The
+            # primary paper fairness comparison is uninstrumented zs (zeroshot_runtime_s)
+            # vs uninstrumented LASSI best (lassiee_clean_runtime_s); both already exist.
+            #
+            # Judge-as-baseline design: the empirical verdict IS the framework verdict
+            # for the zero-shot code when verify_zeroshot=True; the LLM judge baseline
+            # is recorded separately as judge_baseline_verdict for downstream comparison.
             # When verify_zeroshot=False, only the judge baseline exists for the zero-shot
             # code (Mode A's strictest "vanilla LLM + judge only" baseline) — the
             # final_verdict derivation block below falls back to it in that case.
@@ -2203,107 +2219,91 @@ def auto_code_llmgeneration_pipeline(prompts,
                 _zs_code = code_blocks[-1]   # uninstrumented zero-shot generated code
                 _sv_code = input_code        # SOURCE_verify (T1+T2 instrumented); code_blocks[1]
 
-                # --- Zero-shot Tier 1 ---
-                print(f"\n----- Zero-Shot Empirical Verify: Tier 1 instrumentation -----")
-                _zs_t1_template = lassi.verify._strip_t2_blocks(_sv_code)  # T1-only template
-                _zs_t1_instr = lassi.verify.code_insert_instrumentation_from_template(
-                    _zs_code, _zs_t1_template,
+                # --- Single combined T1+T2 instrumented variant ---
+                print(f"\n----- Zero-Shot Empirical Verify: instrumenting basellm with combined T1+T2 template -----")
+                _zs_instr = lassi.verify.code_insert_instrumentation_from_template(
+                    _zs_code, _sv_code,
                     llm_source, model, num_ctx, system_prompt,
                     display_response, verifyprompt=verifyprompt,
                 )
-                if not _zs_t1_instr:
-                    print(color.RED + "[Zero-Shot Tier 1] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
+
+                _zs_stdout = ""          # combined-binary stdout; T1+T2 verdicts parsed from here
+                _zs_combined_ok = False  # True iff instrumentation+compile+execute all succeeded
+                if not _zs_instr:
+                    print(color.RED + "[basellm_zs_verify] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
                     zs_tier1_verdict = "INSTRUMENT_ERROR"
+                    experiment_data["basellm_zs_verify_status"] = "instrument_error"
                 else:
-                    _zs_t1_path = os.path.join(experiment_data_directory,
-                                                file_name + "_zs_t1_Trial" + str(trial_number) + _zs_src_ext)
-                    with open(_zs_t1_path, 'w') as _f:
-                        _f.write(_zs_t1_instr)
-                    _zs_t1_compile, _zs_t1_exe = lassi.code_manager.compile_code(
-                        _zs_t1_path, target_lang, code_compiler, code_compiler_kwds
+                    _zs_path = os.path.join(experiment_data_directory,
+                                             file_name + "_basellm_zs_verify_Trial" + str(trial_number) + _zs_src_ext)
+                    with open(_zs_path, 'w') as _f:
+                        _f.write(_zs_instr)
+                    _zs_compile, _zs_exe = lassi.code_manager.compile_code(
+                        _zs_path, target_lang, code_compiler, code_compiler_kwds
                     )
-                    if _zs_t1_compile != "":
-                        print(color.RED + "[Zero-Shot Tier 1] Compile failed — INSTRUMENT_ERROR." + color.END)
+                    if _zs_compile != "":
+                        print(color.RED + "[basellm_zs_verify] Compile failed — INSTRUMENT_ERROR." + color.END)
                         zs_tier1_verdict = "INSTRUMENT_ERROR"
+                        experiment_data["basellm_zs_verify_status"] = "compile_error"
                     else:
-                        _zs_t1_exec_r, _zs_t1_stdout, *_ = lassi.code_manager.execute_code_selectvendor(
-                            experiment_data_directory, 0, True, trial_number,
-                            directory, _zs_t1_exe, exe_input_parameters,
-                            False, "zs_t1_verify", target_lang, build_script, make_script,
+                        (_zs_result, _zs_stdout_full, _zs_energy, _zs_avg_power, _zs_std_power,
+                         _zs_duration, _zs_metrics) = lassi.code_manager.execute_code_selectvendor(
+                            experiment_data_directory, code_version, True, trial_number,
+                            directory, _zs_exe, exe_input_parameters,
+                            power_measure, "basellm_zs_verify", target_lang, build_script, make_script,
                             gpu_vendor="auto", wait=5,
                         )
-                        if _zs_t1_exec_r != "0":
-                            print(color.RED + "[Zero-Shot Tier 1] Execute failed — INSTRUMENT_ERROR." + color.END)
+                        if _zs_result != "0":
+                            print(color.RED + "[basellm_zs_verify] Execute failed — INSTRUMENT_ERROR." + color.END)
                             zs_tier1_verdict = "INSTRUMENT_ERROR"
+                            experiment_data["basellm_zs_verify_status"] = "execute_error"
                         else:
-                            _zs_t1_verdict, _zs_t1_diag = lassi.verify.check_tier1_assertions(_zs_t1_stdout)
-                            zs_tier1_verdict = _zs_t1_verdict
-                            print(f"\n----- Zero-Shot Empirical Verify: Tier 1 → {zs_tier1_verdict} -----")
-                            if _zs_t1_verdict == "FAIL":
-                                print(_zs_t1_diag.get("summary", ""))
+                            _zs_combined_ok = True
+                            _zs_stdout = _zs_stdout_full
+                            # Raw instrumented runtime/energy data (no calculated diffs)
+                            experiment_data["basellm_zs_verify_status"] = "success"
+                            experiment_data["basellm_zs_verify_runtime_s"] = round(_zs_duration, 4)
+                            if power_measure and _zs_energy > 0:
+                                experiment_data["basellm_zs_verify_energy_J"] = round(_zs_energy, 4)
+                            print(f"[basellm_zs_verify] runtime={round(_zs_duration, 4)}s instrumented "
+                                  f"(basellm uninstrumented={round(duration_refactor, 4)}s, "
+                                  f"SOURCE_verify={round(runtime_history[1], 4)}s)")
 
-                # --- Zero-shot Tier 2 (only if Tier 1 PASS) ---
-                # Instruments T2 passthrough into the original zs_code (not the T1-instrumented code)
-                # so the T2 LLM call cannot inadvertently corrupt the T1 assertion blocks.
-                _zs_t2_stdout = ""
-                _zs_t2_code = ""
-                if run_tier2 and zs_tier1_verdict == "PASS":
-                    print(f"\n----- Zero-Shot Empirical Verify: Tier 2 instrumentation -----")
-                    _zs_t2_template = lassi.verify._strip_t1_blocks(_sv_code)  # T2-only template
-                    _zs_t2_instr = lassi.verify.code_insert_instrumentation_from_template(
-                        _zs_code, _zs_t2_template,
-                        llm_source, model, num_ctx, system_prompt,
-                        display_response, verifyprompt=verifyprompt,
-                    )
-                    if not _zs_t2_instr:
-                        print(color.RED + "[Zero-Shot Tier 2] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
-                        zs_tier2_verdict = "INSTRUMENT_ERROR"
-                    else:
-                        _zs_t2_path = os.path.join(experiment_data_directory,
-                                                    file_name + "_zs_t2_Trial" + str(trial_number) + _zs_src_ext)
-                        with open(_zs_t2_path, 'w') as _f:
-                            _f.write(_zs_t2_instr)
-                        _zs_t2_compile, _zs_t2_exe = lassi.code_manager.compile_code(
-                            _zs_t2_path, target_lang, code_compiler, code_compiler_kwds
+                # --- Per-tier verdict extraction (fail-fast on T1, then T2, then T3) ---
+                if _zs_combined_ok:
+                    # Tier 1 — parse assertion blocks from the combined stdout
+                    _zs_t1_verdict, _zs_t1_diag = lassi.verify.check_tier1_assertions(_zs_stdout)
+                    zs_tier1_verdict = _zs_t1_verdict
+                    print(f"\n----- Zero-Shot Empirical Verify: Tier 1 → {zs_tier1_verdict} -----")
+                    if _zs_t1_verdict == "FAIL":
+                        print(_zs_t1_diag.get("summary", ""))
+
+                    # Tier 2 — only if T1 PASS; parse passthrough blocks from the same stdout
+                    if run_tier2 and zs_tier1_verdict == "PASS":
+                        _zs_t2_verdict, _zs_t2_diag = lassi.verify.compare_passthrough_outputs(
+                            spec_stdout=passthrough_spec_output,
+                            generated_stdout=_zs_stdout,
+                            tolerance=tier2_tolerance,
                         )
-                        if _zs_t2_compile != "":
-                            print(color.RED + "[Zero-Shot Tier 2] Compile failed — INSTRUMENT_ERROR." + color.END)
-                            zs_tier2_verdict = "INSTRUMENT_ERROR"
-                        else:
-                            _zs_t2_exec_r, _zs_t2_stdout, *_ = lassi.code_manager.execute_code_selectvendor(
-                                experiment_data_directory, 0, True, trial_number,
-                                directory, _zs_t2_exe, exe_input_parameters,
-                                False, "zs_t2_verify", target_lang, build_script, make_script,
-                                gpu_vendor="auto", wait=5,
-                            )
-                            if _zs_t2_exec_r != "0":
-                                print(color.RED + "[Zero-Shot Tier 2] Execute failed — INSTRUMENT_ERROR." + color.END)
-                                zs_tier2_verdict = "INSTRUMENT_ERROR"
-                            else:
-                                _zs_t2_verdict, _zs_t2_diag = lassi.verify.compare_passthrough_outputs(
-                                    spec_stdout=passthrough_spec_output,
-                                    generated_stdout=_zs_t2_stdout,
-                                    tolerance=tier2_tolerance,
-                                )
-                                zs_tier2_verdict = _zs_t2_verdict
-                                _zs_t2_code = _zs_t2_instr  # save for T3 (only when compile+execute succeeded)
-                                print(f"\n----- Zero-Shot Empirical Verify: Tier 2 → {zs_tier2_verdict} -----")
-                                if _zs_t2_diag.get("failures"):
-                                    print(_zs_t2_diag.get("summary", ""))
+                        zs_tier2_verdict = _zs_t2_verdict
+                        print(f"\n----- Zero-Shot Empirical Verify: Tier 2 → {zs_tier2_verdict} -----")
+                        if _zs_t2_diag.get("failures"):
+                            print(_zs_t2_diag.get("summary", ""))
 
-                    # --- Zero-shot Tier 3 (only if Tier 2 PASS) ---
-                    # Self-referential: the zero-shot T2 code is tested against itself under
-                    # input transformation, using _zs_t2_stdout as the baseline — same design
-                    # as LASSI-generated codes. file_name is the actual benchmark name (not
-                    # file_name+"_zs") so Stage 0 source-variant templates are found correctly.
-                    # code_version="zs" produces _vzs suffix to distinguish from LASSI variants.
-                    if run_tier3 and tier3_active_relations and zs_tier2_verdict == "PASS":
+                    # Tier 3 — only if T1 + T2 both PASS (separate metamorphic variants).
+                    # Self-referential: zs code tested against itself under input
+                    # transformation, using _zs_stdout as the baseline (same design as
+                    # LASSI codes). file_name is the actual benchmark name (not file_name
+                    # +"_zs") so Stage 0 source-variant templates are found correctly.
+                    # code_version="zs" produces _vzs suffix on variant artifacts.
+                    if (run_tier3 and tier3_active_relations
+                            and zs_tier1_verdict == "PASS" and zs_tier2_verdict == "PASS"):
                         print(f"\n----- Zero-Shot Empirical Verify: Tier 3 -----")
                         _zs_t3_verdict, _zs_t3_results, _zs_t3_diag = lassi.verify.run_metamorphic_variants(
-                            _zs_t2_code,
+                            _zs_instr,
                             tier3_active_relations,
                             tier3_contract,
-                            _zs_t2_stdout,
+                            _zs_stdout,
                             llm_source, model, num_ctx, system_prompt,
                             display_response,
                             directory, file_name, code_compiler, code_compiler_kwds,
@@ -2342,68 +2342,6 @@ def auto_code_llmgeneration_pipeline(prompts,
                 experiment_data["zeroshot_empirical_verdict"] = zs_empirical_verdict
                 print(f"\n----- Zero-Shot Empirical Verdict: {zs_empirical_verdict} "
                       f"(T1={zs_tier1_verdict}, T2={zs_tier2_verdict}, T3={zs_tier3_verdict}) -----")
-
-                # --- BASELLM-VERIFY: instrumented basellm runtime/energy (fair comparison) ---
-                # The basellm code stored in code_blocks[2] is UNINSTRUMENTED (vanilla LLM
-                # works from original_input_code), so its runtime in runtime_history[2] is
-                # NOT directly comparable to LASSI codes (which carry T1+T2 instrumentation).
-                # Mirror of how SOURCE_orig -> SOURCE_verify is built: instrument the basellm
-                # code with the full SOURCE_verify (T1+T2) template, compile, and execute it
-                # once to capture runtime/energy/power on an apples-to-apples basis vs LASSI.
-                # One extra compile+execute per trial; gated on verify_zeroshot for now since
-                # it shares the same instrumentation infrastructure as the empirical verify.
-                print(f"\n----- Zero-Shot Basellm-Verify: instrumenting basellm with SOURCE_verify template -----")
-                _bv_instr = lassi.verify.code_insert_instrumentation_from_template(
-                    _zs_code, _sv_code,  # _sv_code = input_code = SOURCE_verify (full T1+T2 if run_tier2)
-                    llm_source, model, num_ctx, system_prompt,
-                    display_response, verifyprompt=verifyprompt,
-                )
-                if not _bv_instr:
-                    print(color.RED + "[Basellm-Verify] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
-                    experiment_data["basellm_verify_status"] = "instrument_error"
-                else:
-                    _bv_path = os.path.join(experiment_data_directory,
-                                            file_name + "_basellm_verify_Trial" + str(trial_number) + _zs_src_ext)
-                    with open(_bv_path, 'w') as _f:
-                        _f.write(_bv_instr)
-                    _bv_compile, _bv_exe = lassi.code_manager.compile_code(
-                        _bv_path, target_lang, code_compiler, code_compiler_kwds
-                    )
-                    if _bv_compile != "":
-                        print(color.RED + "[Basellm-Verify] Compile failed." + color.END)
-                        experiment_data["basellm_verify_status"] = "compile_error"
-                    else:
-                        (_bv_result, _bv_stdout, _bv_energy, _bv_avg_power, _bv_std_power,
-                         _bv_duration, _bv_metrics) = lassi.code_manager.execute_code_selectvendor(
-                            experiment_data_directory, code_version, True, trial_number,
-                            directory, _bv_exe, exe_input_parameters,
-                            power_measure, "basellm_verify", target_lang, build_script, make_script,
-                            gpu_vendor="auto", wait=5,
-                        )
-                        if _bv_result != "0":
-                            print(color.RED + "[Basellm-Verify] Execute failed." + color.END)
-                            experiment_data["basellm_verify_status"] = "execute_error"
-                        else:
-                            experiment_data["basellm_verify_status"] = "success"
-                            experiment_data["basellm_verify_runtime_s"] = round(_bv_duration, 4)
-                            # Diff vs SOURCE_orig (uninstrumented baseline) — same reference
-                            # `lassiee_clean_runtime_diff` uses, so the two are directly comparable.
-                            _src_rt0 = runtime_history[0] if runtime_history and runtime_history[0] > 0 else None
-                            if _src_rt0:
-                                experiment_data["basellm_verify_runtime_diff"] = round(
-                                    100.0 * (_bv_duration - _src_rt0) / _src_rt0, 2)
-                            if power_measure and _bv_energy > 0:
-                                experiment_data["basellm_verify_energy_J"] = round(_bv_energy, 4)
-                                if sourcecode_total_energy_joules and sourcecode_total_energy_joules > 0:
-                                    experiment_data["basellm_verify_energy_diff"] = round(
-                                        100.0 * (_bv_energy - sourcecode_total_energy_joules)
-                                        / sourcecode_total_energy_joules, 2)
-                            # Use duration_refactor (this iteration's basellm uninstrumented
-                            # runtime, about to be appended to runtime_history later in the
-                            # same iteration) — runtime_history[2] is not yet populated here.
-                            print(f"[Basellm-Verify] runtime={round(_bv_duration, 4)}s instrumented "
-                                  f"(basellm uninstrumented={round(duration_refactor, 4)}s, "
-                                  f"SOURCE_verify={round(runtime_history[1], 4)}s)")
 
             # --- FRAMEWORK FINAL VERDICT DERIVATION (judge-as-baseline) ---
             # The framework verdict (valid_code_flag) is derived from tier verdicts alone for
@@ -2571,7 +2509,15 @@ def auto_code_llmgeneration_pipeline(prompts,
             print("  Valid code history: ", end=' ')
             print(valid_code_history)
             if zero_shot and verify_zeroshot and zs_empirical_verdict != "SKIP":
-                _agree = "✓ agree" if (zs_empirical_verdict == "PASS") == (valid_code_history[-1].endswith("VALID")) else "⚠ DISAGREE"
+                # Map both verdicts to a common boolean (pass=True, fail=False) before
+                # comparing — judge says VALID/INVALID, empirical says PASS/FAIL. They
+                # AGREE when VALID↔PASS or INVALID↔FAIL. (Previous version used
+                # valid_code_history[-1].endswith("VALID"), which was always True for
+                # both "basellm_VALID" AND "basellm_INVALID", silently flipping every
+                # empirical FAIL into a spurious DISAGREE regardless of the judge.)
+                _judge_pass = (judge_raw_verdict == "VALID")
+                _empirical_pass = (zs_empirical_verdict == "PASS")
+                _agree = "✓ agree" if _judge_pass == _empirical_pass else "⚠ DISAGREE"
                 print(f"  Zero-shot: judge={judge_raw_verdict}, empirical={zs_empirical_verdict} ({_agree})")
             print("  Iteration log: ", end= ' ')
             print(iteration_log)
@@ -3285,13 +3231,13 @@ def auto_code_llmgeneration_pipeline(prompts,
         # Runtime: use uninstrumented values wherever available.
         # - Source code: runtime_history[0] = SOURCE_orig (uninstrumented; no Tier 1/2 overhead)
         # - Base LLM code: runtime_history[2] = zero-shot output (generated from SOURCE_orig, no LASSI-VERIFY blocks)
-        # - Base LLM code (instrumented): basellm_verify_runtime_s (full T1+T2 instrumentation,
+        # - Base LLM code (instrumented): basellm_zs_verify_runtime_s (full T1+T2 instrumentation,
         #   apples-to-apples vs LASSI codes which always carry instrumentation)
         # - Best refactored code: prefer lassiee_clean_runtime_s (strip-and-rerun) if available;
         #   fall back to instrumented runtime_history[best_index] with a note.
         # Idle runtime is omitted — not meaningful for runtime-performance mode.
         _base_llm_rt = str(round(runtime_history[2], 4)) if len(runtime_history) > 2 else "NA"
-        _base_llm_rt_instr = experiment_data.get("basellm_verify_runtime_s", "NA")
+        _base_llm_rt_instr = experiment_data.get("basellm_zs_verify_runtime_s", "NA")
         _best_rt_val = lassiee_clean_runtime_s if lassiee_clean_runtime_s != "NA" else runtime_history[best_index]
         _best_rt_note = " (uninstrumented)" if lassiee_clean_runtime_s != "NA" else " (instrumented — clean run unavailable)"
         meta_data_file += "Runtime (s): "

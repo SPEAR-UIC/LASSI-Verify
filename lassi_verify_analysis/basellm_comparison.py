@@ -1,32 +1,34 @@
 """
-basellm vs LASSI runtime comparison (apples-to-apples).
+basellm vs LASSI runtime comparison (uninstrumented vs uninstrumented).
 
-The LASSI-Verify pipeline records four runtime measurements per trial, each
-under a different instrumentation regime (see planning/LASSI_Verify_Analysis_v2_plan.md
-§3.1). The naming is asymmetric because each field was motivated by a different
-concern:
+The LASSI-Verify pipeline records runtime measurements under several
+instrumentation regimes. The only fair fairness-comparison for the paper is
+uninstrumented vs uninstrumented — comparing instrumented basellm against
+instrumented LASSI mixes a calculated quantity ("speedup with framework
+overhead included") that does not represent the code that would actually ship.
 
-  zeroshot_runtime_s        uninstrumented   (basellm code as the vanilla LLM
-                                              generated it from original source)
-  basellm_verify_runtime_s  instrumented     (same basellm code, re-instrumented
-                                              with the SOURCE_verify T1+T2 template,
-                                              then recompiled + re-executed)
-  lassiee_runtime_s         instrumented     (best LASSI code as the iteration
-                                              loop measured it; LASSI codes carry
-                                              T1+T2 instrumentation natively)
-  lassiee_clean_runtime_s   uninstrumented   (best LASSI code with all LASSI-VERIFY
-                                              blocks stripped, recompiled + re-executed)
+Relevant fields:
 
-This module computes the TWO genuine apples-to-apples comparisons (NOT the
-mixed uninstr/instr pairing that biases the result in LASSI's favor):
+  zeroshot_runtime_s          uninstrumented   (basellm code as the vanilla LLM
+                                                generated it from original source)
+  lassiee_clean_runtime_s     uninstrumented   (best LASSI code with all
+                                                LASSI-VERIFY blocks stripped,
+                                                recompiled + re-executed)
+  basellm_zs_verify_runtime_s instrumented     (same basellm code re-instrumented
+                                                with the combined T1+T2 template —
+                                                kept as raw diagnostic data, NOT
+                                                used for a calculated ratio here)
+  lassiee_runtime_s           instrumented     (best LASSI code as the iteration
+                                                loop measured it — kept as raw
+                                                diagnostic data, NOT used here)
+
+This module computes ONE comparison:
 
   Uninstr/uninstr ("what you would ship"):
       zeroshot_runtime_s  ↔  lassiee_clean_runtime_s
-  Instr/instr ("same instrumentation footprint"):
-      basellm_verify_runtime_s  ↔  lassiee_runtime_s
 
-Per-trial: raw pair + ratio for each comparison. Per-kernel: median + IQR of
-each ratio across trials where both members of the pair are available.
+Per-trial: raw pair + ratio. Per-kernel: median + IQR of the ratio across
+trials where both members of the pair are available.
 
 A speedup ratio > 1.0 means LASSI is faster than basellm.
 """
@@ -43,18 +45,19 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 # Per-trial CSV column order (written to lassi_basellm_runtime_comparison.csv).
+# Instrumented runtimes are retained as raw diagnostic data — included for
+# transparency but never combined into a calculated ratio here.
 COMPARISON_COLUMNS = [
     "kernel_name",
     "trial_number",
     "lassiee_valid",
-    "basellm_verify_status",
+    "basellm_zs_verify_status",
     "lassiee_clean_status",
     "zeroshot_runtime_s",
     "lassiee_clean_runtime_s",
-    "speedup_uninstr",          # zeroshot_runtime_s / lassiee_clean_runtime_s
-    "basellm_verify_runtime_s",
-    "lassiee_runtime_s",
-    "speedup_instr",            # basellm_verify_runtime_s / lassiee_runtime_s
+    "speedup_uninstr",              # zeroshot_runtime_s / lassiee_clean_runtime_s
+    "basellm_zs_verify_runtime_s",  # raw diagnostic only
+    "lassiee_runtime_s",            # raw diagnostic only
 ]
 
 
@@ -67,12 +70,12 @@ def compute(df_trials: pd.DataFrame) -> dict:
     Returns:
         Dict with keys:
           - "per_trial": DataFrame, one row per trial, columns per
-            :data:`COMPARISON_COLUMNS`. Trials missing either side of a
-            comparison have NaN in the corresponding ratio.
-          - "per_kernel": dict {kernel_name: {"uninstr": {...stats},
-            "instr": {...stats}}} where each stats dict has count, median,
-            q25, q75, min, max. Kernels with no usable trials are omitted.
-          - "overall": same shape as per_kernel entry, aggregated across kernels.
+            :data:`COMPARISON_COLUMNS`. Trials missing either side of the
+            comparison have NaN in the speedup_uninstr column.
+          - "per_kernel": dict {kernel_name: {"uninstr": {...stats}}} where
+            each stats dict has count, median, q25, q75, min, max. Kernels
+            with no usable trials are omitted.
+          - "overall": same shape as a per_kernel entry, aggregated across kernels.
     """
     if df_trials.empty:
         log.warning("df_trials is empty — no comparison to compute.")
@@ -83,24 +86,22 @@ def compute(df_trials: pd.DataFrame) -> dict:
     for _, r in df_trials.iterrows():
         zs_u   = _f(r.get("zeroshot_runtime_s"))
         lass_c = _f(r.get("lassiee_clean_runtime_s"))
-        bvf    = _f(r.get("basellm_verify_runtime_s"))
-        lass_i = _f(r.get("lassiee_runtime_s"))
+        bvf    = _f(r.get("basellm_zs_verify_runtime_s"))   # raw diagnostic
+        lass_i = _f(r.get("lassiee_runtime_s"))             # raw diagnostic
 
         speedup_u = (zs_u / lass_c) if (zs_u and lass_c and lass_c > 0) else np.nan
-        speedup_i = (bvf / lass_i) if (bvf and lass_i and lass_i > 0) else np.nan
 
         rows.append({
-            "kernel_name":              r.get("kernel_name"),
-            "trial_number":             r.get("trial_number"),
-            "lassiee_valid":            r.get("lassiee_valid"),
-            "basellm_verify_status":    r.get("basellm_verify_status"),
-            "lassiee_clean_status":     r.get("lassiee_clean_status"),
-            "zeroshot_runtime_s":       zs_u,
-            "lassiee_clean_runtime_s":  lass_c,
-            "speedup_uninstr":          speedup_u,
-            "basellm_verify_runtime_s": bvf,
-            "lassiee_runtime_s":        lass_i,
-            "speedup_instr":            speedup_i,
+            "kernel_name":                 r.get("kernel_name"),
+            "trial_number":                r.get("trial_number"),
+            "lassiee_valid":               r.get("lassiee_valid"),
+            "basellm_zs_verify_status":    r.get("basellm_zs_verify_status"),
+            "lassiee_clean_status":        r.get("lassiee_clean_status"),
+            "zeroshot_runtime_s":          zs_u,
+            "lassiee_clean_runtime_s":     lass_c,
+            "speedup_uninstr":             speedup_u,
+            "basellm_zs_verify_runtime_s": bvf,
+            "lassiee_runtime_s":           lass_i,
         })
 
     per_trial = pd.DataFrame(rows, columns=COMPARISON_COLUMNS)
@@ -110,12 +111,10 @@ def compute(df_trials: pd.DataFrame) -> dict:
         sub = per_trial[per_trial["kernel_name"] == k]
         per_kernel[k] = {
             "uninstr": _stats(sub["speedup_uninstr"]),
-            "instr":   _stats(sub["speedup_instr"]),
         }
 
     overall = {
         "uninstr": _stats(per_trial["speedup_uninstr"]),
-        "instr":   _stats(per_trial["speedup_instr"]),
     }
 
     return {"per_trial": per_trial, "per_kernel": per_kernel, "overall": overall}
@@ -137,22 +136,19 @@ def report(results: dict, output_dir: str,
     per_trial.to_csv(out_path, index=False, float_format="%.4f")
     log.info("Wrote %d per-trial comparison rows to %s", len(per_trial), out_path)
 
-    print("\n=== basellm vs LASSI runtime comparison (apples-to-apples) ===")
+    print("\n=== basellm vs LASSI runtime comparison (uninstr/uninstr) ===")
     print(f"Wrote: {out_path} ({len(per_trial)} rows)")
-    print(f"\nA speedup ratio > 1.0 means LASSI is faster than basellm. The two")
-    print(f"comparisons should agree closely; large divergence indicates that")
-    print(f"instrumentation overhead is distorting the headline result.\n")
+    print(f"\nA speedup ratio > 1.0 means LASSI is faster than basellm.\n")
 
     for scope_label, stats_dict in [("OVERALL", results.get("overall", {}))] + \
                                     [(k, v) for k, v in results.get("per_kernel", {}).items()]:
         print(f"  {scope_label}:")
-        for tag, label in [("uninstr", "uninstr/uninstr (what you would ship)"),
-                           ("instr",   "instr/instr   (same instr footprint) ")]:
-            s = stats_dict.get(tag, {})
-            n = s.get("count", 0)
-            if n == 0:
-                print(f"    {label}: n=0 (no usable trials)")
-                continue
+        s = stats_dict.get("uninstr", {})
+        n = s.get("count", 0)
+        label = "uninstr/uninstr (what you would ship)"
+        if n == 0:
+            print(f"    {label}: n=0 (no usable trials)")
+        else:
             med = s.get("median")
             q25, q75 = s.get("q25"), s.get("q75")
             mn, mx = s.get("min"), s.get("max")

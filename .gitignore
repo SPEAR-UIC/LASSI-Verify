@@ -33,9 +33,8 @@ test_codes/**/*-cuda_main_verify
 # Tier 3 metamorphic testing variant files (compiled/run at runtime, not tracked)
 *_mt_*.cu
 
-# Zero-shot empirical verification files (Tier 1/2 instrumented copies of zs code, runtime-generated)
-*_zs_t1_Trial*.cu
-*_zs_t2_Trial*.cu
+# Zero-shot empirical verification file (combined T1+T2 instrumented copy of zs code, runtime-generated)
+*_basellm_zs_verify_Trial*.cu
 
 # Best clean run — uninstrumented best LASSI code (generated at pipeline end, not tracked)
 *_best_clean.cu
