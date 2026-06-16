@@ -567,107 +567,235 @@ def auto_code_llmgeneration_pipeline(prompts,
     #  receives the unaltered source code (not the assertion-instrumented version).
     # original_input_code is now accessible as code_blocks[0] (SOURCE_orig).
     original_input_code = input_code
+    _original_source_for_judge = input_content_llmjudge_dict.get("source_code", input_code)
+    _, source_ext = os.path.splitext(source_file_path)
+    verify_source_file_path = os.path.join(experiment_data_directory, file_name + "_verify_Trial" + str(trial_number) + source_ext)
 
-    input_code = lassi.verify.code_insert_asserts(
-        input_content_llmjudge_dict["source_code"],
-        llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt,
-        code_description=llm_code_description_response
-    )
+    # --- Stage 0 T1 instrumentation retry loop ---
+    # The Stage 1 LLM occasionally selects T1 assertions that fire FAIL on SOURCE itself
+    # (e.g., `*_unchanged` on a kernel output buffer the source legitimately mutates).
+    # Rather than aborting the trial on the first such miss, give the LLM up to
+    # STAGE0_T1_RETRY_MAX attempts: on each FAIL, re-prompt code_insert_asserts() with
+    # explicit feedback identifying the failing labels so it can revise its selection.
+    # This is the structural symmetry counterpart to the per-tier self-correction loops
+    # used everywhere else in the framework — Stage 0 was the only tier-evaluation point
+    # without one. Pass@k=1 robustness for real-world use depends on this.
+    STAGE0_T1_RETRY_MAX = 3
+    _t1_retry_feedback = None
+    _stage0_t1_success = False
+    _stage0_history_appended_this_attempt = False
+    # Variables that need to persist past the loop on success:
+    idle_energy_joules = 0
+    idle_ave_power = 0
+    sourcecode_total_energy_joules = 0
+    sourcecode_ave_power = 0
+    duration = 0
+    source_verify_stdout = ""
 
-    input_content_llmjudge_dict["source_code"] = input_code
+    for _stage0_attempt in range(1, STAGE0_T1_RETRY_MAX + 1):
+        if _stage0_attempt > 1:
+            print(color.BOLD + color.YELLOW +
+                  f"\n----- [STAGE 0 RETRY {_stage0_attempt - 1}/{STAGE0_T1_RETRY_MAX - 1}] "
+                  f"Re-attempting T1 instrumentation with feedback -----" + color.END)
+            # Pop the history rows appended by the previous (failed) test_source_code call
+            # so the retry's appends overwrite cleanly rather than stacking.
+            if _stage0_history_appended_this_attempt:
+                for _hist in (energy_history, power_history, runtime_history, valid_code_history):
+                    if _hist:
+                        _hist.pop()
+                _stage0_history_appended_this_attempt = False
+            # Reset the judge-dict source so each retry re-instruments from the original.
+            input_content_llmjudge_dict["source_code"] = _original_source_for_judge
 
-    # Abort if Tier 1 produced no assertion labels — cannot verify without Tier 1 coverage.
-    _t1_labels = re.findall(r'LASSI-VERIFY ASSERTION', input_code)
-    if not _t1_labels:
-        print(color.RED + color.BOLD +
-              "\n[ABORT] Tier 1: code_insert_asserts() produced no assertion blocks in SOURCE_verify. "
-              "Cannot run LASSI-Verify without Tier 1 coverage. Exiting pipeline." + color.END)
-        experiment_data["stage0_abort_reason"] = "no_t1_assertions"
-        _abort_monitor_log_path = os.path.join(experiment_data_directory,
-            "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
-        sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
-        lassi.monitor.save_log(_abort_monitor_log_path)
-        return False
-    # Per-trial T1 test count: how many distinct T1 assertion labels Stage 1
-    # successfully instrumented into SOURCE_verify for this trial.
-    _t1_labels_str = lassi.verify.extract_tier1_labels(input_code)
-    experiment_data["tier1_test_count"] = len(
-        [s for s in _t1_labels_str.split(",") if s.strip()]) if _t1_labels_str else 0
-
-    # --- Tier 2: Insert passthrough data dump blocks into the already-asserted code ---
-    # code_insert_passthrough() is called on the Tier-1-instrumented code so both assertion
-    # blocks and passthrough blocks appear in SOURCE_verify and are carried through all
-    # subsequent LLM-generated transformations unaltered.
-    # The passthrough prompt explicitly preserves existing LASSI-VERIFY ASSERTIONS blocks.
-    if run_tier2:
-        passthrough_code = lassi.verify.code_insert_passthrough(
-            input_code,  # already has Tier 1 assertions
-            llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt,
-            code_description=llm_code_description_response
+        # --- T1 insertion (with retry feedback if applicable) ---
+        input_code = lassi.verify.code_insert_asserts(
+            input_content_llmjudge_dict["source_code"],
+            llm_source, model, num_ctx, system_prompt, code_analysis, display_response,
+            verifyprompt=verifyprompt,
+            code_description=llm_code_description_response,
+            feedback=_t1_retry_feedback,
         )
-        if passthrough_code != "":
-            input_code = passthrough_code
-            input_content_llmjudge_dict["source_code"] = input_code
-            print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify -----")
-            # Per-trial T2 test count: how many distinct passthrough labels Stage 1
-            # successfully instrumented into SOURCE_verify for this trial.
-            _t2_labels_str = lassi.verify.extract_tier2_labels(input_code)
-            experiment_data["tier2_test_count"] = len(
-                [s for s in _t2_labels_str.split(",") if s.strip()]) if _t2_labels_str else 0
-        else:
+        input_content_llmjudge_dict["source_code"] = input_code
+
+        # Abort path: code_insert_asserts produced no assertion blocks at all. Try retry first.
+        _t1_labels = re.findall(r'LASSI-VERIFY ASSERTION', input_code)
+        if not _t1_labels:
+            if _stage0_attempt < STAGE0_T1_RETRY_MAX:
+                _t1_retry_feedback = (
+                    "The previous Stage 1 attempt produced NO Tier 1 assertion blocks at all. "
+                    "You MUST insert at least one LASSI-VERIFY ASSERTIONS block plus the "
+                    "[tier1_complete] sentinel. Re-read the catalog Step 2 (Select Minimal "
+                    "Relevant Assertions) and ensure at least one Layer 1 universal assertion "
+                    "is inserted on a safe target (e.g., output pointer non-null after D->H copy)."
+                )
+                continue
             print(color.RED + color.BOLD +
-                  "\n[ABORT] Tier 2: code_insert_passthrough() returned empty — cannot run "
-                  "LASSI-Verify without Tier 2 coverage. Exiting pipeline." + color.END)
-            experiment_data["stage0_abort_reason"] = "no_t2_passthrough"
+                  "\n[ABORT] Tier 1: code_insert_asserts() produced no assertion blocks "
+                  "after exhausting retries. Cannot run LASSI-Verify without Tier 1 coverage."
+                  + color.END)
+            experiment_data["stage0_abort_reason"] = "no_t1_assertions"
             _abort_monitor_log_path = os.path.join(experiment_data_directory,
                 "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
-            sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
+            sys.stdout.flush()
             lassi.monitor.save_log(_abort_monitor_log_path)
             return False
 
-    # Write the instrumented source to disk so test_source_code compiles and runs it —
-    # not the original .cu file. This gives true SOURCE_verify metrics that include
-    # any overhead from the inserted invariant assertion checks (and passthrough blocks if Tier 2 enabled).
-    # Saved to the experiment folder (not alongside the original source) — it is an experiment artifact,
-    # not a permanent modification of the benchmark source. After this point, the pipeline always uses
-    # code_blocks[1] (in-memory) and never reads this file again.
-    _, source_ext = os.path.splitext(source_file_path)
-    verify_source_file_path = os.path.join(experiment_data_directory, file_name + "_verify_Trial" + str(trial_number) + source_ext)
-    with open(verify_source_file_path, 'w') as _vf:
-        _vf.write(input_code)
-    print(f"\n----- LASSI-Verify: instrumented source written to {verify_source_file_path} -----")
+        # Per-trial T1 test count (overwritten each retry; final-attempt value sticks)
+        _t1_labels_str = lassi.verify.extract_tier1_labels(input_code)
+        experiment_data["tier1_test_count"] = len(
+            [s for s in _t1_labels_str.split(",") if s.strip()]) if _t1_labels_str else 0
 
-    """Run the instrumented source code to capture SOURCE_verify baseline metrics.
-    Compiles and executes verify_source_file_path (the assertion-instrumented .cu file),
-    so history[1] reflects the true overhead of the invariant assertion instrumentation."""
-    _source_verify_result = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
-                                                                                            exe_input_parameters, code_compiler, code_compiler_kwds,
-                                                                                            yes_execute, power_measure, input_content_llmjudge_dict,
-                                                                                            energy_history, power_history, runtime_history, valid_code_history
-                                                                                           )
-    if _source_verify_result in ("COMPILE_ERROR", "EXECUTE_ERROR"):
-        _abort_reason = _source_verify_result
-        if _abort_reason == "COMPILE_ERROR":
-            _abort_msg = ("SOURCE_verify failed to compile — Tier 1/2 instrumentation "
-                          "introduced a syntax error.")
-        else:
-            _abort_msg = ("SOURCE_verify failed to execute (runtime error / segfault) — "
-                          "Tier 1/2 instrumentation caused a crash.")
-        print(color.RED + color.BOLD + "\n[STAGE 0 ABORT] " + _abort_msg +
-              " Aborting trial." + color.END)
-        verification_log["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
-        experiment_data["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
-        _abort_monitor_log_path = os.path.join(experiment_data_directory,
-            "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
-        sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
-        lassi.monitor.save_log(_abort_monitor_log_path)
-        return False
-    (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
-     energy_history, power_history, runtime_history, valid_code_history,
-     source_verify_stdout) = _source_verify_result
-    valid_code_history[-1] = "SOURCE_verify"  # Override "SOURCE" label from test_source_code
-    experiment_data["source_verify_runtime_s"] = runtime_history[1]   # Wall-clock time of instrumented source (Table 1 ★)
+        # --- T2 passthrough insertion (if enabled) ---
+        # Applied to the T1-instrumented code so both block types appear in SOURCE_verify and
+        # are carried through subsequent LLM transformations. Passthrough prompt preserves
+        # existing LASSI-VERIFY ASSERTIONS blocks.
+        if run_tier2:
+            passthrough_code = lassi.verify.code_insert_passthrough(
+                input_code,  # already has Tier 1 assertions
+                llm_source, model, num_ctx, system_prompt, code_analysis, display_response,
+                verifyprompt=verifyprompt,
+                code_description=llm_code_description_response,
+            )
+            if passthrough_code != "":
+                input_code = passthrough_code
+                input_content_llmjudge_dict["source_code"] = input_code
+                print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify -----")
+                _t2_labels_str = lassi.verify.extract_tier2_labels(input_code)
+                experiment_data["tier2_test_count"] = len(
+                    [s for s in _t2_labels_str.split(",") if s.strip()]) if _t2_labels_str else 0
+            else:
+                # No retry for T2 insertion failure — different failure mode; preserve original abort.
+                print(color.RED + color.BOLD +
+                      "\n[ABORT] Tier 2: code_insert_passthrough() returned empty — cannot run "
+                      "LASSI-Verify without Tier 2 coverage. Exiting pipeline." + color.END)
+                experiment_data["stage0_abort_reason"] = "no_t2_passthrough"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
 
+        # --- Write SOURCE_verify and run it ---
+        # Instrumented source is an experiment artifact, not a permanent modification of the
+        # benchmark source. After this point, the pipeline always uses code_blocks[1] (in-memory).
+        with open(verify_source_file_path, 'w') as _vf:
+            _vf.write(input_code)
+        print(f"\n----- LASSI-Verify: instrumented source written to {verify_source_file_path} (attempt {_stage0_attempt}/{STAGE0_T1_RETRY_MAX}) -----")
+
+        _source_verify_result = lassi.pipeline_methods.test_source_code(
+            app_name, experiment_data_directory, code_version, trial_number,
+            verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
+            exe_input_parameters, code_compiler, code_compiler_kwds,
+            yes_execute, power_measure, input_content_llmjudge_dict,
+            energy_history, power_history, runtime_history, valid_code_history,
+        )
+        if _source_verify_result in ("COMPILE_ERROR", "EXECUTE_ERROR"):
+            # Compile/execute failure of SOURCE_verify itself: retry with targeted feedback.
+            # Different failure mode than T1-assertion-FAIL but same retry budget.
+            _abort_reason = _source_verify_result
+            if _stage0_attempt < STAGE0_T1_RETRY_MAX:
+                if _abort_reason == "COMPILE_ERROR":
+                    _t1_retry_feedback = (
+                        "The previous Stage 1 attempt produced T1/T2 instrumentation that "
+                        "introduced a SYNTAX ERROR — the instrumented source failed to compile. "
+                        "Re-inspect every inserted block: check matched braces, valid printf "
+                        "format strings, all referenced variables in scope, all required headers "
+                        "included, and that no LASSI-VERIFY block accidentally truncated or "
+                        "overwrote surrounding source code."
+                    )
+                else:
+                    _t1_retry_feedback = (
+                        "The previous Stage 1 attempt produced T1/T2 instrumentation that "
+                        "compiled but CAUSED A RUNTIME CRASH (segfault / illegal memory access). "
+                        "Common causes: an assertion dereferences a pointer before the "
+                        "corresponding allocation/copy, accesses an array index out of bounds, "
+                        "or runs in a kernel context. Re-inspect inserted assertions and ensure "
+                        "each only reads data that is provably valid at its insertion point."
+                    )
+                continue
+            # Exhausted retries — original abort path.
+            if _abort_reason == "COMPILE_ERROR":
+                _abort_msg = ("SOURCE_verify failed to compile after exhausting retries — "
+                              "Tier 1/2 instrumentation repeatedly introduced a syntax error.")
+            else:
+                _abort_msg = ("SOURCE_verify failed to execute (runtime error / segfault) after "
+                              "exhausting retries — Tier 1/2 instrumentation repeatedly caused a crash.")
+            print(color.RED + color.BOLD + "\n[STAGE 0 ABORT] " + _abort_msg + " Aborting trial." + color.END)
+            verification_log["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
+            experiment_data["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+
+        # SOURCE_verify compiled + executed. Unpack the result.
+        (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict,
+         sourcecode_total_energy_joules, sourcecode_ave_power, duration,
+         energy_history, power_history, runtime_history, valid_code_history,
+         source_verify_stdout) = _source_verify_result
+        valid_code_history[-1] = "SOURCE_verify"  # Override "SOURCE" label from test_source_code
+        experiment_data["source_verify_runtime_s"] = runtime_history[1]
+        _stage0_history_appended_this_attempt = True
+
+        # --- T1 assertion self-check on SOURCE_verify ---
+        # If T1 assertions fire FAIL on SOURCE itself, the instrumentation is broken (the LLM
+        # asserted invariants that the source legitimately violates). Retry with targeted
+        # feedback listing the failing labels; the LLM should revise its selection.
+        if run_tier2:
+            _t1_verdict, _t1_diagnostic = lassi.verify.check_tier1_assertions(source_verify_stdout)
+            if _t1_verdict == "FAIL":
+                _failing_labels = _t1_diagnostic.get("failing_labels", []) or []
+                print(color.YELLOW + color.BOLD +
+                      f"\n[STAGE 0 T1 FAIL on attempt {_stage0_attempt}/{STAGE0_T1_RETRY_MAX}] "
+                      f"Failing assertions: {_failing_labels}" + color.END)
+                if _stage0_attempt < STAGE0_T1_RETRY_MAX:
+                    _label_list = ", ".join(f"[{lbl}]" for lbl in _failing_labels)
+                    _t1_retry_feedback = (
+                        "The previous Stage 1 instrumentation attempt inserted Tier 1 assertions "
+                        "that fired FAIL when the SOURCE_verify executable was compiled and "
+                        "executed. The assertions you selected do NOT actually hold for the "
+                        "source code's real behavior — they assert invariants that the source "
+                        "legitimately violates.\n\n"
+                        f"Failing assertions: {_label_list}\n\n"
+                        "The most common cause is applying `*_unchanged` assertions to buffers "
+                        "or variables that the source code legitimately mutates (kernel outputs, "
+                        "scratch buffers, accumulators). See the catalog anti-pattern "
+                        "\"*_unchanged Assertions on Mutable Buffers or Mutated Variables\".\n\n"
+                        "For this re-instrumentation:\n"
+                        "  1. Remove or replace the failing assertion(s) listed above.\n"
+                        "  2. Do NOT re-introduce the same failing assertion in the same form.\n"
+                        "  3. If the assertion targeted an output buffer, use output_finite or "
+                        "output_ptr_valid instead of *_unchanged.\n"
+                        "  4. If the assertion targeted a mutable input buffer, choose a different "
+                        "invariant or remove that assertion entirely.\n"
+                        "  5. Keep all OTHER (passing) assertions from your previous attempt — "
+                        "only revise the failing ones."
+                    )
+                    continue
+                # Exhausted retries — original abort path.
+                print(color.RED + color.BOLD +
+                      "\n[STAGE 0 ABORT] SOURCE_verify FAILED its own Tier 1 invariant assertions "
+                      "after exhausting retries — instrumentation cannot be made consistent with "
+                      "the source's actual behavior. Aborting trial." + color.END)
+                print("Failing assertions:", _t1_diagnostic)
+                verification_log["stage0_abort_reason"] = f"tier1_fail: {_t1_diagnostic}"
+                experiment_data["stage0_abort_reason"] = "tier1_assertion_fail"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+        # T1 PASS (or run_tier2 disabled). Done.
+        _stage0_t1_success = True
+        if _stage0_attempt > 1:
+            print(color.BOLD + color.GREEN +
+                  f"\n----- [STAGE 0 RETRY SUCCESS] T1 instrumentation passed on attempt "
+                  f"{_stage0_attempt}/{STAGE0_T1_RETRY_MAX} -----" + color.END)
+        break
+
+    # --- After the retry loop: set up Tier 2 spec / passthrough_outputs (success path) ---
     # Tier 2 source-as-specification reference: stdout from SOURCE_verify execution.
     # Per the source-as-specification premise, SOURCE_verify's observable behavior is the
     # sole correctness criterion. Any LASSI-generated transformation must preserve this behavior.
@@ -679,29 +807,11 @@ def auto_code_llmgeneration_pipeline(prompts,
     #   [1] = SOURCE_verify stdout (Tier 2 reference)
     passthrough_outputs = [source_orig_stdout, source_verify_stdout]
 
-    # --- Stage 0 SOURCE_verify self-check ---
-    # LASSI-Verify uses SOURCE_verify as the correctness specification: generated codes must
-    # match its observable behavior. If SOURCE_verify *itself* fails its own verification
-    # blocks, the specification is corrupted and every generated code will fail against it.
-    # Terminating early prevents wasting the entire trial budget on an invalid spec.
-    # SKIP results (e.g., Tier 3 relations filtered inactive) are acceptable — only FAIL is fatal.
+    # --- Stage 0 SOURCE_verify NaN/Inf self-check (Tier 2 only) ---
+    # Tier 1 was already checked inside the retry loop above. The Tier 2 NaN check below
+    # catches the case where code_insert_passthrough placed a block before the GPU kernel
+    # wrote to the device buffer (every generated code would then FAIL Tier 2 with inf error).
     if run_tier2:
-        # Tier 1: check that SOURCE_verify's own assertion blocks all PASS.
-        _t1_verdict, _t1_diagnostic = lassi.verify.check_tier1_assertions(source_verify_stdout)
-        if _t1_verdict == "FAIL":
-            print(color.RED + color.BOLD +
-                  "\n[STAGE 0 ABORT] SOURCE_verify FAILED its own Tier 1 invariant assertions — "
-                  "instrumentation error; the trial specification is invalid. Aborting trial." +
-                  color.END)
-            print("Failing assertions:", _t1_diagnostic)
-            verification_log["stage0_abort_reason"] = f"tier1_fail: {_t1_diagnostic}"
-            experiment_data["stage0_abort_reason"] = "tier1_assertion_fail"
-            _abort_monitor_log_path = os.path.join(experiment_data_directory,
-                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
-            sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
-            lassi.monitor.save_log(_abort_monitor_log_path)
-            return False
-        # Tier 2: check that SOURCE_verify's passthrough blocks contain no NaN/Inf statistics.
         # NaN occurs when code_insert_passthrough placed a block before the GPU kernel wrote
         # to the device buffer. Every generated code would then fail Tier 2 with inf error.
         _block_pattern = re.compile(

@@ -547,6 +547,61 @@ cudaMemcpy(h_out, d_out, N * sizeof(uint64_t), cudaMemcpyDeviceToHost);  // copy
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
+### ❌ WRONG: `*_unchanged` Assertions on Mutable Buffers or Mutated Variables
+
+The `problem_spec_*_unchanged` pattern (and any other "value unchanged" / "length unchanged" / "pointer unchanged" assertion) is intended for **immutable problem-specification constants** — scalar values that define WHAT problem is being solved (see the "Problem Specification Constants" exception earlier in this document). It is **not** appropriate for buffers, arrays, or variables that the source code legitimately modifies during execution. When you apply `*_unchanged` to a mutable target, the assertion fires FAIL on the original SOURCE itself (because the source genuinely does change the value), and the trial aborts at Stage 0 before any LASSI iteration can run.
+
+```cpp
+// BAD — `lengths` is an array that the kernel writes to (e.g., per-thread output sizes).
+// The kernel computes new length values into this buffer; the assertion correctly fires
+// FAIL because lengths IS changed — but the verdict aborts Stage 0 unnecessarily because
+// the assertion target was wrong, not because the source is buggy.
+int initial_total_length = 0;
+for (int i = 0; i < N; i++) initial_total_length += lengths[i];
+
+kernel<<<blocks, threads>>>(d_in, d_lengths, N);   // ← kernel writes to d_lengths
+cudaMemcpy(lengths, d_lengths, N * sizeof(int), cudaMemcpyDeviceToHost);
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+{
+    int current_total_length = 0;
+    for (int i = 0; i < N; i++) current_total_length += lengths[i];
+    bool _t1_pass = (current_total_length == initial_total_length);   // WRONG: lengths IS mutated
+    printf("LASSI-VERIFY ASSERTIONS [problem_spec_lengths_unchanged]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+**WHY THIS IS WRONG:** The `lengths` array is a kernel output (or scratch buffer, or per-element state); it is updated as part of the computation. The `*_unchanged` assertion fires FAIL because the source legitimately changes the value — not because the source is broken. The Stage 0 self-check then aborts the trial.
+
+**Before inserting any `*_unchanged` assertion, verify the target is genuinely immutable:**
+- Search the kernel body — is there any `target[idx] = ...` or `atomic*(&target[idx], ...)` write to this buffer?
+- Look for `cudaMemset` on the target's device buffer between kernel launches (zero-reset implies the buffer is overwritten each iteration)
+- Look for `cudaMemcpy H→D` to the target's device buffer between kernel launches (implies the host re-initializes it each iteration)
+- Look for host-side reassignment in a benchmark repeat loop (`for (int i = 0; i < repeat; ++i) { target[k] = ...; }`)
+
+If ANY of those are present, the target is mutable — do NOT apply `*_unchanged` to it.
+
+**Safe candidates for `*_unchanged`:**
+- Scalar problem-spec constants: `N`, `M`, `num_keys`, `num_iterations`, `dims`, etc. — values that define problem size and never change during execution
+- Read-only input arrays that the LLM has verified are never written to by any kernel or host-side mutation between the assertion's capture point and the check point
+- Compile-time constants (`#define`, `constexpr`) — these are inherently immutable
+
+**CORRECT for a mutable output buffer:** Use a structural check that does not assume immutability.
+```cpp
+cudaMemcpy(lengths, d_lengths, N * sizeof(int), cudaMemcpyDeviceToHost);
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Output lengths are non-negative and within expected bound
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (lengths[i] < 0 || lengths[i] > MAX_EXPECTED_LENGTH) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_lengths_in_range]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
 ### ✅ CORRECT Alternatives for Each Case:
 
 **Case 1 (Order):** Check final sorted property on host

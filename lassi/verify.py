@@ -408,7 +408,31 @@ adapted to PROGRAM B's specific code structure.
     return extracted_code
 
 
-def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False, code_description=None):
+def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False, code_description=None, feedback=None):
+    """
+    Insert Tier 1 invariant assertions into the source code via LLM call.
+
+    The optional `feedback` parameter is used by the Stage 0 SOURCE_verify self-check
+    retry loop: when a previous instrumentation attempt produced assertions that fired
+    FAIL on SOURCE itself (i.e., the LLM asserted invariants that the source legitimately
+    violates), the calling code passes a feedback string identifying which assertion
+    labels failed. This string is prepended to the prompt so the LLM can revise its
+    selection rather than re-issuing the same broken instrumentation.
+    """
+
+    # --- Stage 0 retry feedback (when SOURCE_verify failed its own T1 check) ---
+    _feedback_prefix = ""
+    if feedback:
+        _feedback_prefix = (
+            "=== PREVIOUS ATTEMPT FEEDBACK ===\n"
+            + feedback + "\n"
+            "=== END PREVIOUS ATTEMPT FEEDBACK ===\n\n"
+            "Re-instrument the source code below taking the feedback above into account. "
+            "Do NOT re-introduce the failing assertion(s) in the same form. Either remove "
+            "them, or replace them with a different assertion on the same buffer/variable "
+            "that captures a genuine invariant (e.g., for a mutable output buffer use "
+            "output_finite or output_ptr_valid instead of *_unchanged).\n\n"
+        )
 
     # Append critical instruction to repsond with complete code
     content_prompt = """
@@ -605,6 +629,10 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     # Override with the verification insertion system prompt — preserves all existing code,
     # prevents the performance-optimization system prompt from compressing LASSI-VERIFY blocks.
     system_prompt = prompts.get_system_prompt("verify_insert")
+
+    # Prepend Stage 0 retry feedback (when supplied) so the LLM sees the failure context
+    # before reading the rest of the instrumentation prompt.
+    content_prompt = _feedback_prefix + content_prompt
 
     temp = 0.2
     if llm_source == "argo":
