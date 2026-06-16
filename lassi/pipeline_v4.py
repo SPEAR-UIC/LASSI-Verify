@@ -1760,6 +1760,35 @@ def auto_code_llmgeneration_pipeline(prompts,
             experiment_data["zeroshot_compile_status"] = zeroshot_compile_status
             experiment_data["zeroshot_execute_status"] = zeroshot_execute_status
             experiment_data["zeroshot_runtime_s"] = "NA"
+
+            # Emit a Table 2 attempt row for the failed zero-shot. The LLM judge was never
+            # called (code didn't even reach the judge stage), so the judge baseline verdict
+            # for this code is recorded as INVALID — a vanilla LLM that produces uncompilable
+            # or unexecutable code IS invalid by any reasonable definition, and the absence
+            # of a judge call should not leave the row blank in downstream analysis. The
+            # final_verdict matches (the framework cannot validate a code that doesn't run).
+            # override_applied names the specific failure mode for downstream filtering.
+            _zs_override = ("baseline_compile_failed"
+                            if zeroshot_compile_status == "compile_error"
+                            else "baseline_execute_failed")
+            _zs_rec = _build_attempt_record(
+                app_name=file_name, trial_number=trial_number,
+                code_block_index=len(code_blocks) - 1, attempt_number=1,
+                is_final_attempt=True, generation_type="zeroshot",
+                sc_trigger=None, llm_temperature=code_gen_temp,
+                compile_status=zeroshot_compile_status,
+                execute_status=zeroshot_execute_status,
+                runtime_s=None, energy_J=None, ave_power_W=None,
+                tier1_verdict="SKIP", tier1_instrumented_labels="", tier1_diagnostic={},
+                tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
+                tier3_verdict="SKIP", tier3_diagnostic={},
+                judge_baseline_verdict="INVALID",
+                judge_response_text="",
+                final_verdict="INVALID",
+                override_applied=_zs_override,
+            )
+            attempt_log_buffer.append(_zs_rec)
+
             # Reset flag because this should be a one-time action.
             force_save_baseline_llm = False
                     
