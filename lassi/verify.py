@@ -27,7 +27,30 @@ def _strip_prompt_tags(code):
     )
 
 
-def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False, code_description=None):
+def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False, code_description=None, feedback=None):
+    """
+    Insert Tier 2 passthrough data dump blocks into the source code via LLM call.
+
+    The optional `feedback` parameter is used by the Stage 0 SOURCE_verify retry
+    loop: when a previous passthrough-insertion attempt returned empty (no code
+    fence detected, or the line-count guard rejected a truncated output), the
+    calling code passes a feedback string explaining what went wrong and asking
+    for a corrected attempt. The feedback is prepended to the prompt so the LLM
+    sees the failure context before reading the rest of the instructions.
+    """
+
+    # --- Stage 0 retry feedback (when previous passthrough attempt returned empty) ---
+    _feedback_prefix = ""
+    if feedback:
+        _feedback_prefix = (
+            "=== PREVIOUS ATTEMPT FEEDBACK ===\n"
+            + feedback + "\n"
+            "=== END PREVIOUS ATTEMPT FEEDBACK ===\n\n"
+            "Re-instrument the source code below taking the feedback above into account. "
+            "Output the COMPLETE instrumented source wrapped in ``` fences. Do NOT truncate "
+            "with ellipsis or 'rest unchanged' placeholders. Preserve all existing "
+            "LASSI-VERIFY ASSERTIONS blocks; ADD new LASSI-VERIFY PASSTHROUGH blocks.\n\n"
+        )
 
     content_prompt = r"""
         You are preparing GPU-accelerated scientific code for Tier 2 empirical equivalence checking
@@ -241,6 +264,10 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
     # Override with the verification insertion system prompt — preserves all existing code,
     # prevents the performance-optimization system prompt from compressing LASSI-VERIFY blocks.
     system_prompt = prompts.get_system_prompt("verify_insert")
+
+    # Prepend Stage 0 retry feedback (when supplied) so the LLM sees the failure context
+    # before reading the rest of the instrumentation prompt.
+    content_prompt = _feedback_prefix + content_prompt
 
     temp = 0.2
     if llm_source == "argo":

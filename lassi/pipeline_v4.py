@@ -645,29 +645,85 @@ def auto_code_llmgeneration_pipeline(prompts,
         experiment_data["tier1_test_count"] = len(
             [s for s in _t1_labels_str.split(",") if s.strip()]) if _t1_labels_str else 0
 
-        # --- T2 passthrough insertion (if enabled) ---
+        # --- T2 passthrough insertion (if enabled), with inner retry loop ---
         # Applied to the T1-instrumented code so both block types appear in SOURCE_verify and
         # are carried through subsequent LLM transformations. Passthrough prompt preserves
         # existing LASSI-VERIFY ASSERTIONS blocks.
+        #
+        # The T2 LLM call can return empty for two reasons:
+        #   (a) Response had no ``` code fence → extraction failed (LLM produced prose only,
+        #       refused, or got cut by a token limit before opening a fence)
+        #   (b) Line-count guard rejected a truncated output (LLM used "// ... rest unchanged"
+        #       placeholders instead of emitting the complete instrumented source)
+        # Both are recoverable with feedback-driven re-prompting. This inner loop gives T2
+        # its own retry budget within the current T1 attempt — matching the structural
+        # symmetry argument that motivated the T1 retry. Pass@k=1 robustness depends on it.
+        # T2 retry exhaustion aborts the trial (the outer T1 loop will not "rescue" T2 by
+        # retrying T1, since T1 already succeeded in this iteration — burning T1 retries on
+        # T2 problems would just waste LLM calls).
         if run_tier2:
-            passthrough_code = lassi.verify.code_insert_passthrough(
-                input_code,  # already has Tier 1 assertions
-                llm_source, model, num_ctx, system_prompt, code_analysis, display_response,
-                verifyprompt=verifyprompt,
-                code_description=llm_code_description_response,
-            )
+            STAGE0_T2_RETRY_MAX = 3
+            _t2_retry_feedback = None
+            passthrough_code = ""
+            for _t2_attempt in range(1, STAGE0_T2_RETRY_MAX + 1):
+                if _t2_attempt > 1:
+                    print(color.BOLD + color.YELLOW +
+                          f"\n----- [STAGE 0 T2 RETRY {_t2_attempt - 1}/{STAGE0_T2_RETRY_MAX - 1}] "
+                          f"Re-attempting passthrough insertion with feedback -----" + color.END)
+                passthrough_code = lassi.verify.code_insert_passthrough(
+                    input_code,  # T1-instrumented code from this iteration's T1 call
+                    llm_source, model, num_ctx, system_prompt, code_analysis, display_response,
+                    verifyprompt=verifyprompt,
+                    code_description=llm_code_description_response,
+                    feedback=_t2_retry_feedback,
+                )
+                if passthrough_code != "":
+                    break  # T2 insertion succeeded
+                # Empty — build feedback for next T2 attempt
+                if _t2_attempt < STAGE0_T2_RETRY_MAX:
+                    _t2_retry_feedback = (
+                        "The previous Tier 2 passthrough instrumentation attempt returned EMPTY "
+                        "— your output did not yield a complete instrumented source code block "
+                        "that the pipeline's extractor could read.\n\n"
+                        "Possible causes:\n"
+                        "  1. The response did not include any ``` code fences. The extractor "
+                        "needs the complete output wrapped in ```...``` (or ```cpp ... ```) "
+                        "fences to recover the instrumented source.\n"
+                        "  2. The response truncated the source using placeholder comments "
+                        "(e.g. \"// ... [other kernels unchanged] ...\", \"// rest of code "
+                        "unchanged\", \"// same as before\"). The line-count guard rejects any "
+                        "output shorter than the input — instrumentation only ADDS lines.\n"
+                        "  3. The response output explanation prose only without an actual "
+                        "code block. The Stage 1 contract requires the complete instrumented "
+                        "source as the output.\n\n"
+                        "For this re-attempt:\n"
+                        "  - Output the COMPLETE source code from the first #include line "
+                        "through the final closing brace, with passthrough blocks ADDED in "
+                        "addition to all existing code.\n"
+                        "  - Wrap the entire output in ``` fences (```cpp ... ``` is fine).\n"
+                        "  - Do NOT use ellipsis, \"rest unchanged\", or any shorthand notation.\n"
+                        "  - Preserve every existing LASSI-VERIFY ASSERTIONS block unchanged.\n"
+                        "  - Add LASSI-VERIFY PASSTHROUGH blocks at observation points per the "
+                        "catalog guidance — at minimum one block capturing the kernel-written "
+                        "output buffer after its D->H copy."
+                    )
+
             if passthrough_code != "":
                 input_code = passthrough_code
                 input_content_llmjudge_dict["source_code"] = input_code
-                print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify -----")
+                _t2_success_attempt_msg = (f" (succeeded on T2 attempt {_t2_attempt}/{STAGE0_T2_RETRY_MAX})"
+                                            if _t2_attempt > 1 else "")
+                print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify{_t2_success_attempt_msg} -----")
                 _t2_labels_str = lassi.verify.extract_tier2_labels(input_code)
                 experiment_data["tier2_test_count"] = len(
                     [s for s in _t2_labels_str.split(",") if s.strip()]) if _t2_labels_str else 0
             else:
-                # No retry for T2 insertion failure — different failure mode; preserve original abort.
+                # T2 retries exhausted within this T1 attempt — abort the trial. Do NOT fall
+                # back to retrying T1 (T1 succeeded; further T1 retries won't fix T2 quality).
                 print(color.RED + color.BOLD +
-                      "\n[ABORT] Tier 2: code_insert_passthrough() returned empty — cannot run "
-                      "LASSI-Verify without Tier 2 coverage. Exiting pipeline." + color.END)
+                      f"\n[ABORT] Tier 2: code_insert_passthrough() returned empty after "
+                      f"{STAGE0_T2_RETRY_MAX} attempts — cannot run LASSI-Verify without Tier 2 "
+                      f"coverage. Exiting pipeline." + color.END)
                 experiment_data["stage0_abort_reason"] = "no_t2_passthrough"
                 _abort_monitor_log_path = os.path.join(experiment_data_directory,
                     "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
