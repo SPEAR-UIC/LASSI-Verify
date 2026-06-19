@@ -260,6 +260,14 @@ def experimental_setup(cfg):
     # -----------------------------------------------------------------------
     run_llm_judge = cfg["verification"]["run_llm_judge"]  # True to enable LLM judge; False for pure three-tier LASSI-Verify mode
 
+    # CHAIN VERIFICATION CONFIGURATION
+    # run_witness_chain=True: install the witness-chain harness (cheat-resistant loop-deletion
+    # detection) via a SEPARATE Stage 0 insertion step + deterministic per-variant re-insertion.
+    # Requires run_tier2 (the witness chain state is compared via the [witness_chain_state] passthrough).
+    # Defaults True when absent from the config so existing config files keep working.
+    # -----------------------------------------------------------------------
+    run_witness_chain = cfg["verification"].get("run_witness_chain", True)
+
     # ASSIGN CODE COMPILE COMMAND
     code_build_script = ""
     code_compiler = ""
@@ -514,6 +522,9 @@ def experimental_setup(cfg):
         "zeroshot_tier2_verdict",    # ★ T2 empirical equivalence verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_tier3_verdict",    # ★ T3 metamorphic testing verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_empirical_verdict", # ★ composite empirical verdict (PASS/FAIL/SKIP)
+        # ★ Witness Chain (cheat-resistant loop-deletion detection — see planning/chain_verify_design.md):
+        "witness_chain_status",       # ★ "applied_decision_tree_case_N" (N=1..8) | "applied_creative" | "soft_flag_no_safe_site"
+        "witness_chain_mismatches",   # ★ count of LASSI variants where witness_chain_state differed from source's (cheats detected)
         "stage0_abort_reason"        # ★ set when Stage 0 aborts (None for completed trials)
     ]
 
@@ -522,7 +533,7 @@ def experimental_setup(cfg):
             experiment, display_response, test_with_error, generate_test_case, power_measure, yes_power_feedback, baseline_oneshot_goal, use_self_prompting, vary_llm_temp,
             verifyprompt, DATAFIELDNAMES, detected_vendor.upper(),
             run_tier2, tier2_tolerance, run_tier3, tier3_tolerance,
-            run_llm_judge)
+            run_llm_judge, run_witness_chain)
 
 
 # EXPERIMENTAL DATA COLLECTION MANAGEMENT
@@ -559,7 +570,7 @@ original_home_directory = os.getcwd()
     display_response, test_with_error, generate_test_case, power_measure, yes_power_feedback, baseline_oneshot_goal,
     use_self_prompting, vary_llm_temp, verifyprompt, DATAFIELDNAMES, gpu_vendor,
     run_tier2, tier2_tolerance, run_tier3, tier3_tolerance,
-    run_llm_judge
+    run_llm_judge, run_witness_chain
 ) = experimental_setup(_cfg)
 
 # IMPORT CONTEXT KNOWLEDGE FOR TARGET PROGRAMMING LANGUAGE
@@ -787,6 +798,7 @@ while trial_number <= total_trials:
             run_tier3=run_tier3,
             tier3_tolerance=tier3_tolerance,
             run_llm_judge=run_llm_judge,
+            run_witness_chain=run_witness_chain,
             attempt_log_file_path=attempt_log_file_path
         )
     except Exception as _crash_exc:

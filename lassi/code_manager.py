@@ -18,8 +18,30 @@ from lassi.amd_power import AMDPowerMonitor, amd_power_collection_thread, amd_re
 from lassi.gpu_detector import detect_gpu_vendors
 
 
+# --- Witness chain seed (set per trial by pipeline_v4.py) ---
+# Module-level state: the pipeline calls set_witness_chain_seed() at the top of each trial
+# with a freshly-generated 64-bit random seed (hex string, e.g. "0xdeadbeefcafebabe").
+# Every subprocess launched by execute_code() / execute_code_amd() inherits this seed via
+# the LASSI_VERIFY_SEED env var. The seed is unknown to the LLM at code-generation time,
+# which is the property that makes the witness-chain mechanism cheat-resistant.
+_witness_chain_seed_hex = None
 
-def execute_code_selectvendor(experiment_data_directory, code_version, zero_shot, trial_number, 
+
+def set_witness_chain_seed(seed_hex):
+    """Called by pipeline_v4.py once per trial. seed_hex is a hex string like '0xdeadbeef...'."""
+    global _witness_chain_seed_hex
+    _witness_chain_seed_hex = seed_hex
+
+
+def _build_witness_chain_env():
+    """Return an env dict (copy of os.environ) with LASSI_VERIFY_SEED set if a seed is active."""
+    env = os.environ.copy()
+    if _witness_chain_seed_hex is not None:
+        env["LASSI_VERIFY_SEED"] = _witness_chain_seed_hex
+    return env
+
+
+def execute_code_selectvendor(experiment_data_directory, code_version, zero_shot, trial_number,
                             directory, executable_file, exe_input_parameters, power_measure, 
                             code_source, target_lang, build_script, make_script, 
                             gpu_vendor="auto", wait=10):
@@ -288,7 +310,7 @@ def execute_code(experiment_data_directory, code_version, zero_shot, trial_numbe
                 stdout_lines = []
                 stderr_lines = []
                 for i in range(0, repeat):
-                    process = subprocess.Popen(execute_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    process = subprocess.Popen(execute_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_build_witness_chain_env())
                     exception_error = ""
                     
                     # Print the output in real-time
@@ -547,7 +569,7 @@ def execute_code_amd(experiment_data_directory, code_version, zero_shot, trial_n
                 stderr_lines = []
                 
                 for i in range(0, repeat):
-                    process = subprocess.Popen(execute_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    process = subprocess.Popen(execute_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_build_witness_chain_env())
                     exception_error = ""
                     
                     print("\n----- < BEGIN: STANDARD OUTPUT FROM CODE EXECUTION > -----\n")

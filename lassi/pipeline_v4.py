@@ -12,6 +12,7 @@ import csv
 import json
 import re
 import math
+import secrets
 import time
 import gc
 from datetime import datetime
@@ -227,6 +228,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                                      run_llm_judge=True,     # Enable LLM-as-a-judge functional equivalence check (pre-Tier-1/2 stop-gap; disable for pure three-tier mode)
                                      run_tier3=False,        # Enable Tier 3 metamorphic testing
                                      tier3_tolerance=1e-5,   # Default relative tolerance for metamorphic relation checks (slightly looser than Tier 2 to account for two independently-accumulated FP runs)
+                                     run_witness_chain=True,  # Enable witness-chain harness (cheat-resistant loop-deletion detection) via a SEPARATE Stage 0 insertion step + deterministic per-variant re-insertion; requires run_tier2 (uses the [witness_chain_state] passthrough comparison)
                                      verify_zeroshot=True,   # Enable empirical Tier 1/2/3 verification of the zero-shot code (single attempt, fail-fast, no retries; results recorded separately from LLM judge)
                                      attempt_log_file_path=None  # Path to per-attempt CSV (Table 2 ★); None = skip writing
                                     ):
@@ -311,6 +313,19 @@ def auto_code_llmgeneration_pipeline(prompts,
                                     # complementary/orthogonal strategies rather than re-proposing applied ones.
     iteration_log = {}  # initiate the iteration log for each code version
     verification_log = {}  # iniiate a dict log for code verifications
+
+    # --- Chain verification seed (per-trial, runtime-injected via env var) ---
+    # Generate a fresh 64-bit random seed at the top of each trial. This seed is unknown to
+    # the LLM at code-generation time, which is the property that makes the witness-chain
+    # mechanism cheat-resistant against loop-deletion attacks (chacha20 v5-style). The seed
+    # is injected into every subprocess that executes an instrumented binary (SOURCE_verify,
+    # basellm_zs_verify, each LASSI variant, each T3 metamorphic variant) via the
+    # LASSI_VERIFY_SEED environment variable. See planning/chain_verify_design.md for full
+    # design and lassi/context/Invariant_Assertions_Catalog.md "Chain Verification" section
+    # for the catalog-side instrumentation pattern.
+    _trial_witness_chain_seed_hex = f"0x{secrets.randbits(64):016x}"
+    lassi.code_manager.set_witness_chain_seed(_trial_witness_chain_seed_hex)
+    verification_log["witness_chain_seed"] = _trial_witness_chain_seed_hex
     # iteration_log[version] = {"self_correction": 0, "energy_refactor": 0, "LLM_temperature": 0}
     # --- Table 2 per-attempt log state variables ---
     attempt_number = 0              # Attempt counter within the current code_block_index; resets on fresh generation
@@ -544,6 +559,15 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["basellm_zs_verify_runtime_s"] = "NA"
     experiment_data["basellm_zs_verify_energy_J"] = "NA"
 
+    # Chain Verification — per-trial fields populated by the framework as the trial
+    # progresses. witness_chain_status records which decision-tree case the Stage 1 LLM
+    # matched (or "applied_creative" / "soft_flag_no_safe_site"); witness_chain_mismatches
+    # counts LASSI variants whose witness_chain_state diverged from source's value
+    # (cheat-detection signal). Default values cover trials where the witness-chain never
+    # activates (e.g., source has no benchmark timing loop).
+    experiment_data["witness_chain_status"] = "not_applied_no_timing_loop"
+    experiment_data["witness_chain_mismatches"] = 0
+
     # Stage 1 per-trial test counts: how many tests of each tier were successfully
     # instrumented in SOURCE_verify and made active for THIS trial. Captures the
     # stochastic Stage 1 LLM behavior (insertion + contract generation + source filter)
@@ -591,6 +615,9 @@ def auto_code_llmgeneration_pipeline(prompts,
     sourcecode_ave_power = 0
     duration = 0
     source_verify_stdout = ""
+    # Witness-chain status for SOURCE_verify (set by the witness-chain insertion step each attempt;
+    # the final-attempt value persists). Default covers run_witness_chain/run_tier2 disabled.
+    _witness_chain_status = "not_applied_no_timing_loop"
 
     for _stage0_attempt in range(1, STAGE0_T1_RETRY_MAX + 1):
         if _stage0_attempt > 1:
@@ -731,6 +758,34 @@ def auto_code_llmgeneration_pipeline(prompts,
                 lassi.monitor.save_log(_abort_monitor_log_path)
                 return False
 
+        # --- Chain verification harness insertion (SEPARATE Stage 1 step — Option D) ---
+        # Installed via its own focused LLM call (only the Witness_Chain_Harness.md catalog is
+        # loaded) so it does not compete with regular Tier 1 assertion selection. Applies only
+        # when a benchmark timing/repeat loop is present; otherwise returns the code unchanged.
+        # Requires run_tier2 because the chain state is compared via the [witness_chain_state]
+        # passthrough block. Runs inside the Stage 0 retry loop so a broken harness is caught and
+        # re-instrumented by the existing SOURCE_verify compile/execute retry below.
+        if run_witness_chain and run_tier2:
+            _cv_code, _witness_chain_status = lassi.verify.code_insert_witness_chain(
+                input_code, llm_source, model, num_ctx, system_prompt, display_response,
+                verifyprompt=verifyprompt, code_description=llm_code_description_response,
+                is_variant=False,
+            )
+            input_code = _cv_code
+            input_content_llmjudge_dict["source_code"] = input_code
+            print(f"\n----- LASSI-Verify Chain Verification: status={_witness_chain_status} -----")
+            # Persist the status NOW (not just at the end-of-Stage-0 finalization at
+            # ~line 907) so that if Stage 0 aborts later (compile error, execute timeout,
+            # T1 self-check failure on the instrumented source), the CSV/JSON still
+            # reflect the actual witness-chain status from this attempt rather than
+            # the stale "not_applied_no_timing_loop" default initialized at ~line 568.
+            # Idempotent: the post-Stage-0 finalization overwrites with the same final
+            # value on the happy path; on a retry the value here gets overwritten by
+            # the next iteration's insertion. Either way, the most recent applied
+            # status survives a trial abort.
+            experiment_data["witness_chain_status"] = _witness_chain_status
+            verification_log["witness_chain_status"] = _witness_chain_status
+
         # --- Write SOURCE_verify and run it ---
         # Instrumented source is an experiment artifact, not a permanent modification of the
         # benchmark source. After this point, the pipeline always uses code_blocks[1] (in-memory).
@@ -858,6 +913,13 @@ def auto_code_llmgeneration_pipeline(prompts,
     passthrough_spec_output = source_verify_stdout
     verification_log["tier2_spec_output"] = passthrough_spec_output
 
+    # Record the chain-verification status SOURCE_verify settled on (set inside the Stage 0 loop).
+    # _witness_chain_applied gates per-variant re-insertion in the main loop below.
+    experiment_data["witness_chain_status"] = _witness_chain_status
+    verification_log["witness_chain_status"] = _witness_chain_status
+    _witness_chain_applied = (run_witness_chain and run_tier2
+                             and str(_witness_chain_status).startswith("applied"))
+
     # Initialize per-code-block stdout list (indexed like code_blocks):
     #   [0] = SOURCE_orig stdout (no passthrough instrumentation)
     #   [1] = SOURCE_verify stdout (Tier 2 reference)
@@ -939,7 +1001,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             print(f"\n----- LASSI-Verify Tier 3: running SOURCE_verify metamorphic variants "
                   f"(filter, attempt {_t3_attempt}/{TIER3_CONTRACT_MAX_ATTEMPTS}) -----")
             _, filter_results, _ = lassi.verify.run_metamorphic_variants(
-                input_code,                 # SOURCE_verify code
+                lassi.verify._strip_witness_chain_blocks(input_code),  # SOURCE_verify (witness-chain harness stripped: Tier 3 does not compare chain state)
                 tier3_contract["relations"],
                 tier3_contract,
                 passthrough_spec_output,    # SOURCE_verify's own Tier 2 passthrough output (Tier 3 baseline)
@@ -1378,6 +1440,46 @@ def auto_code_llmgeneration_pipeline(prompts,
                 + tier2_diag_summary
             )
 
+            # --- Special-case: witness_chain_state failure gets cheat-detection-specific feedback ---
+            # The generic "fix the passthrough" guidance isn't actionable for [witness_chain_state]
+            # because the chain state can only match source's value if the timed kernel is actually
+            # invoked `repeat` times with the per-iteration perturbation applied. There is no
+            # analytical shortcut. Detect this label and substitute targeted wording so the LLM
+            # gets a direct diagnosis ("you skipped iterations / batched the work / removed the
+            # harness") rather than generic "values don't match" guidance.
+            _chain_failure_present = any(
+                str(f.get("label", "")).startswith("witness_chain_state") for f in _failures
+            )
+
+            if _chain_failure_present:
+                _closing_guidance = (
+                    "The `[witness_chain_state]` passthrough captures a chain hash that depends on "
+                    "each iteration's actual kernel output combined with a runtime-injected seed. "
+                    "A mismatch here indicates the variant did not run the timed kernel the full "
+                    "`repeat` number of times, OR skipped iterations via batching, precomputation, "
+                    "or analytical shortcuts. THERE IS NO SHORTCUT: the chain state can only match "
+                    "the source's value if the timed kernel is actually invoked `repeat` times with "
+                    "the per-iteration witness-chain harness (sentinel-write → kernel → chain_update) "
+                    "applied as specified by the catalog's Witness Chain section. Restructure the "
+                    "refactor so the timed kernel is invoked exactly `repeat` times in the timed "
+                    "region, with the harness blocks preserved verbatim around each invocation. "
+                    "CUDA Graph batching IS acceptable (the graph still executes `repeat` actual "
+                    "kernel invocations on the GPU); replacing the loop with a single kernel call "
+                    "that ignores `repeat`, batching the chain updates analytically, or pre-computing "
+                    "the chain state from the seed is NOT acceptable and will continue to fail this "
+                    "check. Do NOT remove or modify any LASSI-VERIFY ASSERTIONS, PASSTHROUGH, or "
+                    "WITNESS_CHAIN blocks."
+                )
+            else:
+                _closing_guidance = (
+                    "Fix the generated code so that its passthrough observation point output matches "
+                    "the source-as-specification reference within floating-point tolerance. "
+                    "Focus your fix on the specific block(s) and statistics listed in the failure table above. "
+                    "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
+                    "The issue likely involves incorrect computation, wrong algorithm, or wrong data "
+                    "transformation in the section of code that produces the failing passthrough block output."
+                )
+
             error_correction_prompt_intro = (
                 "\n\nThe above code compiled and executed successfully but FAILED LASSI-Verify "
                 "Tier 2 empirical equivalence checking. Its passthrough observation point output "
@@ -1388,12 +1490,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 "\n\n=== GENERATED CODE PASSTHROUGH OUTPUT ===\n"
                 + gen_output_excerpt +
                 "\n\n=== END TIER 2 DIAGNOSTIC ===\n\n"
-                "Fix the generated code so that its passthrough observation point output matches "
-                "the source-as-specification reference within floating-point tolerance. "
-                "Focus your fix on the specific block(s) and statistics listed in the failure table above. "
-                "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
-                "The issue likely involves incorrect computation, wrong algorithm, or wrong data "
-                "transformation in the section of code that produces the failing passthrough block output."
+                + _closing_guidance
             )
 
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
@@ -1728,8 +1825,33 @@ def auto_code_llmgeneration_pipeline(prompts,
         if code_block.startswith('c++') or code_block.startswith('cpp'):
             code_block = code_block[3:]
         if code_block.startswith('c'):
-            code_block = code_block[1:]    
-    
+            code_block = code_block[1:]
+
+        # --- Chain verification harness: deterministic re-insertion into this variant ---
+        # The optimizing transform may have restructured or removed the timed loop, so we do NOT
+        # rely on the refactoring LLM to preserve the harness blocks. We strip any (possibly
+        # mangled) harness and re-install a fresh one around the variant's CURRENT structure via a
+        # dedicated, focused call. This is the deterministic step that fixes the false-positive
+        # Tier 2 failures: the optimizer is free to transform the loop, and the framework
+        # guarantees the harness is present and computed identically — so a [witness_chain_state]
+        # mismatch after re-insertion genuinely means the variant performed fewer real kernel
+        # invocations than the source (a dropped-work cheat), not that it disturbed the harness.
+        #
+        # Skipped on raw compile/execute-error correction passes: those are fixing the already-
+        # harnessed code, and re-stripping+reinserting could undo the fix or loop. Tier-failure
+        # self-corrections (tier1/2/3) and fresh/improvement generations DO get re-inserted.
+        if (_witness_chain_applied and not zero_shot
+                and compile_result_before_generation in
+                    ("", "energy_efficiency", "tier1_failure", "tier2_failure", "tier3_failure")):
+            _cv_var_code, _cv_var_status = lassi.verify.code_insert_witness_chain(
+                code_block, llm_source, model, num_ctx, system_prompt, display_response,
+                verifyprompt=verifyprompt, code_description=llm_code_description_response,
+                is_variant=True,
+            )
+            code_block = _cv_var_code
+            print(f"\n----- LASSI-Verify Chain Verification (variant re-install): "
+                  f"status={_cv_var_status} -----")
+
         print("\n\n----- " + color.BOLD + color.BLUE + "POST-PROCESSING of GENERATED CODE" + color.END + " -----\n")
         print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
         
@@ -2205,6 +2327,13 @@ def auto_code_llmgeneration_pipeline(prompts,
                         "verdict": tier2_verdict,
                         "diagnostic": tier2_diagnostic,
                     })
+                # Witness-chain mismatch (cheat-detection signal): a [witness_chain_state] failure
+                # means this variant's chain hash diverged from SOURCE_verify's — it performed
+                # fewer real kernel invocations than the source (dropped-work cheat).
+                if any(str(f.get("label", "")).startswith("witness_chain_state")
+                       for f in tier2_diagnostic.get("failures", [])):
+                    experiment_data["witness_chain_mismatches"] = \
+                        experiment_data.get("witness_chain_mismatches", 0) + 1
 
             passthrough_outputs.append(exe_output_generated)  # record stdout for every generated attempt
 
@@ -2285,7 +2414,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # passthrough_outputs[-1] is the stdout just appended above (this iteration's run).
                 generated_passthrough_stdout = passthrough_outputs[-1] if passthrough_outputs else ""
                 tier3_verdict, tier3_results_this_iter, tier3_diagnostic = lassi.verify.run_metamorphic_variants(
-                    code_blocks[-1],             # generated code source
+                    lassi.verify._strip_witness_chain_blocks(code_blocks[-1]),  # generated code (witness-chain harness stripped: Tier 3 does not compare chain state)
                     tier3_active_relations,
                     tier3_contract,
                     generated_passthrough_stdout,  # generated code's own output as Tier 3 baseline (Y)
@@ -2422,6 +2551,19 @@ def auto_code_llmgeneration_pipeline(prompts,
                     display_response, verifyprompt=verifyprompt,
                 )
 
+                # Install the witness-chain harness into the zero-shot variant the same way as
+                # for LASSI variants (deterministic re-insertion), so its [witness_chain_state]
+                # passthrough is comparable to the SOURCE_verify spec. The template replication above
+                # may have copied a partial/garbled harness; code_insert_witness_chain strips any
+                # existing harness first, then installs a fresh one around the zero-shot structure.
+                if _witness_chain_applied and _zs_instr:
+                    _zs_instr, _zs_cv_status = lassi.verify.code_insert_witness_chain(
+                        _zs_instr, llm_source, model, num_ctx, system_prompt, display_response,
+                        verifyprompt=verifyprompt, code_description=llm_code_description_response,
+                        is_variant=True,
+                    )
+                    print(f"\n----- Zero-Shot Empirical Verify: witness-chain re-install status={_zs_cv_status} -----")
+
                 _zs_stdout = ""          # combined-binary stdout; T1+T2 verdicts parsed from here
                 _zs_combined_ok = False  # True iff instrumentation+compile+execute all succeeded
                 if not _zs_instr:
@@ -2495,7 +2637,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                             and zs_tier1_verdict == "PASS" and zs_tier2_verdict == "PASS"):
                         print(f"\n----- Zero-Shot Empirical Verify: Tier 3 -----")
                         _zs_t3_verdict, _zs_t3_results, _zs_t3_diag = lassi.verify.run_metamorphic_variants(
-                            _zs_instr,
+                            lassi.verify._strip_witness_chain_blocks(_zs_instr),  # witness-chain harness stripped: Tier 3 does not compare chain state
                             tier3_active_relations,
                             tier3_contract,
                             _zs_stdout,
@@ -3303,9 +3445,25 @@ def auto_code_llmgeneration_pipeline(prompts,
         # overhead (SOURCE_verify vs SOURCE_orig), not an optimization result — suppress as N/A.
         experiment_data["lassiee_energy_diff"] = round(((energy_history[best_index] - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if best_index > 1 and power_measure and sourcecode_total_energy_joules != 0 else "N/A"
         experiment_data["lassiee_avg_power_diff"] = round(((power_history[best_index] - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if best_index > 1 and power_measure and sourcecode_ave_power != 0 else "N/A"
-        # Baseline: runtime_history[0] = SOURCE_orig (uninstrumented). duration at this point
-        # is SOURCE_verify runtime (overwritten at Stage 0b); using it would give an inflated diff.
-        experiment_data["lassiee_runtime_diff"] = round(((runtime_history[best_index] - runtime_history[0]) / runtime_history[0]) * 100 ,2) if best_index > 1 and len(runtime_history) > 0 and runtime_history[0] != 0 else "N/A"
+        # Runtime diff prefers a CLEAN-vs-CLEAN comparison (uninstrumented LASSI best, via
+        # the strip-and-rebuild step, vs runtime_history[0] = SOURCE_orig uninstrumented).
+        # When the clean rebuild failed (compile_error from dangling harness references, an
+        # LLM-restructured loop the strip pattern didn't recognize, etc.), fall back to an
+        # apples-to-apples INSTRUMENTED comparison: runtime_history[best_index] (instrumented
+        # LASSI winner) vs runtime_history[1] (SOURCE_verify, also instrumented). The earlier
+        # silent fallback to runtime_history[0] (clean source) as the denominator produced an
+        # invalid number that conflated optimization with instrumentation overhead.
+        # To distinguish the two cases when reading the CSV: lassiee_clean_status == "success"
+        # ⇒ diff is clean-vs-clean; otherwise diff is instrumented-vs-instrumented.
+        if best_index > 1:
+            if lassiee_clean_status == "success" and lassiee_clean_runtime_s != "NA" and len(runtime_history) > 0 and runtime_history[0] != 0:
+                experiment_data["lassiee_runtime_diff"] = round(((lassiee_clean_runtime_s - runtime_history[0]) / runtime_history[0]) * 100, 2)
+            elif len(runtime_history) > 1 and runtime_history[1] != 0:
+                experiment_data["lassiee_runtime_diff"] = round(((runtime_history[best_index] - runtime_history[1]) / runtime_history[1]) * 100, 2)
+            else:
+                experiment_data["lassiee_runtime_diff"] = "N/A"
+        else:
+            experiment_data["lassiee_runtime_diff"] = "N/A"
         match_code_comparison_response = re.search(r"\[OPTIMIZATION LIST\](.*?)\[/OPTIMIZATION LIST\]", code_comparison_response, re.DOTALL)
         if match_code_comparison_response:
             optimization_list_text = match_code_comparison_response.group(1).strip()

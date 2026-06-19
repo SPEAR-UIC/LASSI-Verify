@@ -435,6 +435,178 @@ adapted to PROGRAM B's specific code structure.
     return extracted_code
 
 
+# Status tokens emitted/parsed by code_insert_witness_chain(). These mirror the
+# witness_chain_status values logged per trial. The current mechanism is output-buffer
+# sentinel writing (see planning/chain_verify_output_poisoning_redesign.md for the
+# design rationale; "poison" was renamed to "sentinel" and the overall mechanism to
+# "witness chain"). The original input-perturbation design is in
+# planning/chain_verify_design.md for historical context.
+WITNESS_CHAIN_STATUS_NOT_APPLIED = "not_applied_no_timing_loop"
+WITNESS_CHAIN_STATUS_SOFT_FLAG   = "soft_flag_no_safe_site"
+WITNESS_CHAIN_STATUS_INSERT_ERROR = "insert_error"
+
+
+def _strip_witness_chain_blocks(code):
+    """Remove all witness-chain harness blocks from a code string.
+
+    Strips three categories of harness artifact:
+
+    1. WITNESS_CHAIN comment-delimited blocks (file-scope declarations + helper kernels,
+       host init, per-iteration pre/post wrapping).
+    2. The dedicated [witness_chain_state] PASSTHROUGH block. Other PASSTHROUGH blocks
+       (normal Tier 2 observables) are left untouched.
+    3. SAFETY-NET fallback: any raw `_t1_chain_*<<<...>>>(...);` kernel-launch call site
+       that escaped the delimiter strip — for example, when the LLM restructured the timed
+       loop into a CUDA Graph capture region and placed the sentinel-write / chain-update
+       launches without surrounding delimiter comments. The harness template forbids this
+       (delimiters are MANDATORY), but the safety net keeps the clean rebuild compilable
+       when the template instruction is violated.
+
+    This makes witness-chain (re)insertion idempotent: before installing the harness into
+    SOURCE_verify or re-installing it into an already-refactored variant, strip any existing
+    (possibly mangled) harness so blocks are never duplicated or compounded. It also makes
+    the strip-and-rebuild step that produces uninstrumented runtimes robust against the
+    most common LLM template violation.
+    """
+    code = re.sub(
+        r'[ \t]*// >>> BEGIN LASSI-VERIFY WITNESS_CHAIN.*?// <<< END LASSI-VERIFY WITNESS_CHAIN <<<\n?',
+        '', code, flags=re.DOTALL)
+    code = re.sub(
+        r'[ \t]*// >>> BEGIN LASSI-VERIFY PASSTHROUGH \[witness_chain_state\].*?// <<< END LASSI-VERIFY PASSTHROUGH <<<\n?',
+        '', code, flags=re.DOTALL)
+    # Safety net: remove any raw _t1_chain_* kernel-launch call site (whole line) that
+    # survived the delimiter strip. Matches lines like
+    #     _t1_chain_write_sentinel<<<1,1>>>(d_output);
+    #     _t1_chain_update<<<1,1,0,stream>>>(d_output);
+    # No host function in this codebase shares the `_t1_chain_*<<<` launch pattern, so
+    # this is unambiguous.
+    code = re.sub(
+        r'^[ \t]*_t1_chain_\w+<<<[^>]*>>>\s*\([^)]*\);[ \t]*\n?',
+        '', code, flags=re.MULTILINE)
+    return code
+
+
+def code_insert_witness_chain(source_code, llm_source, model, num_ctx, system_prompt,
+                              display_response, verifyprompt=False, code_description=None,
+                              is_variant=False):
+    """
+    Insert (or re-insert) the witness-chain harness into source_code via a dedicated,
+    focused LLM call — kept SEPARATE from Tier 1 invariant-assertion selection (Option D).
+
+    Loads ONLY the Witness_Chain_Harness.md catalog so the LLM focuses on the single mechanical
+    task of installing the harness around the timed kernel invocation, rather than competing with
+    regular Tier 1 assertion selection for attention (the cause of the no_t1_assertions regression).
+
+    Idempotency / re-insertion: any pre-existing WITNESS_CHAIN harness is stripped first. This is
+    what makes re-insertion into an already-refactored variant safe — the framework strips the
+    variant's possibly-mangled harness and installs a fresh one around the variant's CURRENT loop
+    structure. The optimizing transform is therefore free to restructure the timed loop; the
+    framework guarantees the harness is present and computed identically, so a chain-state mismatch
+    then genuinely means the variant performed fewer real kernel invocations than the source.
+
+    is_variant=True selects the re-installation framing (the timed loop may have been restructured).
+
+    Returns:
+        (instrumented_code, status) where status is one of:
+          "applied_decision_tree_case_N" (N=1..8) | "applied_creative" |
+          "soft_flag_no_safe_site" | "not_applied_no_timing_loop" | "insert_error"
+        When the harness is not applied (no timing loop / no safe site) the returned code is the
+        input with any prior harness stripped. On extraction failure, status is "insert_error" and
+        the stripped input is returned unchanged.
+    """
+    # Idempotency: remove any existing harness so we never duplicate/compound blocks.
+    stripped = _strip_witness_chain_blocks(source_code)
+
+    if is_variant:
+        task_intro = (
+            "You are RE-INSTALLING the LASSI-Verify witness-chain harness into a GPU program "
+            "that has ALREADY been refactored by an optimizing transform. Its timing loop may have "
+            "been restructured, fused, converted to a CUDA Graph, or otherwise changed. Install the "
+            "harness around the program's CURRENT timed-kernel structure exactly as it now exists — "
+            "do not impose a loop the program does not have, and do not change its compute logic.\n\n"
+        )
+    else:
+        task_intro = (
+            "You are installing the LASSI-Verify witness-chain harness into a GPU benchmark "
+            "source program. Follow the harness instructions below exactly.\n\n"
+        )
+
+    content_prompt = task_intro
+    content_prompt += prompts.get_codeknowledge("witness_chain")
+    content_prompt += "\n\n----\n\n"
+    if code_description:
+        content_prompt += (
+            "**SOURCE CODE DESCRIPTION** — use this to locate the benchmark timing/repeat loop and "
+            "the primary timed-kernel input type for the Decision Tree.\n\n"
+            " [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description +
+            "\n[/END SOURCE CODE DESCRIPTION AND ANALYSIS]\n\n"
+        )
+    content_prompt += " [BEGIN SOURCE CODE]\n" + stripped + "\n[/END SOURCE CODE]\n"
+
+    print("\n----- " + color.BOLD + color.PURPLE + "STARTING CODE INSERT - Witness Chain Harness"
+          + (" (variant re-install)" if is_variant else "") + color.END + " -----\n")
+
+    # Surgical-insertion system prompt (preserve all existing code exactly).
+    system_prompt = prompts.get_system_prompt("verify_insert")
+
+    temp = 0.2
+    if llm_source == "argo":
+        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "lmstudio":
+        response_text = lmstudio_llm(model, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "ollama":
+        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
+    elif llm_source == "cerebras":
+        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
+    else:
+        print("Invalid LLM source")
+        response_text = ""
+
+    print("< BEGIN: LLM GENERATED CODE · Witness Chain harness >")
+    print(response_text)
+    print("< END: LLM GENERATED CODE >")
+
+    # --- Parse the WITNESS_CHAIN_STATUS token (emitted on its own line, outside the code fence) ---
+    status = None
+    _status_match = re.search(r'WITNESS_CHAIN_STATUS:\s*([A-Za-z0-9_]+)', response_text)
+    if _status_match:
+        status = _status_match.group(1).strip()
+
+    # --- Extract the code fence ---
+    match = re.search(r"```(.*?)```", response_text, re.DOTALL)
+    if match:
+        extracted_code = match.group(1)
+        extracted_code = re.sub(r'^[a-zA-Z+]+\n', '', extracted_code)  # strip language specifier
+        extracted_code = _strip_prompt_tags(extracted_code)
+    else:
+        extracted_code = ""
+
+    # If the LLM reported (or we infer) that the harness was not applied, return the stripped
+    # input verbatim — we deliberately do not trust the LLM's echoed body for the unchanged case.
+    if status in (WITNESS_CHAIN_STATUS_NOT_APPLIED, WITNESS_CHAIN_STATUS_SOFT_FLAG):
+        return stripped, status
+
+    # Applied path: require a real code fence that actually contains the harness.
+    harness_present = ("LASSI-VERIFY WITNESS_CHAIN" in extracted_code
+                       and "witness_chain_state" in extracted_code)
+    if not extracted_code or not harness_present:
+        print(f"\n[WARNING] Witness-chain insertion did not yield a harness-bearing code block "
+              f"(parsed status={status!r}). Returning stripped input unchanged.")
+        return stripped, WITNESS_CHAIN_STATUS_INSERT_ERROR
+
+    # Sanity: instrumentation only adds lines.
+    if len(extracted_code.splitlines()) <= len(stripped.splitlines()):
+        print(f"\n[WARNING] Witness-chain insertion output is not longer than input "
+              f"(input={len(stripped.splitlines())}, output={len(extracted_code.splitlines())}). "
+              f"Likely truncated. Returning stripped input unchanged.")
+        return stripped, WITNESS_CHAIN_STATUS_INSERT_ERROR
+
+    # Default applied status if the LLM omitted/garbled the token but the harness is present.
+    if not status or not status.startswith("applied"):
+        status = "applied_creative"
+    return extracted_code, status
+
+
 def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=False, code_description=None, feedback=None):
     """
     Insert Tier 1 invariant assertions into the source code via LLM call.
@@ -572,6 +744,11 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     - **(B) Post-loop reporting:** code after the outer loop closes (result printing,
       final D→H copies for reporting, validation against expected output)
     All assertions MUST be placed in zone (A) or zone (B) only.
+
+    (Detection of work-dropping cheats on idempotent benchmark timing loops — the chain
+    verification harness — is handled by a SEPARATE instrumentation step with its own catalog.
+    Do NOT add any perturb/unperturb/chain-state code in this Tier 1 assertion step; focus only
+    on selecting transformation-invariant assertions.)
 
     **Step 2 — Answer these questions about the computation:**
     - **What is the computational domain?** (e.g., linear algebra, CFD, molecular dynamics,
@@ -763,6 +940,19 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     # the source-as-specification, which is an unambiguous correctness violation
     # regardless of whether min/max/mean statistics happen to match.
     elements_pattern = re.compile(r'Elements:\s*(\d+)')
+    # Regex for the Value line — used by the [witness_chain_state] passthrough block,
+    # which carries a single 64-bit hex value rather than Statistics/Sample fields.
+    # The witness_chain_state value is compared with byte-exact equality (no tolerance):
+    # any single-bit difference between source and variant indicates the variant did
+    # not perform the same per-iteration work that source did. See the witness-chain
+    # harness template and planning/chain_verify_output_poisoning_redesign.md for the
+    # full rationale (allclose-style tolerance on a 64-bit hash would falsely accept
+    # mismatched chain states because bit-level diffs are dwarfed by the value scale).
+    value_pattern = re.compile(r'Value:\s*(\S+)')
+
+    # Label of the witness-chain passthrough block — handled with exact-string comparison
+    # instead of the standard Statistics/Sample numerical comparison.
+    WITNESS_CHAIN_LABEL = "witness_chain_state"
 
     def extract_blocks(stdout_text):
         """Return dict mapping label → ordered list of block body strings.
@@ -878,6 +1068,47 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
             failure_label = f"{label}#{i+1}" if multi else label
             blocks_compared += 1
 
+            # --- Special case: witness_chain_state block uses Value: line + exact match ---
+            # The witness_chain_state passthrough carries a 64-bit hash that must match
+            # byte-exactly between source and variant. Allclose-style numerical tolerance
+            # is wrong here (would falsely accept mismatched 64-bit values because bit-level
+            # diffs are dwarfed by the magnitude). String comparison of the Value: hex line
+            # gives the required exact-match semantics. Skip the stats/samples logic below.
+            if label == WITNESS_CHAIN_LABEL:
+                spec_val_m = value_pattern.search(spec_body)
+                gen_val_m  = value_pattern.search(gen_body)
+                # Chain failures use string-based comparison; include abs_err/atol
+                # set to inf/0 so the downstream summary formatter (which expects these
+                # fields on every failure) doesn't KeyError. The summary formatter has
+                # a chain_value_* branch that ignores these numeric fields.
+                if spec_val_m is None or gen_val_m is None:
+                    failures.append({
+                        "label":     failure_label,
+                        "stat":      "chain_value_missing",
+                        "spec":      spec_val_m.group(1) if spec_val_m else "(missing)",
+                        "generated": gen_val_m.group(1) if gen_val_m else "(missing)",
+                        "abs_err":   float('inf'),
+                        "atol":      0.0,
+                        "rel_err":   float('inf'),
+                    })
+                    max_rel_err = max(max_rel_err, float('inf'))
+                    continue
+                spec_val_str = spec_val_m.group(1).strip().lower()
+                gen_val_str  = gen_val_m.group(1).strip().lower()
+                if spec_val_str != gen_val_str:
+                    failures.append({
+                        "label":     failure_label,
+                        "stat":      "chain_value_mismatch",
+                        "spec":      spec_val_str,
+                        "generated": gen_val_str,
+                        "abs_err":   float('inf'),
+                        "atol":      0.0,
+                        "rel_err":   float('inf'),
+                    })
+                    max_rel_err = max(max_rel_err, float('inf'))
+                # On match, just continue (no failure recorded)
+                continue
+
             # Check element count first — a mismatch means the generated code operates
             # on a different problem size than the source specification. This is an exact
             # integer comparison: no tolerance. Only fail if BOTH blocks have parseable
@@ -978,6 +1209,13 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
         for f in failures:
             if f["stat"] == "block_missing":
                 fail_summary_parts.append(f"  [block_missing] label='{f['label']}': block absent in generated output")
+            elif f["stat"] in ("chain_value_mismatch", "chain_value_missing"):
+                # Chain-verify failures are string-based; the abs_err/atol/rtol fields
+                # are not meaningful for hex hash comparison. Show the values directly.
+                fail_summary_parts.append(
+                    f"  [{f['label']}] {f['stat']}: spec={f['spec']}, generated={f['generated']} "
+                    f"(64-bit chain hash; exact-match required)"
+                )
             else:
                 fail_summary_parts.append(
                     f"  [{f['label']}] {f['stat']}: spec={f['spec']}, generated={f['generated']}, "
@@ -3295,24 +3533,43 @@ def run_metamorphic_variants(source_code, active_relations, contract,
 
 def strip_verify_blocks(source_code):
     """
-    Remove all LASSI-VERIFY ASSERTIONS and LASSI-VERIFY PASSTHROUGH blocks from a
+    Remove all LASSI-VERIFY ASSERTIONS, PASSTHROUGH, and WITNESS_CHAIN blocks from a
     C++ source string. Returns uninstrumented code for clean performance measurement.
 
-    Block delimiter format (from Tier 1 / Tier 2 instrumentation):
-      Opening: // >>> BEGIN LASSI-VERIFY ASSERTIONS ...   >>>
-               // >>> BEGIN LASSI-VERIFY PASSTHROUGH ... >>>
+    Block delimiter format (from Tier 1 / Tier 2 / witness-chain instrumentation):
+      Opening: // >>> BEGIN LASSI-VERIFY ASSERTIONS ...    >>>
+               // >>> BEGIN LASSI-VERIFY PASSTHROUGH ...   >>>
+               // >>> BEGIN LASSI-VERIFY WITNESS_CHAIN ... >>>
       Closing: // <<< END LASSI-VERIFY ASSERTIONS <<<
                // <<< END LASSI-VERIFY PASSTHROUGH <<<
+               // <<< END LASSI-VERIFY WITNESS_CHAIN <<<
+
+    Additionally applies a safety-net pass: any raw `_t1_chain_*<<<...>>>(...);` kernel-launch
+    call site that escaped the delimiter strip is removed. The witness-chain harness template
+    requires every helper-kernel call to be enclosed in delimiter comments, but LLMs that
+    restructure the timed loop into a CUDA Graph capture region (or similar) sometimes place
+    the launches without surrounding delimiters. Without this safety net, the device function
+    definitions strip correctly but the dangling host call sites cause the clean rebuild to
+    fail with "undefined symbol" compile errors. (See planning/chain_verify_output_poisoning_redesign.md
+    for the failure-mode case study from KERNEL_TEST2_CHACHA_1 Trial 1 v12.)
     """
-    # Match opening: // >>> BEGIN LASSI-VERIFY (ASSERTIONS|PASSTHROUGH) ... \n
-    # Match closing:  // <<< END LASSI-VERIFY (ASSERTIONS|PASSTHROUGH) ...  \n
+    # Match opening: // >>> BEGIN LASSI-VERIFY (ASSERTIONS|PASSTHROUGH|WITNESS_CHAIN) ... \n
+    # Match closing:  // <<< END LASSI-VERIFY (ASSERTIONS|PASSTHROUGH|WITNESS_CHAIN) ...  \n
     # The closing pattern intentionally does NOT require a specific trailing arrow sequence
     # (<<<  vs  >>>) because LLMs occasionally generate the wrong closing arrows.
     # The [^\n]* absorbs any trailing characters (including <<< or >>> variants).
     pattern = re.compile(
-        r'// >>> BEGIN LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH)[^\n]*\n'
+        r'// >>> BEGIN LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH|WITNESS_CHAIN)[^\n]*\n'
         r'.*?'
-        r'// <<< END LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH)[^\n]*\n?',
+        r'// <<< END LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH|WITNESS_CHAIN)[^\n]*\n?',
         re.DOTALL
     )
-    return pattern.sub('', source_code)
+    stripped = pattern.sub('', source_code)
+    # Safety net: remove any raw _t1_chain_* kernel-launch call site that survived the
+    # delimiter strip (whole line). Matches lines like:
+    #   _t1_chain_write_sentinel<<<1,1>>>(d_output);
+    #   _t1_chain_update<<<1,1,0,stream>>>(d_output, n);
+    stripped = re.sub(
+        r'^[ \t]*_t1_chain_\w+<<<[^>]*>>>\s*\([^)]*\);[ \t]*\n?',
+        '', stripped, flags=re.MULTILINE)
+    return stripped

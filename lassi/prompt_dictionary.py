@@ -219,6 +219,12 @@ class PromptDictionary:
 
             "inv_asserts": self.load_context_file("Invariant_Assertions_Catalog.md"),
 
+            # Witness-chain harness — loaded ONLY by the dedicated witness-chain insertion
+            # step (code_insert_witness_chain), conditionally, when a benchmark timing loop is
+            # present. Kept out of inv_asserts so it does not compete with regular Tier 1
+            # invariant-assertion selection for the LLM's attention.
+            "witness_chain": self.load_context_file("Witness_Chain_Harness.md"),
+
             "passthrough_catalog": self.load_context_file("Passthrough_Catalog.md"),
 
             "metamorphic_catalog": self.load_context_file("Metamorphic_Relations_Catalog.md"),

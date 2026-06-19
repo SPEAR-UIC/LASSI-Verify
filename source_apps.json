@@ -83,7 +83,7 @@
         },
         "bsearch": {
             "app_folder": "bsearch",
-            "app_params": ["8388608", "1000"],
+            "app_params": ["8388608", "100"],
             "code_lines":279
         },
         "entropy": {
@@ -101,8 +101,8 @@
             "app_params": ["10000", "256", "500000"],
             "code_lines": 154
         },
-        "randomAccess": {
-            "app_folder": "randomAccess",
+        "randomaccess": {
+            "app_folder": "randomaccess",
             "app_params": ["10"],
             "code_lines": 158
         },
