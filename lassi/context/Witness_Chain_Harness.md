@@ -202,29 +202,40 @@ for (int n = 0; n < numIterations; n++) {        // OUTER timing loop — wrap h
 
 ---
 
-## ⚠ MANDATORY: every helper-kernel call site must be wrapped in delimiter comments
+## ⚠ MANDATORY: every harness artifact must live inside a delimiter-comment block
 
-This is the single most important rule, and it has no exceptions. **Every single call to
-`_t1_chain_write_sentinel<<<...>>>(...)` or `_t1_chain_update<<<...>>>(...)` in the output code
-MUST be enclosed in a matching `// >>> BEGIN LASSI-VERIFY WITNESS_CHAIN (...) >>>` ... `// <<<
-END LASSI-VERIFY WITNESS_CHAIN <<<` comment block.**
+This is the single most important rule, and it has no exceptions. **Every reference to the
+witness-chain harness in the output code — both kernel launches and device-symbol
+reads/writes — MUST be enclosed in a matching `// >>> BEGIN LASSI-VERIFY WITNESS_CHAIN (...)
+>>>` ... `// <<< END LASSI-VERIFY WITNESS_CHAIN <<<` comment block.**
+
+Two specific patterns are mandatory:
+
+1. **Helper-kernel launches** — every `_t1_chain_write_sentinel<<<...>>>(...)` or
+   `_t1_chain_update<<<...>>>(...)` call site must be inside a delimited block.
+
+2. **Device-symbol references** — every read or write of `_t1_chain_state`,
+   `_t1_chain_sentinel`, or `_t1_one_way_mix` must be inside a delimited block. This
+   includes host-side references (`cudaMemcpyToSymbol`, etc.) AND any inline device-side
+   code that references these symbols.
 
 This applies even when:
-- The calls are placed inside a CUDA Graph capture region (`cudaStreamBeginCapture` /
-  `cudaStreamEndCapture`)
-- The calls are placed inside a stream callback, kernel-builder helper, or other restructured
-  context
-- You restructure the timing loop into a CUDA Graph, loop unroll, batched form, or any other
-  refactored shape
-- You add additional kernels (e.g., setup helpers) between the sentinel write and the original
-  kernel call
+- The calls / references are placed inside a CUDA Graph capture region
+  (`cudaStreamBeginCapture` / `cudaStreamEndCapture`)
+- The calls / references are placed inside a stream callback, kernel-builder helper, or
+  other restructured context
+- You restructure the timing loop into a CUDA Graph, loop unroll, batched form, or any
+  other refactored shape
+- You add additional kernels (e.g., setup helpers) between the sentinel write and the
+  original kernel call
 
 The framework's strip-and-rebuild step uses the comment delimiters to remove every harness
-artifact when reconstructing an uninstrumented copy of the code. **Helper-kernel calls placed
-outside delimited blocks become dangling references after the device function definitions are
-stripped — the clean build then fails to compile.** The strip pattern also looks for raw
-`_t1_chain_*` calls as a safety net, but relying on that fallback adds fragility; the comment
-delimiters are the contract.
+artifact when reconstructing an uninstrumented copy of the code. **Anything that references
+the harness from outside a delimited block becomes a dangling reference after the device
+function/symbol definitions are stripped — the clean build then fails to compile.** A
+safety-net pass also looks for raw `_t1_chain_*` references as a fallback, but relying on
+that fallback adds fragility AND makes the instrumented code harder for humans to follow
+when debugging — the comment delimiters are the contract, and they serve both purposes.
 
 The pattern is:
 
@@ -234,8 +245,16 @@ _t1_chain_write_sentinel<<<1,1, /* optional stream */>>>(...);
 // <<< END LASSI-VERIFY WITNESS_CHAIN <<<
 ```
 
-If you find yourself writing `_t1_chain_*<<<...>>>(...)` without surrounding delimiter comments,
-stop and add the delimiters. This rule applies to every call site, in every restructured form.
+If you find yourself writing `_t1_chain_*<<<...>>>(...)` OR any statement that reads/writes
+`_t1_chain_state` / `_t1_chain_sentinel` / `_t1_one_way_mix` without surrounding delimiter
+comments, stop and add the delimiters. This rule applies to every reference site, in every
+restructured form. **In particular: do NOT inline the harness operations into a refactored
+kernel body for performance reasons — even if folding the sentinel write and chain update
+into the source kernel's main loop would eliminate per-iteration micro-launch overhead,
+this breaks both the strip-and-rebuild step and human readability of the instrumented
+code.** If you want that performance pattern, install the harness around the variant's
+current kernel call exactly as written; the framework accepts the launch-overhead cost as
+the price of clean stripping.
 
 ---
 
@@ -315,8 +334,16 @@ the harness around the variant's CURRENT timed-kernel structure:
 
 ## Anti-patterns specific to the witness chain (do NOT do)
 
-- Do NOT add the sentinel-write wrapping inside the kernel body. It belongs at the call site,
-  before the kernel launch, as a separate kernel.
+- Do NOT inline the harness operations into the source kernel's body — even as a performance
+  optimization. The sentinel write belongs at the call site, BEFORE the kernel launch, as a
+  separate `_t1_chain_write_sentinel<<<>>>` kernel launch wrapped in delimiter comments. Same
+  for the chain update — separate `_t1_chain_update<<<>>>` after the kernel launch, wrapped
+  in delimiter comments. Replacing the helper-kernel launches with inline statements like
+  `result[0] = (_t1_chain_sentinel & 0xFF) | 0x01;` or `_t1_chain_state = _t1_one_way_mix(...)`
+  inside the cipher kernel may eliminate two micro-launches per iteration, but it breaks
+  the strip-and-rebuild step that produces uninstrumented runtime measurements and makes
+  the instrumented code unreadable for human debugging. Accept the launch-overhead cost as
+  the price of clean instrumentation.
 - Do NOT replace the per-iteration `_t1_chain_update` with a single post-loop call that takes
   `repeat` as a parameter and batches the work analytically. The chain update must read the actual
   kernel output for each iteration; batching defeats the cheat-detection property.

@@ -561,12 +561,13 @@ Return a single JSON block with this structure:
 **Field descriptions:**
 - `name`: short identifier used in variant filename (`{file_name}_mt_{name}.cu`). Use lowercase with
   underscores, no spaces.
-- `type`: one of `CONSERVATION`, `SYMMETRY`, `SCALING`, `ADDITIVITY`, `PERMUTATIVE`, `ROTATION`, `MONOTONICITY`, `INVARIANCE`
+- `type`: one of `CONSERVATION`, `SYMMETRY`, `SCALING`, `ADDITIVITY`, `PERMUTATIVE`, `ROTATION`, `MONOTONICITY`, `INVARIANCE`, `SENSITIVITY`
 - `description`: one sentence explaining the mathematical or physical basis of the relation. For
   INVARIANCE, name the specific input transformation being applied (e.g., "reverse the attribute
   order within every instance").
 - `factor`: scaling factor (for SCALING/SYMMETRY), additive offset c (for ADDITIVITY),
-  `1.0` for INVARIANCE (output ratio is unity by definition), or `null`
+  `1.0` for INVARIANCE (output ratio is unity by definition), `null` for SENSITIVITY (the
+  output magnitude of change is not predicted, only its existence), or `null` otherwise
 - `input_variables`: C++ variable names of host arrays/scalars to transform (from the source code)
 - `observation_points`: METAMORPHIC block label(s); must match PASSTHROUGH labels when comparing
   scaled output to original. **MUST be the primary output array** (e.g., `["final_solution"]`,
@@ -1450,6 +1451,111 @@ for (int i = 0; i < NUM_ROWS * ATTRIBUTES_PER_ROW; i++) h_data[i] = h_data[i] + 
 For the co-normalized group case, use `type = INVARIANCE` with `factor = 1.0`. Do NOT
 express it as SCALING with factor=1.0 — the validator will drop SCALING+factor=1.0 as a
 degenerate relation.
+
+---
+
+### Category 9: SENSITIVITY (OUTPUT MUST CHANGE UNDER INPUT PERTURBATION)
+
+**Applicability guard (read first):** SENSITIVITY is the explicit logical complement of
+INVARIANCE (Category 8). It applies when the kernel's output is genuinely sensitive to a
+specific input dimension — flipping a bit or changing a byte in that dimension MUST produce
+a different output. Do NOT propose SENSITIVITY on dimensions where the kernel is legitimately
+invariant (use INVARIANCE), where the response is linear and predictable (use SCALING or
+ADDITIVITY), or where the response follows a specific symmetry (use SYMMETRY). SENSITIVITY
+is for cases where the *existence* of a response can be asserted but the magnitude or shape
+of the response cannot be predicted with a closed-form formula.
+
+**Formal basis:** The "robustness MRP" companion to invariance in the symmetry-MRP
+hierarchy (Zhou et al.; Li et al. 2025): if invariance asserts "the system looks the same
+from this viewpoint," sensitivity asserts "the system MUST look different from this
+viewpoint." Shannon's cryptographic principles of confusion and diffusion (1949): a cipher's
+output must be sensitive to every bit of key and plaintext. The avalanche property (Feistel
+1973): a single-bit change in input should produce ~50% bit-difference in output. In
+metamorphic testing literature, SENSITIVITY is the negation of equivalence-partitioning
+relations — robustness testing in the sense of Segura et al. 2020.
+
+**Formal 3-tuple:**
+- `input_relation`: x₂ = T(x₁), where T is a non-trivial input perturbation (single-bit
+  flip, byte change, or element value change) on a specific dimension of the input.
+- `output_relation`: f(x₂) ≠ f(x₁) — output must differ beyond floating-point noise
+  tolerance. The MAGNITUDE of the difference is not predicted; only its existence.
+- `applicable_when`: the kernel's algorithmic semantics genuinely depend on the dimension
+  T modifies. The SOURCE_verify filter empirically confirms this: relation is active iff
+  source's perturbed output actually differs from source's un-perturbed output.
+
+**Cost:** Cheap — 1 additional compile + run (same as INVARIANCE).
+
+**Discriminating power: HIGH for nonlinear / non-relational kernels where SCALING and
+ADDITIVITY do not apply.** Specifically catches:
+- Variants stub-implemented as memcpy from a precomputed buffer or from a constant defined
+  in the source (e.g., reading the source's expected-answer constant directly).
+- Variants that short-circuit per-element computation by reading source-side constants.
+- Variants that selectively ignore the input dimension named in `input_variables`.
+
+**Companion to INVARIANCE:** INVARIANCE catches variants that GAIN false sensitivity to
+inputs that should not matter; SENSITIVITY catches variants that LOSE true sensitivity to
+inputs that SHOULD matter. Together they fence off the "what does the variant actually
+attend to" question from both sides.
+
+**Applicable to:**
+- Cryptographic kernels: ciphers (chacha20, AES), MACs, KDFs — output must respond to every
+  bit of key, nonce, plaintext.
+- Hash functions designed with avalanche: murmurhash3, FNV, SipHash, BLAKE — one bit of
+  input must change a substantial fraction of output bits.
+- Search / lookup kernels: changing the query value should produce a different result.
+- Sort kernels (non-stable): permuting input order changes output order.
+- Any nonlinear data-transforming kernel whose output is genuinely data-dependent.
+
+**Contraindications:**
+- Kernels with genuine invariance to the chosen perturbation (use INVARIANCE).
+- Kernels with predictable linear response (use SCALING or ADDITIVITY — these are stronger
+  forms of sensitivity that also predict the magnitude of response).
+- Kernels with predictable symmetric response (use SYMMETRY).
+- Aggregating / reduction kernels where the perturbation gets averaged below the noise
+  floor (a 1-byte change in a 16 MB sum may not move any statistical digit). For these,
+  choose a larger perturbation or a different relation type.
+- Stochastic / non-deterministic kernels whose output varies even without perturbation.
+
+**Choosing the input perturbation T.** The perturbation must be:
+1. **Non-trivial** — actually modify x; identity (no change) is rejected at source filter.
+2. **Algorithmically meaningful for the chosen dimension** — perturb an input the kernel
+   reads; do not perturb dead inputs.
+3. **Source-grounded** — SOURCE_verify must empirically demonstrate that f(T(x)) ≠ f(x).
+   This is the source filter; relations where source happens to be insensitive get filtered
+   inactive.
+4. **Minimal** — prefer the smallest perturbation that produces a measurable response (e.g.,
+   single-bit flip for cryptographic kernels). Larger perturbations are valid but less
+   surgical.
+
+The contract `factor` field is **always null** for SENSITIVITY (the output magnitude of
+change is not specified, only its existence). The input perturbation itself is named in the
+`description` and the `Perturbation_under:` line of the METAMORPHIC block.
+
+#### 9.1 Single-Element Input Perturbation Sensitivity
+
+`input_relation`: flip one bit of one byte of the chosen input array (e.g., `h_input[0] ^= 0x01`)
+`output_relation`: Z ≠ Y — output differs from un-perturbed output in at least one
+  aggregate stat or sample position, beyond noise tolerance
+`applicable_when`: the kernel's output is genuinely data-dependent on the perturbed input
+
+**Example (cipher kernel where output is bit-mixed from the key):**
+```cpp
+// Flip LSB of first byte of the cipher key — apply AFTER initialization,
+// BEFORE the first H→D copy.
+if (key_len > 0) h_key[0] ^= 0x01;
+```
+
+After the final D→H transfer, emit the METAMORPHIC block at the same `[label]` as the
+original PASSTHROUGH block, with `Relation: <relation_name>`,
+`Perturbation_under: input_byte_bit_flip`, and the standard `Statistics: ... /
+Sample_first10: ...` lines.
+
+**Check:** Compare variant's METAMORPHIC stats/samples to source's PASSTHROUGH stats/samples
+(source's un-perturbed output, captured during Tier 2 baseline). PASS if AT LEAST ONE
+statistic OR sample position differs beyond noise tolerance
+(`|var − orig| > atol + rtol × max(|var|, |orig|)`). FAIL if all stats and samples are
+within tolerance — variant did not respond to the perturbation, indicating the kernel is
+ignoring (or has been replaced by a stub that ignores) the perturbed input.
 
 ---
 

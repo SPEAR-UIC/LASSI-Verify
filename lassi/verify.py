@@ -474,7 +474,7 @@ def _strip_witness_chain_blocks(code):
     code = re.sub(
         r'[ \t]*// >>> BEGIN LASSI-VERIFY PASSTHROUGH \[witness_chain_state\].*?// <<< END LASSI-VERIFY PASSTHROUGH <<<\n?',
         '', code, flags=re.DOTALL)
-    # Safety net: remove any raw _t1_chain_* kernel-launch call site (whole line) that
+    # Safety net 1: remove any raw _t1_chain_* kernel-launch call site (whole line) that
     # survived the delimiter strip. Matches lines like
     #     _t1_chain_write_sentinel<<<1,1>>>(d_output);
     #     _t1_chain_update<<<1,1,0,stream>>>(d_output);
@@ -482,6 +482,19 @@ def _strip_witness_chain_blocks(code):
     # this is unambiguous.
     code = re.sub(
         r'^[ \t]*_t1_chain_\w+<<<[^>]*>>>\s*\([^)]*\);[ \t]*\n?',
+        '', code, flags=re.MULTILINE)
+    # Safety net 2: remove any line that reads or writes the harness device symbols
+    # (_t1_chain_state, _t1_chain_sentinel, _t1_one_way_mix). LLM-generated variants
+    # sometimes INLINE the witness-chain harness logic directly into a refactored kernel
+    # body (e.g., fusing the sentinel write and chain update into the cipher kernel's
+    # main loop to eliminate the per-iteration overhead of two helper-kernel launches).
+    # When that happens, the delimited harness BLOCK contains the symbol definitions and
+    # gets stripped correctly, but the inlined statements reference symbols that no
+    # longer exist after strip → undefined identifier compile error in the clean rebuild.
+    # These symbols are exclusively defined by the harness; no legitimate variant code
+    # should reference them, so removing entire lines that mention any of them is safe.
+    code = re.sub(
+        r'^[ \t]*[^\n]*\b_t1_(?:chain_state|chain_sentinel|one_way_mix)\b[^\n]*\n?',
         '', code, flags=re.MULTILINE)
     return code
 
@@ -1617,16 +1630,16 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
                         print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
                               f"SYMMETRY requires factor=-1.0 (negation), got factor={rel_factor}.")
                         continue
-                    # Structural check: SCALING/SYMMETRY/ADDITIVITY/INVARIANCE are
+                    # Structural check: SCALING/SYMMETRY/ADDITIVITY/INVARIANCE/SENSITIVITY are
                     # transformation-style relations — they require at least one input
-                    # variable to transform. An empty input_variables list means "no
-                    # transformation defined", which is the structural signature of an
+                    # variable to transform (or perturb). An empty input_variables list means
+                    # "no transformation defined", which is the structural signature of an
                     # identity-replay degenerate relation (the LLM sometimes mislabels these
                     # as MONOTONICITY too, but for the transformation types it's an outright
                     # contradiction with the type). MONOTONICITY/CONSERVATION legitimately
                     # have empty input_variables (they observe the existing solver run), so
                     # this check excludes them.
-                    if (rel_type in ("SCALING", "SYMMETRY", "ADDITIVITY", "INVARIANCE")
+                    if (rel_type in ("SCALING", "SYMMETRY", "ADDITIVITY", "INVARIANCE", "SENSITIVITY")
                             and not rel.get("input_variables")):
                         print(f"[Tier 3 contract] Dropping relation '{rel_name}': "
                               f"{rel_type} requires at least one input_variable to transform; "
@@ -1840,6 +1853,37 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"statistic Z_stat to the original statistic Y_stat (factor = 1.0 by definition "
             f"for INVARIANCE).\n"
         )
+    elif relation_type == "SENSITIVITY":
+        # Mirrors INVARIANCE's block format but uses `Perturbation_under:` to name the
+        # input perturbation, and the checker's polarity is inverted (PASS when output
+        # DIFFERS beyond tolerance, FAIL when output is identical within tolerance).
+        _sens_label = relation_name
+        block_format = (
+            f"**METAMORPHIC output block format** "
+            f"(insert AFTER the final D→H transfer and cudaDeviceSynchronize, "
+            f"BEFORE any cudaFree / free calls):\n\n"
+            f"```\n"
+            f"=== BEGIN LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
+            f"Relation: {relation_name}\n"
+            f"Perturbation_under: {_sens_label}\n"
+            f"Buffer: <buffer_name>\n"
+            f"Elements: <N>\n"
+            f"Statistics: min=%.17g, max=%.17g, mean=%.17g\n"
+            f"Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)\n"
+            f"=== END LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
+            f"```\n\n"
+            f"Print this block using printf with %.17g format. The label MUST exactly match "
+            f"the corresponding PASSTHROUGH block label for this observation point "
+            f"(e.g., if the PASSTHROUGH label is `[final_keystream]`, the METAMORPHIC label "
+            f"must also be `[final_keystream]`). The `Perturbation_under:` field names the "
+            f"specific input perturbation applied — informational only, does not affect the "
+            f"check. The checker compares each variant statistic Z_stat to the original "
+            f"statistic Y_stat and PASSES if AT LEAST ONE stat or sample position genuinely "
+            f"DIFFERS beyond floating-point tolerance — confirming that the variant's "
+            f"output responded to the perturbation (the kernel actually uses the perturbed "
+            f"input). FAILS when all stats and samples match within tolerance, indicating "
+            f"the variant ignored the perturbation (likely a stub-implementation cheat).\n"
+        )
     else:
         block_format = (
             "**METAMORPHIC output block format**: Use labeled blocks with "
@@ -1954,6 +1998,41 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"observation point label listed above. The output buffer values must be the\n"
             f"computed result on the transformed input — the checker will compare these against\n"
             f"the original PASSTHROUGH values and expect them to match (output is unchanged).\n"
+        )
+    elif relation_type == "SENSITIVITY" and input_vars:
+        transform_instruction = (
+            f"**Step 1 — Apply the input perturbation:**\n"
+            f"Insert the perturbation code AFTER host array initialization but BEFORE the "
+            f"first host-to-device memory copy (cudaMemcpy H→D or hipMemcpy H→D).\n\n"
+            f"The perturbation must be NON-TRIVIAL (actually modify the input) and MINIMAL "
+            f"(prefer the smallest change that produces a measurable kernel response). The "
+            f"specific perturbation is described in the relation description above:\n"
+            f"  {description}\n\n"
+            f"Apply the perturbation to ONE of these input arrays/scalars: "
+            f"{', '.join(input_vars)}.\n"
+            f"(Unlike INVARIANCE which applies its transformation to ALL listed inputs, "
+            f"SENSITIVITY perturbs ONE input at a time — keep the perturbation surgical so "
+            f"the kernel's response can be attributed to that specific input dimension.)\n\n"
+            f"Common SENSITIVITY input perturbations and their canonical implementations:\n"
+            f"  - Single-bit flip in the first byte of a byte / char array (crypto, hash):\n"
+            f"      if (N > 0) {input_vars[0]}[0] ^= 0x01;\n"
+            f"  - Single-bit flip in the LSB of the first element of an integer array:\n"
+            f"      if (N > 0) {input_vars[0]}[0] ^= 1;\n"
+            f"  - Single-element value increment (search, sort, distance kernels):\n"
+            f"      if (N > 0) {input_vars[0]}[0] += 1;\n"
+            f"  - Single-bit flip in mantissa of a float / double (scalar input):\n"
+            f"      if (N > 0) ((uint32_t*)&{input_vars[0]}[0])[0] ^= 0x01u;\n\n"
+            f"Pick the pattern that matches the input type and the relation's description. "
+            f"Apply ONE perturbation per variant (do not chain multiple). The perturbation "
+            f"should affect a single bit or single element to keep the response attributable "
+            f"to that input dimension specifically.\n\n"
+            f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
+            f"After the final device-to-host transfer, insert a METAMORPHIC block at each\n"
+            f"observation point label listed above. The output buffer values must be the\n"
+            f"computed result on the perturbed input — the checker will compare these against\n"
+            f"the original PASSTHROUGH values and expect them to DIFFER beyond floating-point\n"
+            f"tolerance in at least one stat or sample position. (Identical-within-tolerance\n"
+            f"output indicates the variant ignored the perturbation, which fails SENSITIVITY.)\n"
         )
     else:
         transform_instruction = (
@@ -2943,6 +3022,155 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
             "blocks_compared": blocks_compared, "failures": failures, "summary": summary,
         }
 
+    elif relation_type == "SENSITIVITY":
+        # SENSITIVITY is the explicit logical complement of INVARIANCE: the variant's
+        # perturbed-input output MUST DIFFER from source's un-perturbed output. PASS when
+        # at least one stat or sample position differs beyond the floating-point noise
+        # tolerance; FAIL when all stats and samples are within tolerance (variant ignored
+        # the perturbation — typically the kernel has been stub-replaced to ignore the
+        # perturbed input dimension, e.g. cipher-replaced-by-memcpy from a precomputed
+        # buffer). Same data sources as INVARIANCE (variant's METAMORPHIC vs source's
+        # PASSTHROUGH), same comparison machinery, inverted PASS/FAIL polarity. The
+        # source filter (Stage 0) uses the same verdict to filter relations inactive
+        # when source itself happens to be insensitive to the chosen perturbation.
+        sens_factor = None  # Output magnitude of change is not predicted; only its existence.
+        meta_blocks = extract_meta_blocks(variant_stdout)
+        pass_blocks = extract_pass_blocks(original_passthrough_stdout)
+
+        if not meta_blocks and not pass_blocks:
+            return "SKIP", {
+                "verdict": "SKIP", "relation_name": relation_name, "factor": sens_factor,
+                "blocks_compared": 0, "failures": [],
+                "summary": "SKIP: No METAMORPHIC or PASSTHROUGH blocks found in outputs.",
+            }
+
+        diagnostics = []        # Per-block parse-error / missing-block notices (not pass/fail signals)
+        differing_stats = []    # Stats that genuinely differed (the PASS evidence)
+        blocks_compared = 0
+        total_compared = 0      # Comparisons that ran (parse-errors / NaN excluded)
+        total_differed = 0      # Comparisons that detected a difference (the PASS signal)
+
+        labels_to_check = obs_points if obs_points else list(meta_blocks.keys())
+        for label in labels_to_check:
+            if label not in meta_blocks:
+                diagnostics.append({"label": label, "stat": "metamorphic_block_missing",
+                                      "detail": "METAMORPHIC block absent in variant output"})
+                continue
+            if label not in pass_blocks:
+                diagnostics.append({"label": label, "stat": "passthrough_block_missing",
+                                      "detail": "PASSTHROUGH block absent in original output"})
+                continue
+
+            pass_bodies = pass_blocks[label]
+            meta_bodies = meta_blocks[label]
+            n_pairs = min(len(pass_bodies), len(meta_bodies))
+            multi = max(len(pass_bodies), len(meta_bodies)) > 1
+
+            for i in range(n_pairs):
+                block_label = f"{label}#{i+1}" if multi else label
+                orig_stats = parse_stats(pass_bodies[i])
+                var_stats  = parse_stats(meta_bodies[i])
+                blocks_compared += 1
+
+                if orig_stats is None or var_stats is None:
+                    diagnostics.append({"label": block_label, "stat": "parse_error",
+                                          "detail": "Could not parse Statistics line in one or both blocks"})
+                    continue
+
+                if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
+                    continue  # NaN/Inf guard
+
+                # atol anchored to |orig_max| * rtol — same convention as INVARIANCE.
+                orig_max_val = abs(orig_stats.get('max', 0.0))
+                atol = orig_max_val * rtol
+
+                # SENSITIVITY signal: count stats/samples that genuinely differ.
+                # "Differ" = NOT within allclose tolerance (so genuinely beyond FP noise).
+                for stat_name, orig_val in orig_stats.items():
+                    var_val = var_stats.get(stat_name)
+                    if var_val is None:
+                        continue  # Missing stat is neither a PASS nor a FAIL signal here.
+                    if not both_finite(var_val, orig_val):
+                        continue
+                    total_compared += 1
+                    if not allclose(var_val, orig_val, rtol, atol):
+                        total_differed += 1
+                        differing_stats.append({
+                            "label": block_label, "stat": stat_name,
+                            "orig": orig_val, "variant": var_val,
+                            "abs_err": abs(var_val - orig_val),
+                            "atol": atol, "rtol": rtol,
+                        })
+
+                # Element-wise sample comparison.
+                orig_samples = parse_samples(pass_bodies[i])
+                var_samples  = parse_samples(meta_bodies[i])
+                for idx, (ov, vv) in enumerate(zip(orig_samples, var_samples)):
+                    if not both_finite(ov, vv):
+                        continue
+                    total_compared += 1
+                    if not allclose(vv, ov, rtol, atol):
+                        total_differed += 1
+                        differing_stats.append({
+                            "label": block_label, "stat": f"sample[{idx}]",
+                            "orig": ov, "variant": vv,
+                            "abs_err": abs(vv - ov),
+                            "atol": atol, "rtol": rtol,
+                        })
+
+        # Verdict:
+        #   - 0 comparisons ran → SKIP (block parse failure across the board — can't tell)
+        #   - ≥1 comparison ran AND ≥1 differed → PASS (variant responded to the perturbation)
+        #   - ≥1 comparison ran AND 0 differed → FAIL (variant ignored the perturbation)
+        if total_compared == 0:
+            diag_lines = [f"  [{d['label']}] {d['stat']}: {d['detail']}" for d in diagnostics]
+            summary = (
+                f"SKIP: SENSITIVITY relation could not be evaluated — 0 comparisons ran "
+                f"(across {blocks_compared} block(s))." + ("\n" + "\n".join(diag_lines) if diag_lines else "")
+            )
+            return "SKIP", {
+                "verdict": "SKIP", "relation_name": relation_name, "factor": sens_factor,
+                "blocks_compared": blocks_compared, "failures": diagnostics, "summary": summary,
+            }
+        elif total_differed > 0:
+            example = differing_stats[0]
+            summary = (
+                f"PASS: {total_differed}/{total_compared} comparisons differed beyond "
+                f"tolerance (rtol={rtol:.1e}). Variant responded to the perturbation. "
+                f"Example: [{example['label']}] {example['stat']}: "
+                f"orig={example['orig']}, variant={example['variant']}, "
+                f"abs_err={example['abs_err']:.3e}"
+            )
+            return "PASS", {
+                "verdict": "PASS", "relation_name": relation_name, "factor": sens_factor,
+                "blocks_compared": blocks_compared, "failures": [], "summary": summary,
+            }
+        else:
+            # FAIL: variant produced output identical to source's un-perturbed run.
+            # Variant ignored the perturbation — likely a stub-implementation cheat.
+            failures = [{
+                "label": (obs_points[0] if obs_points else (labels_to_check[0] if labels_to_check else "?")),
+                "stat": "sensitivity_no_response",
+                "detail": (
+                    f"Variant produced output identical to source's un-perturbed output "
+                    f"(0/{total_compared} comparisons differed beyond tolerance). "
+                    f"Variant ignored the perturbation; kernel is not sensitive to the "
+                    f"perturbed input dimension."
+                ),
+            }]
+            summary = (
+                f"FAIL: SENSITIVITY relation violated — variant's output is identical to "
+                f"source's un-perturbed output within tolerance (rtol={rtol:.1e}). "
+                f"All {total_compared} comparisons across {blocks_compared} block(s) were "
+                f"within floating-point noise. The variant did not respond to the input "
+                f"perturbation, indicating the kernel is ignoring (or has been stub-replaced "
+                f"to ignore) the perturbed input dimension. Relation: {relation_name} (SENSITIVITY)."
+            )
+            return "FAIL", {
+                "verdict": "FAIL", "relation_name": relation_name, "factor": sens_factor,
+                "blocks_compared": blocks_compared, "failures": failures, "summary": summary,
+            }
+
     # ==========================================================================
     # Other relation types: SKIP (not yet implemented).
     # ==========================================================================
@@ -3565,11 +3793,24 @@ def strip_verify_blocks(source_code):
         re.DOTALL
     )
     stripped = pattern.sub('', source_code)
-    # Safety net: remove any raw _t1_chain_* kernel-launch call site that survived the
+    # Safety net 1: remove any raw _t1_chain_* kernel-launch call site that survived the
     # delimiter strip (whole line). Matches lines like:
     #   _t1_chain_write_sentinel<<<1,1>>>(d_output);
-    #   _t1_chain_update<<<1,1,0,stream>>>(d_output, n);
+    #   _t1_chain_update<<<1,1,0,stream>>>(d_output);
     stripped = re.sub(
         r'^[ \t]*_t1_chain_\w+<<<[^>]*>>>\s*\([^)]*\);[ \t]*\n?',
+        '', stripped, flags=re.MULTILINE)
+    # Safety net 2: remove any line that reads or writes the harness device symbols
+    # (_t1_chain_state, _t1_chain_sentinel, _t1_one_way_mix). Catches inlined harness
+    # logic — when the LLM fuses the witness-chain operations into a refactored kernel
+    # body (e.g., to eliminate per-iteration micro-launch overhead in a CUDA Graph),
+    # the symbol definitions get stripped with the delimited block but the inlined
+    # references survive, producing "undefined identifier" compile errors on rebuild.
+    # These symbols are exclusively defined by the harness; no legitimate variant code
+    # should reference them, so whole-line removal is safe. (See KERNEL_TEST3_CHACHA_2
+    # v6 for the original failure case study — inlined sentinel/chain ops fused into
+    # the cipher kernel's main loop.)
+    stripped = re.sub(
+        r'^[ \t]*[^\n]*\b_t1_(?:chain_state|chain_sentinel|one_way_mix)\b[^\n]*\n?',
         '', stripped, flags=re.MULTILINE)
     return stripped
