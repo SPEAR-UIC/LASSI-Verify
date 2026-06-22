@@ -337,18 +337,32 @@ def generate_refactoring_plan(source_lang,
     # These optimizations are already embedded in the CODE TO REFACTOR below, so the LLM
     # should build beyond them rather than re-propose the same strategies.
     if last_good_refactoring_plan:
+        # Plan-evolution framing: the prior plan listed multiple candidate optimizations, and a
+        # coherent change drawn from it was implemented in the CODE TO REFACTOR below (per the
+        # iteration prompt's "single optimization intent" rule — which may span multiple lines or
+        # call sites). Ask the LLM to evolve the prior plan against the new code rather than
+        # start fresh — keeping unimplemented items that still apply, dropping those rendered
+        # obsolete, revising those whose form changed, and adding new opportunities the
+        # implementation has exposed. This prevents valuable plan items from being silently
+        # lost each time a winning iteration triggers plan regeneration.
         if power_measure:
-            good_plan_context = ("The following refactoring plan was previously used and produced a code that "
-                                 "successfully improved energy efficiency. The optimizations it describes are already "
-                                 "applied in the CODE TO REFACTOR below. Do NOT re-propose these same strategies. "
-                                 "Instead, identify complementary or orthogonal optimizations that go further.")
+            good_plan_context = ("The following refactoring plan was previously used; a coherent change drawn "
+                                 "from it was implemented in the CODE TO REFACTOR below and produced a measurable "
+                                 "improvement in energy efficiency. Re-examine this prior plan against the current "
+                                 "code: keep items that still apply, drop items rendered obsolete by what was "
+                                 "implemented, revise items whose form changed because of the implementation, and "
+                                 "add any new opportunities the implementation has exposed. Think of this as "
+                                 "evolving the plan, not writing a fresh one.")
         else:
-            good_plan_context = ("The following refactoring plan was previously used and produced a code that "
-                                 "successfully reduced wall-clock execution time. The optimizations it describes are already "
-                                 "applied in the CODE TO REFACTOR below. Do NOT re-propose these same strategies. "
-                                 "Instead, identify complementary or orthogonal optimizations that go further.")
+            good_plan_context = ("The following refactoring plan was previously used; a coherent change drawn "
+                                 "from it was implemented in the CODE TO REFACTOR below and produced a measurable "
+                                 "reduction in wall-clock execution time. Re-examine this prior plan against the "
+                                 "current code: keep items that still apply, drop items rendered obsolete by what "
+                                 "was implemented, revise items whose form changed because of the implementation, "
+                                 "and add any new opportunities the implementation has exposed. Think of this as "
+                                 "evolving the plan, not writing a fresh one.")
         refactoring_plan_instructions = (refactoring_plan_instructions + "\n\n" + good_plan_context
-                                         + "\n[PREVIOUSLY SUCCESSFUL PLAN — ALREADY APPLIED]\n" + last_good_refactoring_plan)
+                                         + "\n[PRIOR PLAN — A COHERENT CHANGE FROM THIS PLAN WAS APPLIED TO THE CODE BELOW; EVOLVE THIS PLAN]\n" + last_good_refactoring_plan)
 
     # Append previous failed plans (if available).
     # These are plans tried against the current best code that did not improve the metric.

@@ -142,6 +142,8 @@ __global__ void _t1_chain_update(const uint8_t* d_output) {
 
 ## Required per-iteration wrapping inside the timed loop body
 
+**Default case — source has NO per-iteration `cudaMemset` on the output buffer:**
+
 ```cpp
 for (int i = 0; i < repeat; i++) {
     // >>> BEGIN LASSI-VERIFY WITNESS_CHAIN (PRE-KERNEL — do not edit or delete this block) >>>
@@ -156,6 +158,58 @@ for (int i = 0; i < repeat; i++) {
     // <<< END LASSI-VERIFY WITNESS_CHAIN <<<
 }
 ```
+
+**Critical alternate case — source HAS any per-iteration operation that touches the output
+buffer before the kernel launch:**
+
+The most common form is `cudaMemset(d_output, 0, ...)` (zeroing the buffer at the start of
+each iteration). Other forms that fall under the same rule: `cudaMemsetAsync`, a custom
+init kernel like `zero_kernel<<<>>>(d_output)`, a per-iteration `cudaMemcpy` populating the
+buffer, or any other host- or device-side operation that writes to `d_output` before the
+timed kernel runs.
+
+The sentinel write MUST be placed BEFORE all such operations (in source program order), as
+the FIRST statement inside the loop body. NOT between any pre-kernel operation and the
+kernel launch. The pre-kernel operation will wipe or overwrite the sentinel before the
+kernel reads the buffer, and this is correct and intentional — see the rationale below.
+
+```cpp
+for (int i = 0; i < repeat; i++) {
+    // >>> BEGIN LASSI-VERIFY WITNESS_CHAIN (PRE-KERNEL — do not edit or delete this block) >>>
+    _t1_chain_write_sentinel<<<1,1>>>(d_output);  // first operation in the loop body
+    // <<< END LASSI-VERIFY WITNESS_CHAIN <<<
+
+    cudaMemset(d_output, 0, output_bytes);  // source's existing per-iter init — unchanged
+    my_kernel<<<...>>>(d_input, d_output, /* original args */);
+
+    // >>> BEGIN LASSI-VERIFY WITNESS_CHAIN (POST-KERNEL — do not edit or delete this block) >>>
+    _t1_chain_update<<<1,1>>>(d_output);  // mix d_output[0] (now = kernel output) into chain
+    // <<< END LASSI-VERIFY WITNESS_CHAIN <<<
+}
+```
+
+**Rationale for the alternate case** (why "first in the loop" not "directly before the
+kernel"): the source's pre-kernel operation must be allowed to do its job — establishing
+the buffer state the kernel expects before it runs. If the sentinel write is placed
+between that operation and the kernel, the sentinel survives in `d_output[0]` until the
+kernel reads the buffer. For kernels with pure overwrite semantics, this is harmless (the
+kernel replaces the sentinel byte with the real result). But for kernels that perform XOR
+or other accumulating writes onto the output buffer (e.g., stream ciphers, XOR-mixing
+hash kernels, init-then-accumulate reduction kernels), the kernel computes
+`sentinel ⊕ kernel_output[0]` instead of `kernel_output[0]` at position [0], silently
+corrupting the spec. Placing the sentinel as the FIRST loop-body operation sidesteps
+this entirely: the source's pre-kernel operation overwrites the sentinel, the kernel
+writes its true output onto the expected buffer state, and the chain_update reads the
+kernel's actual output value. Cheat detection still works: a skipped kernel leaves
+`d_output[0]` in whatever state the pre-kernel operation produced (e.g., 0 from a
+memset) instead of the kernel's real value, so the chain state diverges from the
+source's chain state.
+
+**Both cases produce the same cheat-detection property** because the chain advances per
+iteration based on whatever `d_output[0]` contains at chain_update time — in the default case
+that's the sentinel (if kernel skipped) or kernel output (if it ran), in the alternate case
+it's zero (if kernel skipped) or kernel output (if it ran). Either way, removing the kernel
+from the loop changes the chain hash.
 
 **No post-loop "clean call" is needed.** Because the kernel's INPUT was never modified by the
 harness, the source's normal final-iteration output already sits in `d_output` after the loop
@@ -272,6 +326,23 @@ output).
 The `| 0x01` (or analogous non-zero OR) is critical: many kernels `cudaMemset` their output
 buffer to zero before the kernel call. The sentinel must be non-zero so "kernel didn't run"
 (sentinel persists) is distinguishable from "kernel ran and produced zero."
+
+**Insertion-order rule that applies to ALL cases below:** if the source already contains
+any per-iteration operation that touches the output buffer before the kernel launch —
+`cudaMemset`, `cudaMemsetAsync`, a custom init kernel like `zero_kernel<<<>>>(d_output)`,
+a per-iteration `cudaMemcpy` populating the buffer, or any other host- or device-side
+write to `d_output` — the sentinel-write kernel launch MUST be placed BEFORE all such
+operations in source program order, as the FIRST statement inside the loop body. NOT
+between the pre-kernel operation and the kernel launch. This rule applies to every case
+below, not just case 6. See the "Required per-iteration wrapping" section above for the
+worked template (alternate case) and the rationale. The short version: placing sentinel
+between the pre-kernel operation and the kernel breaks XOR-output / accumulating-write
+kernels (e.g., stream ciphers, XOR-mixing hash kernels, init-then-accumulate reduction
+kernels), because the sentinel survives until the kernel reads the buffer and gets
+combined with the kernel's real output via the kernel's accumulation operator. Placing
+sentinel as the FIRST loop-body operation is correct for both overwrite kernels and
+accumulating-write kernels, and cheat detection still works through the chain reading
+the kernel's actual output value after each iteration.
 
 | # | Output pattern | Sentinel-write body |
 |---|---|---|

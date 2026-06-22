@@ -25,6 +25,7 @@ import lassi.get_power
 import lassi.pipeline_methods
 import lassi.verify
 import lassi.monitor
+import lassi.gpu_health
 from lassi.get_power import report_gpu_memory, query_gpu_state
 from lassi.format_colors import color
 from lassi.prompt_dictionary import PromptDictionary
@@ -230,7 +231,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                                      tier3_tolerance=1e-5,   # Default relative tolerance for metamorphic relation checks (slightly looser than Tier 2 to account for two independently-accumulated FP runs)
                                      run_witness_chain=True,  # Enable witness-chain harness (cheat-resistant loop-deletion detection) via a SEPARATE Stage 0 insertion step + deterministic per-variant re-insertion; requires run_tier2 (uses the [witness_chain_state] passthrough comparison)
                                      verify_zeroshot=True,   # Enable empirical Tier 1/2/3 verification of the zero-shot code (single attempt, fail-fast, no retries; results recorded separately from LLM judge)
-                                     attempt_log_file_path=None  # Path to per-attempt CSV (Table 2 ★); None = skip writing
+                                     attempt_log_file_path=None,  # Path to per-attempt CSV (Table 2 ★); None = skip writing
+                                     tolerance_safety_factor=None  # Optional per-kernel override of the ULP safety factor N for Tier 2 / Tier 3 numerical comparison; when None, framework uses max(16, ceil(log2(buffer_size))) per planning/ulp_aware_tolerance_design.md
                                     ):
 
     # -----------------
@@ -313,6 +315,12 @@ def auto_code_llmgeneration_pipeline(prompts,
                                     # complementary/orthogonal strategies rather than re-proposing applied ones.
     iteration_log = {}  # initiate the iteration log for each code version
     verification_log = {}  # iniiate a dict log for code verifications
+    # GPU health timeline — populated by lassi.gpu_health.snapshot() at pipeline start,
+    # before vanilla LLM, and before each LASSI version. Snapshots with health_verdict
+    # != 'OK' at gating points (pipeline_start, pre_vanilla_llm) abort the trial early.
+    # Mid-pipeline non-OK snapshots are recorded but do not abort — they let downstream
+    # data analysis filter out trials whose environment degraded during execution.
+    verification_log["gpu_health_timeline"] = []
 
     # --- Chain verification seed (per-trial, runtime-injected via env var) ---
     # Generate a fresh 64-bit random seed at the top of each trial. This seed is unknown to
@@ -376,9 +384,29 @@ def auto_code_llmgeneration_pipeline(prompts,
         print(f"🔍 Detected GPU vendor: {detected_vendor.upper()}")
 
     report_gpu_memory()
-        
-    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END) 
-    
+
+    # --- GPU health pre-flight (gating) ---
+    # Capture baseline GPU state + run a known-answer compute probe BEFORE any
+    # trial work. Catches a GPU already in a bad state (Xid fault, ECC errors,
+    # producing wrong arithmetic) so we don't waste a 30-60 min trial on
+    # corrupted output. KERNEL_TEST5_CHACHA_2 (06-20-2026) was a trial where
+    # this gate would have caught — or at least flagged — the transient.
+    _gpu_health_start = lassi.gpu_health.snapshot('pipeline_start', run_compute_test=True)
+    verification_log["gpu_health_timeline"].append(_gpu_health_start)
+    if _gpu_health_start['health_verdict'].startswith('FAIL'):
+        print(color.RED + color.BOLD +
+              f"\n[PIPELINE ABORT] GPU health check failed at pipeline start: "
+              f"{_gpu_health_start['health_verdict']}. "
+              f"Trial cannot proceed — fix the GPU state and re-run." + color.END)
+        experiment_data["stage0_abort_reason"] = "gpu_health_pipeline_start"
+        _abort_monitor_log_path = os.path.join(experiment_data_directory,
+            "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+        sys.stdout.flush()
+        lassi.monitor.save_log(_abort_monitor_log_path)
+        return False
+
+    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
+
     # --------------------------------
     # ----- STAGE 0: TEST SOURCE -----
     # --------------------------------
@@ -913,6 +941,131 @@ def auto_code_llmgeneration_pipeline(prompts,
     passthrough_spec_output = source_verify_stdout
     verification_log["tier2_spec_output"] = passthrough_spec_output
 
+    # --- SOURCE_verify self-consistency / determinism gate ---
+    # Re-execute the already-compiled SOURCE_verify binary once more and compare its
+    # PASSTHROUGH block contents against the first run. The point is to catch
+    # non-deterministic spec generation: if the same binary with the same seed produces
+    # different PASSTHROUGH values across runs, the trial environment is unstable and
+    # every downstream Tier 2 comparison will be against an unreliable baseline.
+    #
+    # Pure framework-internal check — does not depend on any source-code internal
+    # PASS/FAIL print (those are benchmark-specific and we deliberately do not gate on
+    # them). The LASSI_VERIFY_SEED env var is held in code_manager module state, so the
+    # re-execute uses the same seed automatically; ULP tolerance applies the same per
+    # block, so determinism here means "byte-for-byte identical PASSTHROUGH bodies."
+    # Skips power monitoring on the re-run (power_measure=False, short settle) so the
+    # added cost is one extra binary invocation (~8s for chacha; scales with kernel
+    # cost). Catches the chacha20 KERNEL_TEST6 class of failures where the first
+    # SOURCE_verify run produced corrupted output that subsequent runs do not reproduce.
+    if run_tier2 and passthrough_spec_output:
+        _sv_executable = os.path.splitext(verify_source_file_path)[0]
+        print(f"\n----- SOURCE_verify self-consistency check: re-executing binary for determinism comparison -----")
+        try:
+            (_sv2_result, _sv2_stdout, _, _, _, _, _) = lassi.code_manager.execute_code_selectvendor(
+                experiment_data_directory, code_version, False, trial_number,
+                directory, _sv_executable, exe_input_parameters,
+                False,  # power_measure=False — determinism check doesn't need power data
+                "source", target_lang, build_script, make_script,
+                gpu_vendor="auto", wait=1,
+            )
+        except Exception as _sv2_err:
+            print(color.RED + color.BOLD +
+                  f"\n[SOURCE_verify self-consistency] re-execute raised {type(_sv2_err).__name__}: "
+                  f"{str(_sv2_err)[:120]} — treating as non-deterministic and aborting." + color.END)
+            _sv2_result = "EXCEPTION"
+            _sv2_stdout = ""
+
+        # Parse PASSTHROUGH block bodies from both runs and compare. We compare only the
+        # block bodies (between BEGIN/END markers), not the surrounding stdout, because
+        # benchmark-specific timing prints ("Average execution time: ... us") are expected
+        # to differ run-to-run and are not part of the spec.
+        _block_pattern_consistency = re.compile(
+            r'=== BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\] ===\n(.*?)\n=== END LASSI-VERIFY PASSTHROUGH \[[^\]]+\] ===',
+            re.DOTALL
+        )
+        _spec1_blocks = {m.group(1): m.group(2) for m in _block_pattern_consistency.finditer(passthrough_spec_output)}
+        _spec2_blocks = {m.group(1): m.group(2) for m in _block_pattern_consistency.finditer(_sv2_stdout)}
+
+        _consistency_mismatches = []
+        # Symmetric difference on labels first — both runs must produce the same set of blocks.
+        for _lbl in sorted(set(_spec1_blocks) ^ set(_spec2_blocks)):
+            _consistency_mismatches.append({
+                "label": _lbl,
+                "reason": "block-label-absent-in-other-run",
+                "in_run1": _lbl in _spec1_blocks,
+                "in_run2": _lbl in _spec2_blocks,
+            })
+        # Body-byte comparison on the common labels.
+        for _lbl in sorted(set(_spec1_blocks) & set(_spec2_blocks)):
+            if _spec1_blocks[_lbl] != _spec2_blocks[_lbl]:
+                _consistency_mismatches.append({
+                    "label": _lbl,
+                    "reason": "block-body-differs",
+                    "run1_first_120": _spec1_blocks[_lbl][:120],
+                    "run2_first_120": _spec2_blocks[_lbl][:120],
+                })
+
+        verification_log["source_verify_consistency_mismatches"] = _consistency_mismatches
+        verification_log["source_verify_consistency_run2_status"] = _sv2_result
+
+        if _sv2_result != "0" or _consistency_mismatches:
+            print(color.RED + color.BOLD +
+                  f"\n[PIPELINE ABORT] SOURCE_verify self-consistency check failed: "
+                  f"re-execute_status={_sv2_result}, mismatches={len(_consistency_mismatches)}. "
+                  f"The spec captured during SOURCE_verify is non-deterministic across runs — "
+                  f"every Tier 2 comparison would be against an unreliable baseline. Common "
+                  f"causes: GPU/driver transient, instrumentation race condition, or witness "
+                  f"chain insertion order corrupting the kernel output (see "
+                  f"lassi/context/Witness_Chain_Harness.md)." + color.END)
+            for _mm in _consistency_mismatches[:3]:
+                print(f"    mismatch: {_mm}")
+            experiment_data["stage0_abort_reason"] = "source_verify_nondeterministic"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+        else:
+            print(f"----- SOURCE_verify self-consistency check: PASS (all {len(_spec1_blocks)} PASSTHROUGH block(s) byte-for-byte identical across two runs) -----")
+
+    # ULP-aware tolerance derivation: parse SOURCE_verify's PASSTHROUGH blocks once and
+    # record the per-block tolerance (atol, rtol, type, max_magnitude, buffer_size, N) in
+    # the verification log. This is deterministic for a given source — the same tolerance
+    # is re-derived per comparison by compare_passthrough_outputs / check_metamorphic_relation,
+    # but capturing it here at the trial level makes it auditable without having to dig
+    # through every per-iteration tier2 result. See planning/ulp_aware_tolerance_design.md.
+    _spec_block_pattern = re.compile(
+        r'=== BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\] ===\n(.*?)\n=== END LASSI-VERIFY PASSTHROUGH \[[^\]]+\] ===',
+        re.DOTALL
+    )
+    _trial_per_block_tolerance = {}
+    _tier2_atol_max = 0.0
+    _tier2_rtol_max = 0.0
+    for _m in _spec_block_pattern.finditer(passthrough_spec_output):
+        _label = _m.group(1)
+        # Skip the witness_chain_state block — it's compared with exact-string equality,
+        # not numerical tolerance, so ULP tolerance is not meaningful for it.
+        if _label == "witness_chain_state":
+            continue
+        _block_body = _m.group(2)
+        _tol = lassi.verify._compute_fp_tolerance(_block_body, n_safety_override=tolerance_safety_factor)
+        _trial_per_block_tolerance[_label] = _tol['metadata']
+        if _tol['atol'] > _tier2_atol_max:
+            _tier2_atol_max = _tol['atol']
+        if _tol['rtol'] > _tier2_rtol_max:
+            _tier2_rtol_max = _tol['rtol']
+    verification_log["tier2_per_block_tolerance"] = _trial_per_block_tolerance
+    verification_log["tier2_tolerance_atol_max"] = _tier2_atol_max
+    verification_log["tier2_tolerance_rtol_max"] = _tier2_rtol_max
+    verification_log["tolerance_safety_factor"] = tolerance_safety_factor  # None if not overridden in source_apps.json
+    # CSV summary columns — surface the trial's atol/rtol in pipeline_data.csv so the
+    # tolerance applied per trial is at-a-glance auditable without opening the JSON log.
+    experiment_data["tier2_tolerance_atol_max"] = round(_tier2_atol_max, 12) if _tier2_atol_max > 0 else 0
+    experiment_data["tier2_tolerance_rtol_max"] = _tier2_rtol_max
+    print(f"\n----- Tier 2 ULP-aware tolerance (per planning/ulp_aware_tolerance_design.md): "
+          f"atol_max={_tier2_atol_max:.3e}, rtol_max={_tier2_rtol_max:.3e}, "
+          f"N_override={tolerance_safety_factor or '(default log2-derived)'} -----")
+
     # Record the chain-verification status SOURCE_verify settled on (set inside the Stage 0 loop).
     # _witness_chain_applied gates per-variant re-insertion in the main loop below.
     experiment_data["witness_chain_status"] = _witness_chain_status
@@ -1011,7 +1164,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                 build_script, make_script, code_build_script,
                 exe_input_parameters,
                 experiment_data_directory=experiment_data_directory,
-                verifyprompt=verifyprompt
+                verifyprompt=verifyprompt,
+                n_safety_override=tolerance_safety_factor,
             )
 
             # Partition relations into active/inactive based on source filter.
@@ -1069,9 +1223,31 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Append instrumented source code as code_blocks[1] = SOURCE_verify.
     # LASSI pipeline refactors from this baseline; the LASSI judge compares against it.
     code_blocks.append(input_code)
-    
-    
-    
+
+    # --- GPU health gate after ALL source-code work is complete ---
+    # Stage 0 (SOURCE_orig test) + Stage 1 (SOURCE_verify build + execute + Tier 2/3
+    # filter runs) are fully done at this point. Capture GPU state and run a fresh
+    # compute probe before the LASSI iteration loop begins. KERNEL_TEST5_CHACHA_2 and
+    # KERNEL_TEST6_CHACHA_1 both had transient SOURCE_verify failures that this gate
+    # would have detected — by the time we reach here, the corrupted spec is already
+    # in passthrough_spec_output, so a re-probe + compute check at this point catches
+    # the residual bad state before we commit 60+ minutes of LASSI iterations to a
+    # downstream comparison against bad spec.
+    _gpu_health_post_source = lassi.gpu_health.snapshot('post_source_pre_lassi', run_compute_test=True)
+    verification_log["gpu_health_timeline"].append(_gpu_health_post_source)
+    if _gpu_health_post_source['health_verdict'].startswith('FAIL'):
+        print(color.RED + color.BOLD +
+              f"\n[PIPELINE ABORT] GPU health check failed after Stage 0/1 source work: "
+              f"{_gpu_health_post_source['health_verdict']}. "
+              f"Source-code execution may have triggered a GPU fault — the spec "
+              f"captured during SOURCE_verify cannot be trusted." + color.END)
+        experiment_data["stage0_abort_reason"] = "gpu_health_post_source"
+        _abort_monitor_log_path = os.path.join(experiment_data_directory,
+            "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+        sys.stdout.flush()
+        lassi.monitor.save_log(_abort_monitor_log_path)
+        return False
+
     # --------------------------------------------------------
     # INITIATE LASSI LLM CODE GENERATION ITERATIVE PIPELINE
     while (
@@ -1080,6 +1256,15 @@ def auto_code_llmgeneration_pipeline(prompts,
         and self_correction_power_counter <= self_correction_power_counter_max
         and self_correction_verify_counter <= self_correction_verify_counter_max
     ):
+        # --- GPU health per-version snapshot (non-gating) ---
+        # Diagnostic only — records GPU state at the top of each LASSI iteration so that
+        # downstream data analysis can filter out trials whose environment degraded
+        # mid-pipeline. Uses the next-to-be-created code_version index as the label
+        # (len(code_blocks) is the slot the upcoming generation will fill).
+        _gpu_health_iter = lassi.gpu_health.snapshot(
+            f'pre_lassi_v{len(code_blocks)}', run_compute_test=False)
+        verification_log["gpu_health_timeline"].append(_gpu_health_iter)
+
         # Save compile_result at the start of this iteration before compile/execute can modify it.
         # Used later to detect whether we're entering a Tier 2 self-correction retry vs. a fresh code.
         compile_result_before_generation = compile_result
@@ -2316,6 +2501,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     spec_stdout=passthrough_spec_output,
                     generated_stdout=exe_output_generated,
                     tolerance=tier2_tolerance,
+                    n_safety_override=tolerance_safety_factor,
                 )
                 print(f"\n----- LASSI-Verify Tier 2: {tier2_verdict} -----")
                 if tier2_diagnostic.get("failures"):
@@ -2425,7 +2611,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     exe_input_parameters,
                     experiment_data_directory=experiment_data_directory,
                     code_version=code_version,
-                    verifyprompt=verifyprompt
+                    verifyprompt=verifyprompt,
+                    n_safety_override=tolerance_safety_factor,
                 )
                 # Enrich tier3_diagnostic with per-relation aggregates for Table 2 ★
                 _t3_names = [r["name"] for r in tier3_results_this_iter]
@@ -2566,6 +2753,13 @@ def auto_code_llmgeneration_pipeline(prompts,
 
                 _zs_stdout = ""          # combined-binary stdout; T1+T2 verdicts parsed from here
                 _zs_combined_ok = False  # True iff instrumentation+compile+execute all succeeded
+                # Per-tier diagnostic dicts — initialize so verification_log persistence
+                # has something to stash even when a tier is skipped (T2/T3 only run when
+                # the prior tier(s) PASS). Empty dict signals "not exercised".
+                _zs_t1_diag = {}
+                _zs_t2_diag = {}
+                _zs_t3_diag = {}
+                _zs_t3_results = []
                 if not _zs_instr:
                     print(color.RED + "[basellm_zs_verify] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
                     zs_tier1_verdict = "INSTRUMENT_ERROR"
@@ -2621,6 +2815,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                             spec_stdout=passthrough_spec_output,
                             generated_stdout=_zs_stdout,
                             tolerance=tier2_tolerance,
+                            n_safety_override=tolerance_safety_factor,
                         )
                         zs_tier2_verdict = _zs_t2_verdict
                         print(f"\n----- Zero-Shot Empirical Verify: Tier 2 → {zs_tier2_verdict} -----")
@@ -2649,6 +2844,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                             experiment_data_directory=experiment_data_directory,
                             code_version="zs",
                             verifyprompt=verifyprompt,
+                            n_safety_override=tolerance_safety_factor,
                         )
                         zs_tier3_verdict = _zs_t3_verdict
                         print(f"\n----- Zero-Shot Empirical Verify: Tier 3 → {zs_tier3_verdict} -----")
@@ -2673,6 +2869,14 @@ def auto_code_llmgeneration_pipeline(prompts,
                 verification_log["zeroshot_tier2_verdict"] = zs_tier2_verdict
                 verification_log["zeroshot_tier3_verdict"] = zs_tier3_verdict
                 verification_log["zeroshot_empirical_verdict"] = zs_empirical_verdict
+                # Persist per-tier diagnostic detail so the ZS verdict is auditable from the
+                # trial JSON without having to dig through the monitor log. Matches the
+                # detail level captured for LASSI iterations in verification_log["tier2_results"]
+                # and ["tier3_results"]. Empty dicts/lists indicate the tier was not exercised.
+                verification_log["zeroshot_tier1_diagnostic"] = _zs_t1_diag
+                verification_log["zeroshot_tier2_diagnostic"] = _zs_t2_diag
+                verification_log["zeroshot_tier3_diagnostic"] = _zs_t3_diag
+                verification_log["zeroshot_tier3_results"] = _zs_t3_results
                 experiment_data["zeroshot_tier1_verdict"] = zs_tier1_verdict
                 experiment_data["zeroshot_tier2_verdict"] = zs_tier2_verdict
                 experiment_data["zeroshot_tier3_verdict"] = zs_tier3_verdict
@@ -3620,7 +3824,15 @@ def auto_code_llmgeneration_pipeline(prompts,
         meta_data_file += "Valid code history: " + str(valid_code_history)
         meta_data_file += "\n"
         meta_data_file += "Iteration log: " + str(iteration_log)
-            
+
+    # GPU health timeline — appended outside the metric-history branch so it is
+    # included for both EE and runtime trials. Captures the pre-flight + per-version
+    # snapshots so the reviewer can see whether GPU state degraded during this trial
+    # (and whether any verdicts other than 'OK' should warrant filtering out the row).
+    meta_data_file += "\n\n"
+    meta_data_file += lassi.gpu_health.format_timeline(
+        verification_log.get("gpu_health_timeline", []))
+
     # Write meta data for this experiment
     if make_script:
         # filename = directory + "/" + "metadata" + "_" + experiment + ".txt"

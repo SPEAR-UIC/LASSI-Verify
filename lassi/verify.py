@@ -899,8 +899,149 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     return extracted_code
 
 
+# ---------------------------------------------------------------------------
+# ULP-aware tolerance derivation for Tier 2 / Tier 3 numerical comparisons.
+# See planning/ulp_aware_tolerance_design.md for the full design and citations.
+#
+# Decision tree (per PASSTHROUGH block):
+#   integer/byte/bit-packed types  → atol=0, rtol=0 (exact equality)
+#   float (single precision)       → atol = N × max_magnitude × 2^-23, rtol = N × 2^-23
+#   double (double precision)      → atol = N × max_magnitude × 2^-52, rtol = N × 2^-52
+#   unknown / fallback             → float32 formula with N×2 safety factor
+#
+# N (the safety factor for FP accumulation error) defaults to
+#   max(16, ceil(log2(buffer_size)))
+# which is the optimistic case for pairwise tree reduction on GPU. A per-kernel
+# override can be supplied via `n_safety_override` (read from source_apps.json's
+# optional `tolerance_safety_factor` field).
+# ---------------------------------------------------------------------------
+
+# Type sets used by _compute_fp_tolerance(). Centralized for easy extension.
+_INTEGER_TYPE_NAMES = frozenset({
+    'int', 'long', 'short', 'unsigned', 'char', 'bool', 'byte', 'size_t',
+    'int8_t', 'int16_t', 'int32_t', 'int64_t',
+    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
+    'unsigned int', 'unsigned long', 'unsigned char', 'unsigned short',
+    'long long', 'unsigned long long',
+})
+_FLOAT32_TYPE_NAMES = frozenset({'float', 'float32', 'float_t'})
+_FLOAT64_TYPE_NAMES = frozenset({'double', 'float64', 'double_t', 'long double'})
+
+# Module-level regex patterns reused inside _compute_fp_tolerance() (same patterns
+# as in compare_passthrough_outputs() — defined here so the helper is standalone).
+_TOL_TYPE_PATTERN     = re.compile(r'Type:\s*(.+?)(?:\n|$)')
+_TOL_STATS_PATTERN    = re.compile(r'Statistics:\s*min=([^,\s]+),\s*max=([^,\s]+),\s*mean=([^,\s]+)')
+_TOL_ELEMENTS_PATTERN = re.compile(r'Elements:\s*(\d+)')
+
+
+def _compute_fp_tolerance(spec_block_body, n_safety_override=None):
+    """Per-PASSTHROUGH-block tolerance derivation (ULP-aware).
+
+    Parses the source's PASSTHROUGH block to extract output type, max magnitude,
+    and buffer size, then applies the decision tree from
+    planning/ulp_aware_tolerance_design.md to compute (atol, rtol). The result is
+    deterministic for a given source block, by design: the LLM has no say in the
+    tolerance, so trials of the same kernel produce identical comparison criteria.
+
+    Args:
+        spec_block_body: text body of a source-side PASSTHROUGH block, between
+            the BEGIN and END delimiters. Expected to contain `Type:`,
+            `Statistics:`, and (optionally) `Elements:` lines as emitted by the
+            standard passthrough instrumentation.
+        n_safety_override: optional positive integer overriding the log2-derived
+            default safety factor. Sourced from `source_apps.json` per-kernel
+            `tolerance_safety_factor` field. None → use default formula.
+
+    Returns:
+        dict with:
+            atol            absolute tolerance for allclose comparison
+            rtol            relative tolerance for allclose comparison
+            metadata        dict suitable for logging in verification_log:
+                              type, max_magnitude, buffer_size, N_safety_factor,
+                              atol, rtol, tolerance_source
+    """
+    # --- Parse Type ---
+    type_match = _TOL_TYPE_PATTERN.search(spec_block_body)
+    type_str = (type_match.group(1).strip().lower() if type_match else '')
+
+    # --- Parse max(|value|) from Statistics ---
+    max_magnitude = 0.0
+    stats_match = _TOL_STATS_PATTERN.search(spec_block_body)
+    if stats_match:
+        try:
+            mn = float(stats_match.group(1))
+            mx = float(stats_match.group(2))
+            if math.isfinite(mn) and math.isfinite(mx):
+                max_magnitude = max(abs(mn), abs(mx))
+        except ValueError:
+            pass
+
+    # --- Parse Elements (buffer size) for log2-derived default N ---
+    buffer_size = 1
+    elems_match = _TOL_ELEMENTS_PATTERN.search(spec_block_body)
+    if elems_match:
+        try:
+            buffer_size = max(1, int(elems_match.group(1)))
+        except ValueError:
+            buffer_size = 1
+
+    # --- Default N: max(16, ceil(log2(buffer_size))) ---
+    # Reasoning: 16 is the safety factor for vector ops with FMA reassociation;
+    # log2(N) is the optimistic accumulation-error bound for pairwise reduction.
+    n_default = max(16, math.ceil(math.log2(buffer_size)) if buffer_size > 1 else 16)
+
+    # Override takes precedence; log the source so audits can tell apart.
+    if n_safety_override is not None and n_safety_override > 0:
+        n_used = int(n_safety_override)
+        tolerance_source_base = "config_override"
+    else:
+        n_used = n_default
+        tolerance_source_base = "default_log2_derived"
+
+    # --- Decision tree by type ---
+    if type_str in _INTEGER_TYPE_NAMES:
+        atol = 0.0
+        rtol = 0.0
+        tolerance_source = "default_exact_integer"
+        # For integer types, N is irrelevant; record 0 for clarity in the log.
+        n_recorded = 0
+    elif type_str in _FLOAT32_TYPE_NAMES:
+        eps = 2.0 ** -23                       # ≈ 1.19e-7
+        atol = n_used * max_magnitude * eps
+        rtol = n_used * eps
+        tolerance_source = tolerance_source_base
+        n_recorded = n_used
+    elif type_str in _FLOAT64_TYPE_NAMES:
+        eps = 2.0 ** -52                       # ≈ 2.22e-16
+        atol = n_used * max_magnitude * eps
+        rtol = n_used * eps
+        tolerance_source = tolerance_source_base
+        n_recorded = n_used
+    else:
+        # Unknown / mixed / struct: conservative float32 formula with 2× safety factor.
+        eps = 2.0 ** -23
+        n_recorded = n_used * 2
+        atol = n_recorded * max_magnitude * eps
+        rtol = n_recorded * eps
+        tolerance_source = "fallback_unknown_type"
+
+    return {
+        'atol': atol,
+        'rtol': rtol,
+        'metadata': {
+            'type':              type_str if type_str else 'unknown',
+            'max_magnitude':     max_magnitude,
+            'buffer_size':       buffer_size,
+            'N_safety_factor':   n_recorded,
+            'atol':              atol,
+            'rtol':              rtol,
+            'tolerance_source':  tolerance_source,
+        }
+    }
+
+
 def compare_passthrough_outputs(spec_stdout, generated_stdout,
-                                tolerance=1e-6):
+                                tolerance=1e-6, n_safety_override=None):
     """
     Tier 2 empirical equivalence check. Compare passthrough output from a generated
     code against the source-as-specification reference (SOURCE_verify stdout).
@@ -1045,6 +1186,11 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     failures = []
     blocks_compared = 0
     max_rel_err = 0.0   # largest relative error across all blocks and stats (for Table 2)
+    # Per-PASSTHROUGH-block tolerance metadata captured by _compute_fp_tolerance().
+    # Keyed by failure_label (label or label#N for multi-occurrence). Each value is
+    # the metadata dict returned by _compute_fp_tolerance() — see docstring there.
+    # Plumbed through to the caller (pipeline_v4.py) for verification_log capture.
+    per_block_tolerance = {}
 
     for label, spec_bodies in spec_blocks.items():
         gen_bodies = gen_blocks.get(label, [])
@@ -1155,11 +1301,20 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
                 })
                 continue
 
-            # Derive atol from the spec block's max statistic so that near-zero statistics
-            # (e.g., converged mean ~1e-12) are compared against the field's actual dynamic
-            # range rather than against zero. atol = |spec_max| * tolerance.
-            spec_max_val = abs(spec_stats.get('max', 0.0))
-            atol = spec_max_val * tolerance
+            # ULP-aware tolerance derivation: ask the helper to parse Type/max/buffer_size
+            # from the spec block and compute (atol, rtol) per the decision tree in
+            # planning/ulp_aware_tolerance_design.md. Replaces the prior scale-blind
+            # `atol = spec_max * tolerance` formula. The helper handles:
+            #   - integer/byte types → exact equality (atol=0, rtol=0)
+            #   - float32 → N × max × 2^-23
+            #   - float64 → N × max × 2^-52
+            #   - unknown → conservative float32 fallback
+            # N defaults to max(16, ceil(log2(buffer_size))); per-kernel override
+            # is plumbed through `n_safety_override` (from source_apps.json).
+            tol_result = _compute_fp_tolerance(spec_body, n_safety_override=n_safety_override)
+            atol = tol_result['atol']
+            rtol = tol_result['rtol']
+            per_block_tolerance[failure_label] = tol_result['metadata']
 
             # Compare each statistic using allclose: |a-b| <= atol + rtol*max(|a|,|b|)
             for stat_name, spec_val in spec_stats.items():
@@ -1173,12 +1328,13 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
                         "generated": "(missing)",
                         "abs_err":   float('inf'),
                         "atol":      atol,
+                        "rtol":      rtol,
                     })
                     continue
                 _denom = max(abs(spec_val), atol)
                 _rel = abs_err(spec_val, gen_val) / _denom if _denom > 0 else (0.0 if abs_err(spec_val, gen_val) == 0.0 else float('inf'))
                 max_rel_err = max(max_rel_err, _rel)
-                if not allclose_pass(spec_val, gen_val, tolerance, atol):
+                if not allclose_pass(spec_val, gen_val, rtol, atol):
                     failures.append({
                         "label":     failure_label,
                         "stat":      stat_name,
@@ -1186,6 +1342,7 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
                         "generated": gen_val,
                         "abs_err":   abs_err(spec_val, gen_val),
                         "atol":      atol,
+                        "rtol":      rtol,
                     })
 
             # Compare sample values element-wise with the same allclose tolerance
@@ -1196,7 +1353,7 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
                     _denom = max(abs(sv), atol)
                     _rel = abs_err(sv, gv) / _denom if _denom > 0 else (0.0 if abs_err(sv, gv) == 0.0 else float('inf'))
                     max_rel_err = max(max_rel_err, _rel)
-                    if not allclose_pass(sv, gv, tolerance, atol):
+                    if not allclose_pass(sv, gv, rtol, atol):
                         failures.append({
                             "label":     failure_label,
                             "stat":      f"sample[{idx}]",
@@ -1204,6 +1361,7 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
                             "generated": gv,
                             "abs_err":   abs_err(sv, gv),
                             "atol":      atol,
+                            "rtol":      rtol,
                         })
 
     # Check for blocks present in generated output but not in spec (informational only, not a failure)
@@ -1243,8 +1401,8 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
         verdict = "FAIL"
     else:
         summary = (
-            f"PASS: {blocks_compared} passthrough block(s) matched within allclose tolerance "
-            f"(rtol={tolerance:.1e}, atol=|spec_max|*rtol per block)."
+            f"PASS: {blocks_compared} passthrough block(s) matched within ULP-aware allclose tolerance "
+            f"(per-block; see per_block_tolerance for type/atol/rtol/N_safety_factor)."
         )
         if extra_labels:
             summary += f" ({len(extra_labels)} extra label(s) in generated output ignored: {extra_labels})"
@@ -1253,11 +1411,17 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     diagnostic = {
         "verdict":         verdict,
         "method":          "deterministic",
-        "tolerance":       tolerance,
+        "tolerance":       tolerance,    # legacy "global" rtol — retained for back-compat
         "blocks_compared": blocks_compared,
         "failures":        failures,
         "max_relative_error": max_rel_err if max_rel_err != float('inf') else None,
         "summary":         summary,
+        # Per-PASSTHROUGH-block ULP-aware tolerance metadata (see
+        # planning/ulp_aware_tolerance_design.md). Captures the actual tolerance
+        # used for each block, plus the inputs that drove it (Type, max magnitude,
+        # buffer size, N safety factor, tolerance_source). Pipeline-side captures
+        # this into verification_log for paper-defensible per-trial reproducibility.
+        "per_block_tolerance": per_block_tolerance,
     }
     return verdict, diagnostic
 
@@ -2213,7 +2377,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
 
 
 def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, relation,
-                                tolerance=None):
+                                tolerance=None, n_safety_override=None):
     """
     Tier 3: Deterministic check of a metamorphic relation between variant and original outputs.
 
@@ -2347,10 +2511,15 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                 if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
                     continue
 
-                # atol anchored to |factor * orig_max| * rtol so near-zero fields
-                # are judged against the field's actual dynamic range.
-                orig_max_val = abs(orig_stats.get('max', 0.0))
-                atol = abs(factor) * orig_max_val * rtol
+                # ULP-aware tolerance derivation from spec's PASSTHROUGH block.
+                # For SCALING, the variant's expected magnitude is |factor × orig|, so we
+                # scale the source-derived atol by |factor| (the ULP at the variant's
+                # value scale, not source's). rtol comes through unchanged (relative
+                # tolerance is scale-invariant under multiplication).
+                # See planning/ulp_aware_tolerance_design.md.
+                _tol = _compute_fp_tolerance(pass_bodies[i], n_safety_override=n_safety_override)
+                atol = abs(factor) * _tol['atol']
+                rtol = _tol['rtol']
 
                 for stat_name, orig_val in orig_stats.items():
                     var_val = var_stats.get(stat_name)
@@ -2628,9 +2797,19 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                 if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
                     continue  # NaN/Inf guard
 
-                # atol anchored to |Y_stat + offset| * rtol — the expected output magnitude
-                expected_max = abs(orig_stats.get('max', 0.0) + offset)
-                atol = expected_max * rtol
+                # ULP-aware tolerance derivation from spec's PASSTHROUGH block.
+                # For ADDITIVITY, variant_expected = orig + offset. The variant's
+                # magnitude is bounded by max(|orig_max|, |orig_max + offset|), so we
+                # take the larger of the two for the atol scale. rtol passes through
+                # unchanged. See planning/ulp_aware_tolerance_design.md.
+                _tol = _compute_fp_tolerance(pass_bodies[i], n_safety_override=n_safety_override)
+                # Adjust atol if offset shifts the magnitude meaningfully — take max
+                # of source-scale and shifted-scale tolerances to cover both cases.
+                _src_max = _tol['metadata']['max_magnitude']
+                _shifted_max = abs(_src_max + offset)
+                _scale_ratio = max(1.0, _shifted_max / _src_max) if _src_max > 0 else 1.0
+                atol = _tol['atol'] * _scale_ratio
+                rtol = _tol['rtol']
 
                 for stat_name, orig_val in orig_stats.items():
                     var_val = var_stats.get(stat_name)
@@ -2789,9 +2968,11 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                 if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
                     continue
 
-                # Step A: invariance check — each aggregate stat of Z ≈ Y (factor=1.0)
-                orig_max_val = abs(orig_stats.get('max', 0.0))
-                atol = orig_max_val * rtol
+                # Step A: invariance check — each aggregate stat of Z ≈ Y (factor=1.0).
+                # ULP-aware tolerance from spec's PASSTHROUGH (same as INVARIANCE).
+                _tol = _compute_fp_tolerance(pass_bodies[i], n_safety_override=n_safety_override)
+                atol = _tol['atol']
+                rtol = _tol['rtol']
                 for stat_name, orig_val in orig_stats.items():
                     var_val = var_stats.get(stat_name)
                     if var_val is None:
@@ -2955,9 +3136,13 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                 if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
                     continue  # NaN/Inf guard
 
-                # atol anchored to |orig_max| * rtol — same convention as SCALING with factor=1.
-                orig_max_val = abs(orig_stats.get('max', 0.0))
-                atol = orig_max_val * rtol
+                # ULP-aware tolerance derivation. For INVARIANCE the expected variant
+                # value equals the source value (no factor/offset), so atol/rtol come
+                # directly from the source-block helper. See
+                # planning/ulp_aware_tolerance_design.md.
+                _tol = _compute_fp_tolerance(pass_bodies[i], n_safety_override=n_safety_override)
+                atol = _tol['atol']
+                rtol = _tol['rtol']
 
                 # Aggregate stats: Z_stat ≈ Y_stat (no factor scaling, no min/max sign-flip).
                 for stat_name, orig_val in orig_stats.items():
@@ -3080,9 +3265,18 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                 if not all(math.isfinite(v) for v in list(orig_stats.values()) + list(var_stats.values())):
                     continue  # NaN/Inf guard
 
-                # atol anchored to |orig_max| * rtol — same convention as INVARIANCE.
-                orig_max_val = abs(orig_stats.get('max', 0.0))
-                atol = orig_max_val * rtol
+                # ULP-aware tolerance derivation. For SENSITIVITY the comparison
+                # threshold defines "differs beyond FP noise"; using a too-loose
+                # threshold would let small FP-reorder differences be misread as
+                # "variant responded to perturbation" (false PASS). The same
+                # source-derived ULP tolerance as INVARIANCE is the right floor:
+                # a true sensitivity response will exceed it by many orders of
+                # magnitude (response to a 1-bit input change typically shifts
+                # output by a significant fraction of its magnitude for nonlinear
+                # kernels). See planning/ulp_aware_tolerance_design.md.
+                _tol = _compute_fp_tolerance(pass_bodies[i], n_safety_override=n_safety_override)
+                atol = _tol['atol']
+                rtol = _tol['rtol']
 
                 # SENSITIVITY signal: count stats/samples that genuinely differ.
                 # "Differ" = NOT within allclose tolerance (so genuinely beyond FP noise).
@@ -3193,7 +3387,8 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                               exe_input_parameters,
                               experiment_data_directory="generated_codes",
                               code_version=None,
-                              verifyprompt=False):
+                              verifyprompt=False,
+                              n_safety_override=None):
     """
     Tier 3: Orchestrate metamorphic testing for one code (fail-fast variant loop).
 
@@ -3559,7 +3754,8 @@ def run_metamorphic_variants(source_code, active_relations, contract,
         # --- Step 5: Check metamorphic relation ---
         tolerance = relation.get("tolerance", 1e-5)
         verdict, diagnostic = check_metamorphic_relation(
-            variant_stdout, original_passthrough_stdout, relation, tolerance
+            variant_stdout, original_passthrough_stdout, relation, tolerance,
+            n_safety_override=n_safety_override,
         )
         # Only update source_status during Stage 0 (code_version is None).
         # In the main loop, source_status was frozen at Stage 0 and must not be overwritten
@@ -3726,7 +3922,8 @@ def run_metamorphic_variants(source_code, active_relations, contract,
 
             _tolerance = relation.get("tolerance", 1e-5)
             _verdict, _diagnostic = check_metamorphic_relation(
-                _variant_stdout, original_passthrough_stdout, relation, _tolerance
+                _variant_stdout, original_passthrough_stdout, relation, _tolerance,
+                n_safety_override=n_safety_override,
             )
             relation["source_status"] = _verdict  # update for Stage 0 filter
             _replace_result({"name": relation_name, "verdict": _verdict,

@@ -332,6 +332,13 @@ def experimental_setup(cfg):
     else:
         exe_input_parameters = [""]
 
+    # Optional per-kernel ULP safety-factor override for Tier 2 / Tier 3 numerical comparison.
+    # See planning/ulp_aware_tolerance_design.md for the design. When absent, the framework
+    # uses max(16, ceil(log2(buffer_size))) per the default formula. Override is a positive
+    # integer in source_apps.json under the kernel's entry, e.g.:
+    #   "keogh": { "app_folder": "keogh", ..., "tolerance_safety_factor": 16 }
+    tolerance_safety_factor = source_apps[source_collection][source_app].get("tolerance_safety_factor", None)
+
 
     """
     [3] SELECT THE LLM TO USE FOR THE CODE TRANSLATION EXPERIMENT
@@ -501,6 +508,8 @@ def experimental_setup(cfg):
         "pipeline_runtime_min",
         "tier2_pass_count",
         "tier2_fail_total",
+        "tier2_tolerance_atol_max",  # ★ ULP-aware tolerance: largest atol across PASSTHROUGH blocks this trial
+        "tier2_tolerance_rtol_max",  # ★ ULP-aware tolerance: rtol applied (uniform for float types)
         "tier3_pass_count",
         "tier3_fail_total",
         "tier3_active_relations",
@@ -533,7 +542,7 @@ def experimental_setup(cfg):
             experiment, display_response, test_with_error, generate_test_case, power_measure, yes_power_feedback, baseline_oneshot_goal, use_self_prompting, vary_llm_temp,
             verifyprompt, DATAFIELDNAMES, detected_vendor.upper(),
             run_tier2, tier2_tolerance, run_tier3, tier3_tolerance,
-            run_llm_judge, run_witness_chain)
+            run_llm_judge, run_witness_chain, tolerance_safety_factor)
 
 
 # EXPERIMENTAL DATA COLLECTION MANAGEMENT
@@ -570,7 +579,7 @@ original_home_directory = os.getcwd()
     display_response, test_with_error, generate_test_case, power_measure, yes_power_feedback, baseline_oneshot_goal,
     use_self_prompting, vary_llm_temp, verifyprompt, DATAFIELDNAMES, gpu_vendor,
     run_tier2, tier2_tolerance, run_tier3, tier3_tolerance,
-    run_llm_judge, run_witness_chain
+    run_llm_judge, run_witness_chain, tolerance_safety_factor
 ) = experimental_setup(_cfg)
 
 # IMPORT CONTEXT KNOWLEDGE FOR TARGET PROGRAMMING LANGUAGE
@@ -799,7 +808,8 @@ while trial_number <= total_trials:
             tier3_tolerance=tier3_tolerance,
             run_llm_judge=run_llm_judge,
             run_witness_chain=run_witness_chain,
-            attempt_log_file_path=attempt_log_file_path
+            attempt_log_file_path=attempt_log_file_path,
+            tolerance_safety_factor=tolerance_safety_factor,
         )
     except Exception as _crash_exc:
         print("\n\n" + color.RED + color.BOLD +
