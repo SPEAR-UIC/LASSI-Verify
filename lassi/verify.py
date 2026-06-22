@@ -927,6 +927,13 @@ _INTEGER_TYPE_NAMES = frozenset({
 _FLOAT32_TYPE_NAMES = frozenset({'float', 'float32', 'float_t'})
 _FLOAT64_TYPE_NAMES = frozenset({'double', 'float64', 'double_t', 'long double'})
 
+# Application-specific integer typedef pattern. Catches benchmark-style names
+# like u64Int / u64int / u32int / 64int / s32int that are common in HeCBench
+# and similar suites (e.g., RandomAccess's u64Int). Matched AFTER the explicit
+# frozenset above and case-insensitively, so well-known standard names take
+# precedence (and the regex is only consulted on a frozenset miss).
+_INTEGER_TYPEDEF_PATTERN = re.compile(r'^[us]?\d+int$', re.IGNORECASE)
+
 # Module-level regex patterns reused inside _compute_fp_tolerance() (same patterns
 # as in compare_passthrough_outputs() — defined here so the helper is standalone).
 _TOL_TYPE_PATTERN     = re.compile(r'Type:\s*(.+?)(?:\n|$)')
@@ -1004,6 +1011,15 @@ def _compute_fp_tolerance(spec_block_body, n_safety_override=None):
         rtol = 0.0
         tolerance_source = "default_exact_integer"
         # For integer types, N is irrelevant; record 0 for clarity in the log.
+        n_recorded = 0
+    elif _INTEGER_TYPEDEF_PATTERN.match(type_str):
+        # Application-specific integer typedef (e.g., u64Int, u32int, 64int).
+        # Treat as exact-integer comparison — same as a standard integer type —
+        # to avoid falling through to the unknown-type fallback path which would
+        # apply an inappropriately lenient float-style tolerance to integer data.
+        atol = 0.0
+        rtol = 0.0
+        tolerance_source = "default_exact_integer_typedef"
         n_recorded = 0
     elif type_str in _FLOAT32_TYPE_NAMES:
         eps = 2.0 ** -23                       # ≈ 1.19e-7

@@ -192,6 +192,89 @@ def _query_amd():
     return snap
 
 
+def _query_power_profile_nvidia():
+    """Read the GPU's static power/clock policy + OS-level power state.
+
+    Captures information that does NOT vary during a trial but DOES affect
+    every measurement in the trial — the configured power limits, persistence
+    mode, max clock, OS power profile, and AC adapter state. Intended to be
+    called once at pipeline_start so the meta-file timeline shows the policy
+    environment the trial ran under. Catches cases like
+    KERNEL_TEST6_RandA_1 where sustained SW_THERMAL_SLOWDOWN + SW_POWER_CAP
+    throttling at 44°C points at a vendor-set TGP cap or persistence-mode
+    issue rather than actual thermal stress.
+
+    Read-only — does NOT change any system state. Returns a dict; fields that
+    cannot be read are None (treated as "unknown", not "default").
+    """
+    profile = {
+        'power_limit_w': None,
+        'power_default_limit_w': None,
+        'power_min_limit_w': None,
+        'power_max_limit_w': None,
+        'persistence_mode': None,
+        'max_sm_clock_mhz': None,
+        'os_power_profile': None,
+        'ac_adapter_online': None,
+        'battery_capacity_pct': None,
+    }
+
+    # NVIDIA power/clock profile fields. power.management is deprecated in newer
+    # smi releases and returns a deprecation notice rather than an error — we
+    # just leave it None if unparseable.
+    smi_fields = [
+        'power.limit',
+        'power.default_limit',
+        'power.min_limit',
+        'power.max_limit',
+        'persistence_mode',
+        'clocks.max.sm',
+    ]
+    rc, out, _ = _run(['nvidia-smi',
+                       '--query-gpu=' + ','.join(smi_fields),
+                       '--format=csv,noheader,nounits'], timeout=10)
+    if rc == 0 and out.strip():
+        row = [v.strip() for v in out.strip().split('\n')[0].split(',')]
+        if len(row) >= 6:
+            profile['power_limit_w']         = _parse_int(row[0])  # often [N/A] on consumer GPUs
+            profile['power_default_limit_w'] = _parse_int(row[1])
+            profile['power_min_limit_w']     = _parse_int(row[2])
+            profile['power_max_limit_w']     = _parse_int(row[3])
+            profile['persistence_mode']      = row[4] or None
+            profile['max_sm_clock_mhz']      = _parse_int(row[5])
+
+    # OS-level power profile (Linux power-profiles-daemon)
+    if _which('powerprofilesctl'):
+        rc, out, _ = _run(['powerprofilesctl', 'get'], timeout=5)
+        if rc == 0:
+            profile['os_power_profile'] = out.strip() or None
+
+    # AC adapter state — checked via sysfs (Linux). Some systems name the
+    # adapter directory ADP1 instead of AC; check both common names.
+    for ac_path in ('/sys/class/power_supply/AC/online',
+                    '/sys/class/power_supply/ADP1/online'):
+        if os.path.exists(ac_path):
+            try:
+                with open(ac_path) as f:
+                    profile['ac_adapter_online'] = int(f.read().strip())
+                break
+            except (OSError, ValueError):
+                pass
+    # Battery state (helps interpret AC=0 readings; full battery + AC=0 still
+    # gives reasonable performance for short trials).
+    for bat_path in ('/sys/class/power_supply/BAT0/capacity',
+                     '/sys/class/power_supply/BAT1/capacity'):
+        if os.path.exists(bat_path):
+            try:
+                with open(bat_path) as f:
+                    profile['battery_capacity_pct'] = int(f.read().strip())
+                break
+            except (OSError, ValueError):
+                pass
+
+    return profile
+
+
 def _dmesg_xid_check():
     """Count Xid events in dmesg within the recent window.
 
@@ -404,6 +487,16 @@ def snapshot(label, vendor=None, run_compute_test=False):
 
     compute_result = _run_compute_test(vendor) if run_compute_test else None
 
+    # Power-profile snapshot — captured at the same call sites as the compute
+    # probe (pipeline_start and post_source_pre_lassi). These fields rarely
+    # change during a trial but materially affect every measurement, so a
+    # one-shot read at trial start is enough; per-iteration snapshots skip it.
+    # Read-only — never modifies system state. Currently NVIDIA-only; AMD path
+    # returns None so the field is present in the schema for both vendors.
+    power_profile = None
+    if run_compute_test and vendor == 'NVIDIA':
+        power_profile = _query_power_profile_nvidia()
+
     snap['label'] = label
     snap['timestamp'] = timestamp
     snap['xid_recent_count'] = xid_info.get('count', -1)
@@ -411,6 +504,7 @@ def snapshot(label, vendor=None, run_compute_test=False):
     snap['xid_note'] = xid_info.get('note')
     snap['compute_test_verdict'] = compute_result['verdict'] if compute_result else None
     snap['compute_test_detail'] = compute_result['detail'] if compute_result else None
+    snap['power_profile'] = power_profile
     snap['health_verdict'] = _derive_verdict(snap, xid_info, compute_result)
     snap['summary_line'] = _format_summary_line(label, snap, xid_info, compute_result)
 
@@ -430,6 +524,21 @@ def format_timeline(timeline):
                 lines.append(f"      xid: {xid_line[:140]}")
         if s.get('compute_test_detail'):
             lines.append(f"      compute detail: {s['compute_test_detail'][:140]}")
+        pp = s.get('power_profile')
+        if pp:
+            # One-line summary: shows configured limits + persistence + OS profile + AC.
+            # Helps spot RandA_1-style throttling causes (e.g., power.limit < max, or
+            # persistence_mode=Disabled, or os_power_profile=power-saver) post-hoc.
+            lines.append(
+                f"      power profile: limit={pp.get('power_limit_w')}W "
+                f"default={pp.get('power_default_limit_w')}W "
+                f"max={pp.get('power_max_limit_w')}W "
+                f"persistence={pp.get('persistence_mode')} "
+                f"max_sm_clock={pp.get('max_sm_clock_mhz')}MHz "
+                f"os_profile={pp.get('os_power_profile')} "
+                f"ac_online={pp.get('ac_adapter_online')} "
+                f"battery={pp.get('battery_capacity_pct')}%"
+            )
     return "\n".join(lines) + "\n"
 
 
