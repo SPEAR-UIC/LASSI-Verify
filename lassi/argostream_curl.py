@@ -40,7 +40,7 @@ def argo_fetch_with_curl(data):
     local = True
 
     if local:
-        host_url = "apps-test.inside.anl.gov"
+        host_url = "apps.inside.anl.gov"
     else:
         host_url = "localhost:5000"
 
@@ -51,7 +51,7 @@ def argo_fetch_with_curl(data):
         "-H", "Accept-Encoding: identity",
         "-H", "Accept: text/plain",
         "-H", "Cache-Control: no-cache",
-        "-H", "Host: apps-dev.inside.anl.gov"
+        "-H", "Host: apps.inside.anl.gov"
     ]
 
     # Check if payload is large (> 50KB as a safety threshold)

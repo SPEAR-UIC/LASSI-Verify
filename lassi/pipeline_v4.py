@@ -951,8 +951,11 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Pure framework-internal check — does not depend on any source-code internal
     # PASS/FAIL print (those are benchmark-specific and we deliberately do not gate on
     # them). The LASSI_VERIFY_SEED env var is held in code_manager module state, so the
-    # re-execute uses the same seed automatically; ULP tolerance applies the same per
-    # block, so determinism here means "byte-for-byte identical PASSTHROUGH bodies."
+    # re-execute uses the same seed automatically. Determinism here means "reproducible
+    # within the same ULP-aware tolerance that Tier 2 applies downstream" — NOT byte-for-byte
+    # identical — so legitimate floating-point reduction noise (e.g. an atomically-reduced
+    # residual scalar whose last digits wander run-to-run but sit inside rtol) does not
+    # spuriously abort the trial. The witness_chain_state block stays byte-exact.
     # Skips power monitoring on the re-run (power_measure=False, short settle) so the
     # added cost is one extra binary invocation (~8s for chacha; scales with kernel
     # cost). Catches the chacha20 KERNEL_TEST6 class of failures where the first
@@ -975,48 +978,42 @@ def auto_code_llmgeneration_pipeline(prompts,
             _sv2_result = "EXCEPTION"
             _sv2_stdout = ""
 
-        # Parse PASSTHROUGH block bodies from both runs and compare. We compare only the
-        # block bodies (between BEGIN/END markers), not the surrounding stdout, because
-        # benchmark-specific timing prints ("Average execution time: ... us") are expected
-        # to differ run-to-run and are not part of the spec.
-        _block_pattern_consistency = re.compile(
-            r'=== BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\] ===\n(.*?)\n=== END LASSI-VERIFY PASSTHROUGH \[[^\]]+\] ===',
-            re.DOTALL
+        # Compare the two runs' PASSTHROUGH output using the SAME tolerance-aware
+        # comparison Tier 2 applies downstream (compare_passthrough_outputs), rather than
+        # a byte-exact string diff. The gate exists to catch specs that are unreliable
+        # *relative to the tolerance Tier 2 will use* — a byte-exact diff is stricter than
+        # that and spuriously aborts on legitimate floating-point reduction noise (e.g. an
+        # atomically-reduced residual scalar whose last ~7 digits wander run-to-run but sit
+        # well inside rtol). compare_passthrough_outputs still compares the
+        # witness_chain_state block byte-exact, so a genuinely wandering witness chain
+        # (real output-poisoning corruption) is still caught here. run1 is treated as the
+        # "spec" and run2 as the "generated" output — the comparison is symmetric in
+        # practice for the same binary re-run.
+        _consistency_verdict, _consistency_diag = lassi.verify.compare_passthrough_outputs(
+            passthrough_spec_output,
+            _sv2_stdout,
+            tolerance=tier2_tolerance,
+            n_safety_override=tolerance_safety_factor,
         )
-        _spec1_blocks = {m.group(1): m.group(2) for m in _block_pattern_consistency.finditer(passthrough_spec_output)}
-        _spec2_blocks = {m.group(1): m.group(2) for m in _block_pattern_consistency.finditer(_sv2_stdout)}
-
-        _consistency_mismatches = []
-        # Symmetric difference on labels first — both runs must produce the same set of blocks.
-        for _lbl in sorted(set(_spec1_blocks) ^ set(_spec2_blocks)):
-            _consistency_mismatches.append({
-                "label": _lbl,
-                "reason": "block-label-absent-in-other-run",
-                "in_run1": _lbl in _spec1_blocks,
-                "in_run2": _lbl in _spec2_blocks,
-            })
-        # Body-byte comparison on the common labels.
-        for _lbl in sorted(set(_spec1_blocks) & set(_spec2_blocks)):
-            if _spec1_blocks[_lbl] != _spec2_blocks[_lbl]:
-                _consistency_mismatches.append({
-                    "label": _lbl,
-                    "reason": "block-body-differs",
-                    "run1_first_120": _spec1_blocks[_lbl][:120],
-                    "run2_first_120": _spec2_blocks[_lbl][:120],
-                })
-
+        _consistency_mismatches = _consistency_diag.get("failures", [])
+        verification_log["source_verify_consistency_verdict"] = _consistency_verdict
         verification_log["source_verify_consistency_mismatches"] = _consistency_mismatches
         verification_log["source_verify_consistency_run2_status"] = _sv2_result
 
-        if _sv2_result != "0" or _consistency_mismatches:
+        # Abort on a hard re-execute failure or a tolerance-exceeding mismatch. A "SKIP"
+        # verdict (no comparable blocks) is not treated as non-determinism — we only got
+        # here because passthrough_spec_output was non-empty, so a SKIP would itself be a
+        # blocks-missing anomaly surfaced as a FAIL by the count check above.
+        if _sv2_result != "0" or _consistency_verdict == "FAIL":
             print(color.RED + color.BOLD +
                   f"\n[PIPELINE ABORT] SOURCE_verify self-consistency check failed: "
-                  f"re-execute_status={_sv2_result}, mismatches={len(_consistency_mismatches)}. "
-                  f"The spec captured during SOURCE_verify is non-deterministic across runs — "
-                  f"every Tier 2 comparison would be against an unreliable baseline. Common "
-                  f"causes: GPU/driver transient, instrumentation race condition, or witness "
-                  f"chain insertion order corrupting the kernel output (see "
-                  f"lassi/context/Witness_Chain_Harness.md)." + color.END)
+                  f"re-execute_status={_sv2_result}, tolerance_verdict={_consistency_verdict}, "
+                  f"mismatches={len(_consistency_mismatches)}. The spec captured during "
+                  f"SOURCE_verify is non-deterministic across runs *beyond the Tier 2 "
+                  f"tolerance* — every Tier 2 comparison would be against an unreliable "
+                  f"baseline. Common causes: GPU/driver transient, instrumentation race "
+                  f"condition, or witness chain insertion order corrupting the kernel output "
+                  f"(see lassi/context/Witness_Chain_Harness.md)." + color.END)
             for _mm in _consistency_mismatches[:3]:
                 print(f"    mismatch: {_mm}")
             experiment_data["stage0_abort_reason"] = "source_verify_nondeterministic"
@@ -1026,7 +1023,9 @@ def auto_code_llmgeneration_pipeline(prompts,
             lassi.monitor.save_log(_abort_monitor_log_path)
             return False
         else:
-            print(f"----- SOURCE_verify self-consistency check: PASS (all {len(_spec1_blocks)} PASSTHROUGH block(s) byte-for-byte identical across two runs) -----")
+            print(f"----- SOURCE_verify self-consistency check: PASS (PASSTHROUGH blocks "
+                  f"reproducible within Tier 2 tolerance across two runs; "
+                  f"tolerance_verdict={_consistency_verdict}) -----")
 
     # ULP-aware tolerance derivation: parse SOURCE_verify's PASSTHROUGH blocks once and
     # record the per-block tolerance (atol, rtol, type, max_magnitude, buffer_size, N) in
