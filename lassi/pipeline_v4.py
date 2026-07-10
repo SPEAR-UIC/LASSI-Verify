@@ -3404,6 +3404,59 @@ def auto_code_llmgeneration_pipeline(prompts,
                 print(f"[Best Clean Run] EXECUTE EXCEPTION — using instrumented metrics for final report.\n{_clean_ex}")
                 lassiee_clean_status = "execute_error"
 
+        # ----------------------------------------------------------------
+        # LASSI RESULT ARTIFACT
+        # Production framing: LASSI's single deliverable is "the best validated
+        # refactoring that OUTPERFORMS source, if one exists" — no intermediate
+        # versions, no attempt count. Emit clearly-named copies ONLY when the
+        # winner is validated (we are already inside tracking_best_version > 1)
+        # AND faster than source on the fair clean comparison. Two copies:
+        #   *_LASSI_RESULT_Trial{N}.cu               — deployable (instrumentation stripped)
+        #   *_LASSI_RESULT_instrumented_Trial{N}.cu  — as-validated (Tier 1/2/3 + witness blocks)
+        # "Faster than source" uses the clean uninstrumented metric (energy in
+        # EE mode, else runtime); the clean run must have succeeded so the
+        # comparison is fair AND the deployable copy is known-compilable.
+        # ----------------------------------------------------------------
+        _result_metric = lassiee_clean_energy_diff if power_measure else lassiee_clean_runtime_diff
+        _result_beats_source = (
+            lassiee_clean_status == "success"
+            and isinstance(_result_metric, (int, float))
+            and _result_metric < 0
+        )
+        if _result_beats_source:
+            _metric_label = ("energy " + str(lassiee_clean_energy_diff)) if power_measure \
+                else ("runtime " + str(lassiee_clean_runtime_diff))
+            _result_header = (
+                "// ============================================================\n"
+                "// LASSI-VERIFY RESULT — validated refactoring that outperforms source\n"
+                f"// Application: {app_name}   Trial: {trial_number}\n"
+                f"// Clean (uninstrumented) vs source: {_metric_label}%\n"
+                f"// Verified: Tier 1/2/3 + witness chain (see result_verification_log_*_Trial{trial_number}.json)\n"
+                f"// Deployable stripped code; as-validated instrumented copy: "
+                f"*_LASSI_RESULT_instrumented_Trial{trial_number}.cu\n"
+                "// ============================================================\n"
+            )
+            _result_clean_path = os.path.join(
+                experiment_data_directory,
+                file_name_save + "_LASSI_RESULT_Trial" + str(trial_number) + ".cu")
+            with open(_result_clean_path, 'w') as _rf:
+                _rf.write(_result_header + best_clean_code)
+            _result_instr_path = os.path.join(
+                experiment_data_directory,
+                file_name_save + "_LASSI_RESULT_instrumented_Trial" + str(trial_number) + ".cu")
+            with open(_result_instr_path, 'w') as _rf:
+                _rf.write(best_code_raw)
+            print(color.GREEN + color.BOLD +
+                  f"\n----- [LASSI RESULT] Validated refactoring beats source "
+                  f"({_metric_label}%); wrote deployable + as-validated copies:\n"
+                  f"        {os.path.basename(_result_clean_path)}\n"
+                  f"        {os.path.basename(_result_instr_path)} -----" + color.END)
+        else:
+            print(f"\n----- [LASSI RESULT] No result artifact emitted — best validated "
+                  f"variant does not outperform source "
+                  f"(clean_status={lassiee_clean_status}, "
+                  f"{'energy' if power_measure else 'runtime'}_diff={_result_metric}). -----")
+
     # Prompt the LLM to compare the codes between SOURCE and the "BEST" refactored version.
     # Only run if a generated code exists (tracking_best_version > 1; indices 0-1 are source versions).
     if (tracking_best_version > 1):
