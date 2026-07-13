@@ -1619,13 +1619,25 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
         content_prompt += (
             "IMPORTANT — previous attempt feedback:\n"
             "The following relations were proposed in a previous attempt but ALL FAILED "
-            "when tested against the verified source code. Do NOT re-propose these relations:\n\n"
+            "the source filter (they do not actually hold for the verified source code). "
+            "Each line reports what the framework OBSERVED when it tested the relation. "
+            "Do NOT re-propose these relations:\n\n"
         )
         for name, description, fail_reason in feedback:
-            content_prompt += f"  - {name}: {description}\n    Reason failed: {fail_reason}\n"
+            content_prompt += f"  - {name}: {description}\n    Observed: {fail_reason}\n"
         content_prompt += (
-            "\nUsing the catalog above, select DIFFERENT relations that are categorically "
-            "distinct from those that failed.\n\n"
+            "\nUse these observations to infer the computation's structure, then select "
+            "DIFFERENT relations that are categorically distinct from those that failed:\n"
+            "  - If a scaled/shifted input did NOT scale/shift the output as expected, the "
+            "map is nonlinear (or has fixed boundary conditions / clamping) — SCALING and "
+            "ADDITIVITY will keep failing; do not retry them.\n"
+            "  - If the output did NOT stay unchanged under a claimed-invariant transform, "
+            "that INVARIANCE does not hold — do not retry it.\n"
+            "  - Almost every deterministic kernel still admits a STRUCTURAL relation even "
+            "when no quantitative one does: SENSITIVITY (a relevant input change MUST change "
+            "the output), MONOTONICITY (an iterative/convergent solver's residual/error must "
+            "not increase), or CONSERVATION (a summed/preserved quantity is unchanged). "
+            "Prefer these when quantitative relations have failed.\n\n"
         )
 
     content_prompt += (

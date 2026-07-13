@@ -261,6 +261,40 @@ clamped to zero also changes — do not propose it.
 - **Spatially isotropic problem** (no preferred direction): ROTATION (5.1 or 5.2) may apply
 - **No symmetry**: skip Categories 2 and 5
 
+### Analysis Question 5: If no quantitative relation applies, which structural relation does? (Universal fallback)
+
+Quantitative relations (SCALING, ADDITIVITY, and scaling-based INVARIANCE) require the
+output to be a simple function of a transformed input. Many correct kernels are nonlinear,
+clamped/thresholded, min/max-based, or have pinned boundary conditions and therefore admit
+**none** of them — the source filter will reject every quantitative relation you try. This
+is expected and is NOT a reason to give up: producing an empty contract aborts verification
+entirely, which is strictly worse than one well-chosen structural relation.
+
+**Almost every non-degenerate deterministic kernel admits at least one STRUCTURAL relation.**
+Select it by the kernel's *computational property* — this reasoning is universal and does not
+depend on the kernel's scientific domain:
+
+- **SENSITIVITY** — applies to essentially ANY deterministic map. If the kernel reads an input
+  buffer and its output genuinely depends on that buffer, then perturbing that input (a single
+  element, or a single bit of a packed value) MUST change at least one observed statistic or
+  sample. Output that is *unchanged* under a real input perturbation means the computation
+  ignored the input — a serious fault. This survives even when every quantitative relation fails.
+- **MONOTONICITY** — applies to ANY iterative/convergent computation. If the kernel iterates
+  toward a solution and a residual/error/objective value is observable (in a passthrough buffer
+  or printed to stdout), a converging method must not let it increase from one iteration to the
+  next. Use this whenever an iteration count and a convergence metric exist.
+- **CONSERVATION** — applies whenever the computation preserves an aggregate/summable quantity
+  (total mass, particle count, probability sum, energy). The aggregate is unchanged (or changes
+  by a known amount) under the operation, regardless of per-element values.
+
+**Rule:** If Analysis Questions 1–4 leave you with only quantitative relations that the
+linear/nonlinear/threshold/normalization checks above have ruled out — or if previous-attempt
+feedback reports that quantitative relations did not hold for this source — propose at least one
+structural relation from this list, chosen by the properties above. A contract containing a
+single well-grounded SENSITIVITY or MONOTONICITY relation is far more valuable than an empty one.
+Do not pad with extra weak relations (Coverage Principle §7 still applies) — but never return
+zero relations when a structural one is available.
+
 ### Fail-Fast Ordering Rule
 
 Order selected relations **cheapest-first and most-discriminating-first** within the same cost tier:

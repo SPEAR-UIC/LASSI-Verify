@@ -171,6 +171,35 @@ ATTEMPT_LOG_FIELDNAMES = [
 ]
 
 
+def _condense_t3_filter_reason(result_entry):
+    """Condense one run_metamorphic_variants() result entry into a short (<=2 line)
+    OBSERVED reason string, for feeding into the Tier 3 contract-regeneration retry.
+
+    This surfaces what the deterministic source filter actually measured — the same
+    nature as the T1/T2 retry feedback — so the LLM can infer the computation's
+    structure (e.g. "output did not scale" -> nonlinear) rather than re-guessing
+    blindly. It reports observations only; it never tells the LLM what to propose.
+
+    - Checked relations (verdict PASS/FAIL) carry a "diagnostic" dict whose "summary"
+      is a human-readable multi-line string (headline + concrete numeric example).
+      We keep the first two non-empty lines.
+    - SKIP entries (variant insertion/compile/execute failure) have no diagnostic;
+      we use the "reason" field.
+    Returns "source_status=..." only as a last resort so behaviour never regresses.
+    """
+    if not isinstance(result_entry, dict):
+        return "source_status=unknown"
+    diag = result_entry.get("diagnostic")
+    if isinstance(diag, dict) and diag.get("summary"):
+        lines = [ln.strip() for ln in str(diag["summary"]).splitlines() if ln.strip()]
+        if lines:
+            return " | ".join(lines[:2])
+    reason = result_entry.get("reason")
+    if reason:
+        return f"not applied: {reason}"
+    verdict = result_entry.get("verdict", "unknown")
+    return f"source_status={verdict}"
+
 
 def auto_code_llmgeneration_pipeline(prompts,
                                      this_llm_systemcode_prompt,
@@ -1187,15 +1216,26 @@ def auto_code_llmgeneration_pipeline(prompts,
             if n_active > 0:
                 break  # success — at least one active relation
 
-            # All relations failed — build feedback for next attempt
+            # All relations failed — build feedback for next attempt.
+            # Surface the OBSERVED reason the source filter measured for each relation
+            # (not just source_status), so the LLM can infer the computation's structure
+            # and choose a categorically different relation next attempt. Reasons come
+            # from filter_results (matched by relation name); see _condense_t3_filter_reason.
             if _t3_attempt < TIER3_CONTRACT_MAX_ATTEMPTS:
+                _t3_reason_by_name = {
+                    e.get("name"): _condense_t3_filter_reason(e)
+                    for e in (filter_results or [])
+                    if isinstance(e, dict) and e.get("name")
+                }
                 tier3_feedback = [
                     (r["name"],
                      r.get("description", "(no description)"),
-                     f"source_status={r.get('source_status', 'unknown')}")
+                     _t3_reason_by_name.get(
+                         r["name"],
+                         f"source_status={r.get('source_status', 'unknown')}"))
                     for r in tier3_contract["relations"]
                 ]
-                print(f"      All {n_total} relation(s) failed source filter — retrying with failure feedback.")
+                print(f"      All {n_total} relation(s) failed source filter — retrying with observed-reason feedback.")
             else:
                 # Final attempt also produced zero active relations — abort
                 print(color.RED + color.BOLD +
