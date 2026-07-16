@@ -1557,12 +1557,26 @@ attend to" question from both sides.
 3. **Source-grounded** — SOURCE_verify must empirically demonstrate that f(T(x)) ≠ f(x).
    This is the source filter; relations where source happens to be insensitive get filtered
    inactive.
-4. **Minimal** — prefer the smallest perturbation that produces a measurable response (e.g.,
-   single-bit flip for cryptographic kernels). Larger perturbations are valid but less
-   surgical.
+
+**Multiple perturbations per SENSITIVITY relation (applied automatically).** The framework
+probes each SENSITIVITY relation with MORE THAN ONE perturbation of the chosen input
+dimension — a MINIMAL bump (the smallest change that could produce a response) AND a LARGE
+generic OUTLIER (one element pushed far outside the observed min–max of the sampled input).
+Both are applied IDENTICALLY to the source and to every generated variant, so the source
+filter's guarantee transfers to each variant test. The outlier guarantees a response from
+rank / threshold / argmax / comparison kernels where a minimal bump may not cross a decision
+boundary. **Verdict rule:** at the source filter, only perturbations the SOURCE responds to
+are kept ("source-active"); a variant then PASSES the relation only if it responds to EVERY
+source-active perturbation (a variant that ignores any of them is failing that input
+dimension). This stays SINGLE-CONCERN — every perturbation probes the SAME one property
+("output is sensitive to input dimension D"); the perturbations are just multiple stimuli for
+that property, not multiple properties. You therefore do NOT need to enumerate perturbations
+in the contract; propose the SENSITIVITY relation naming the sensitive input dimension and the
+framework supplies the perturbation set. Express any perturbation you do describe GENERICALLY
+in terms of the input's own observed range — never a value specific to one kernel.
 
 The contract `factor` field is **always null** for SENSITIVITY (the output magnitude of
-change is not specified, only its existence). The input perturbation itself is named in the
+change is not specified, only its existence). The input perturbation is named in the
 `description` and the `Perturbation_under:` line of the METAMORPHIC block.
 
 #### 9.1 Single-Element Input Perturbation Sensitivity
@@ -1584,12 +1598,15 @@ original PASSTHROUGH block, with `Relation: <relation_name>`,
 `Perturbation_under: input_byte_bit_flip`, and the standard `Statistics: ... /
 Sample_first10: ...` lines.
 
-**Check:** Compare variant's METAMORPHIC stats/samples to source's PASSTHROUGH stats/samples
-(source's un-perturbed output, captured during Tier 2 baseline). PASS if AT LEAST ONE
-statistic OR sample position differs beyond noise tolerance
-(`|var − orig| > atol + rtol × max(|var|, |orig|)`). FAIL if all stats and samples are
-within tolerance — variant did not respond to the perturbation, indicating the kernel is
-ignoring (or has been replaced by a stub that ignores) the perturbed input.
+**Check (per perturbation):** Compare the variant's METAMORPHIC stats/samples to source's
+PASSTHROUGH stats/samples (source's un-perturbed output, captured during Tier 2 baseline).
+This single-perturbation check PASSes if AT LEAST ONE statistic OR sample position differs
+beyond noise tolerance (`|var − orig| > atol + rtol × max(|var|, |orig|)`), and FAILs if all
+stats and samples are within tolerance — the variant did not respond to that perturbation.
+The relation's overall verdict then aggregates over the source-active perturbation set as
+described above (the variant must respond to every source-active perturbation). The minimal
+bit-flip above is the "minimal" perturbation; the framework additionally applies a generic
+large-outlier perturbation of the same input dimension.
 
 ---
 

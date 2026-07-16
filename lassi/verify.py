@@ -499,6 +499,163 @@ def _strip_witness_chain_blocks(code):
     return code
 
 
+# ==========================================================================
+# Tier-3 MT_TRANSFORM block: the single input transformation / perturbation applied
+# to the host input BEFORE the first host->device copy. Wrapping it in delimiters lets
+# the framework (1) extract the exact transform the SOURCE was validated against at
+# Stage 0 and (2) re-insert that BYTE-IDENTICAL transform into every generated variant,
+# so the Stage-0 "source responds correctly to this stimulus" guarantee transfers to
+# each per-variant test. Removes SENSITIVITY false rejects (weaker variant stimulus)
+# AND closes the INVARIANCE false-accept hole (weaker/no-op variant transform). See
+# planning/mode2_sensitivity_perturbation_handoff.md and
+# planning/floating-sparking-gosling.md.
+# Block key format: [<relation_name>::<perturbation_id>]  (perturbation_id is "default"
+# for non-SENSITIVITY relations; "p_small" / "p_outlier" for SENSITIVITY).
+# ==========================================================================
+MT_TRANSFORM_BEGIN = "// >>> BEGIN LASSI-VERIFY MT_TRANSFORM"
+MT_TRANSFORM_END   = "// <<< END LASSI-VERIFY MT_TRANSFORM <<<"
+
+# Matches one full MT_TRANSFORM block. Group 1 = leading indent, group 2 = bracketed key,
+# group 3 = interior text (delimiters excluded). Mirrors the witness-chain / passthrough
+# delimiter conventions.
+_MT_TRANSFORM_BLOCK_RE = re.compile(
+    r'([ \t]*)// >>> BEGIN LASSI-VERIFY MT_TRANSFORM \[([^\]]*)\][^\n]*>>>\n'
+    r'(.*?)\n[ \t]*// <<< END LASSI-VERIFY MT_TRANSFORM <<<',
+    re.DOTALL
+)
+
+
+def _strip_mt_transform_blocks(code):
+    """Idempotently remove all LASSI-VERIFY MT_TRANSFORM blocks from a code string.
+
+    Makes canonical-transform (re)insertion safe: before enforcing the source-validated
+    transform into a variant (or before a clean uninstrumented rebuild), strip any existing
+    MT_TRANSFORM block so blocks are never duplicated or compounded. Other LASSI-VERIFY
+    blocks (ASSERTIONS / PASSTHROUGH / WITNESS_CHAIN / METAMORPHIC) are left untouched.
+    """
+    return re.sub(
+        r'[ \t]*// >>> BEGIN LASSI-VERIFY MT_TRANSFORM.*?// <<< END LASSI-VERIFY MT_TRANSFORM <<<\n?',
+        '', code, flags=re.DOTALL)
+
+
+def _extract_mt_transform_block(code, key=None):
+    """Return the interior text of the MT_TRANSFORM block matching `key`.
+
+    `key` is the bracketed label, e.g. "input_element_sensitivity_1d::p_outlier".
+    When key is None, returns the interior of the first MT_TRANSFORM block found. The
+    interior is the text strictly between the BEGIN and END delimiter lines (delimiters
+    excluded). Returns None if no matching block exists.
+    """
+    for m in _MT_TRANSFORM_BLOCK_RE.finditer(code):
+        if key is None or m.group(2) == key:
+            return m.group(3)
+    return None
+
+
+# Default SENSITIVITY perturbation set. SENSITIVITY relations are probed with MORE THAN ONE
+# perturbation (all applied identically to source and every variant): a MINIMAL bump that tests
+# fine-grained sensitivity, and a LARGE generic OUTLIER that guarantees a response from
+# rank / threshold / argmax / comparison-based kernels where a minimal bump may not cross a
+# decision boundary (the extrema false-reject class). A variant is VALID iff it responds to
+# EVERY perturbation the SOURCE responded to (AND-all over source-active perturbations); this
+# stays single-concern (one property: "output is sensitive to input dimension D") — the
+# perturbations are just multiple stimuli probing that one property. The outlier is expressed
+# GENERICALLY in terms of the input's own observed range — never kernel-specific (no
+# "neighbor_max+1"). See planning/floating-sparking-gosling.md and
+# feedback_no_kernel_specific_bias.
+MT_SENSITIVITY_PERTURBATIONS = [
+    {
+        "id": "p_small",
+        "spec": (
+            "A MINIMAL perturbation: the smallest change that could plausibly produce a "
+            "measurable kernel response — e.g. flip the least-significant bit of one byte, or "
+            "add 1 to one element of the chosen input array. Prefer a single-bit or "
+            "single-element change so the response is attributable to that input dimension."
+        ),
+    },
+    {
+        "id": "p_outlier",
+        "spec": (
+            "A LARGE OUTLIER perturbation: set ONE element of the chosen input array to a value "
+            "FAR OUTSIDE the observed range of the sampled input — e.g. well beyond the current "
+            "min/max of that array, or several orders of magnitude larger in magnitude. This "
+            "guarantees a response from rank / threshold / argmax / comparison-based kernels "
+            "where a minimal bump may not cross a decision boundary. Express it GENERICALLY in "
+            "terms of the input's own observed range (scan the array for its min/max first, then "
+            "push one element past it) — do NOT hard-code a value specific to any particular "
+            "kernel."
+        ),
+    },
+]
+
+
+def _mt_perturbations_for(relation):
+    """Return the ordered [(perturbation_id, perturbation_spec), ...] to test for `relation`.
+
+    SENSITIVITY relations use the multi-perturbation set (relation["perturbations"] if seeded,
+    else the default MT_SENSITIVITY_PERTURBATIONS). Every other input-transforming type uses a
+    single implicit "default" perturbation (perturbation_spec=None → the LLM authors from the
+    relation description, as before). CONSERVATION / MONOTONICITY also return the single
+    "default" item but carry no MT_TRANSFORM block (no input transformation).
+    """
+    if relation.get("type") == "SENSITIVITY":
+        perts = relation.get("perturbations") or MT_SENSITIVITY_PERTURBATIONS
+        return [(p["id"], p.get("spec")) for p in perts]
+    return [("default", None)]
+
+
+def _enforce_canonical_transform(variant_code, key, canonical_interior):
+    """Force the variant's input transform to be byte-identical to the source-validated one.
+
+    The variant LLM handles PLACEMENT (a site that compiles) and the METAMORPHIC output
+    blocks; this function enforces the transform CONTENT so it exactly equals the transform
+    the SOURCE was validated against at Stage 0. This is what makes the Stage-0 source-filter
+    guarantee transfer to each variant.
+
+    Three resolution paths:
+      1. "enforced"     — variant emitted >=1 MT_TRANSFORM block: rewrite the first block's
+                          interior with canonical_interior (preferring a key match), and drop
+                          any duplicate MT_TRANSFORM blocks. Placement is preserved.
+      2. "spliced"      — variant emitted no block: deterministically splice a fresh canonical
+                          block immediately before the first host->device memcpy.
+      3. "no_site"      — no block and no detectable H->D copy: return the variant unchanged
+                          (the caller WARNs; downstream check/repair handles it).
+
+    Returns (new_code, path).
+    """
+    matches = list(_MT_TRANSFORM_BLOCK_RE.finditer(variant_code))
+    if matches:
+        target = next((m for m in matches if m.group(2) == key), matches[0])
+        _seen = {"done": False}
+
+        def _repl(m):
+            # Rewrite the chosen block's interior once; drop any other MT_TRANSFORM blocks.
+            if m.start() == target.start() and not _seen["done"]:
+                _seen["done"] = True
+                indent = m.group(1)
+                return (f"{indent}{MT_TRANSFORM_BEGIN} [{key}] >>>\n"
+                        f"{canonical_interior}\n"
+                        f"{indent}{MT_TRANSFORM_END}")
+            return ""  # duplicate block — remove
+
+        return _MT_TRANSFORM_BLOCK_RE.sub(_repl, variant_code), "enforced"
+
+    # No MT_TRANSFORM block present — splice the canonical block before the first H->D copy.
+    hd_re = re.compile(
+        r'^[ \t]*(?:cuda|hip)Memcpy\w*\s*\([^;]*?(?:cudaMemcpyHostToDevice|hipMemcpyHostToDevice)[^;]*\);',
+        re.MULTILINE
+    )
+    m = hd_re.search(variant_code)
+    if m:
+        indent = re.match(r'[ \t]*', variant_code[m.start():]).group(0)
+        block = (f"{indent}{MT_TRANSFORM_BEGIN} [{key}] >>>\n"
+                 f"{canonical_interior}\n"
+                 f"{indent}{MT_TRANSFORM_END}\n")
+        return variant_code[:m.start()] + block + variant_code[m.start():], "spliced"
+
+    return variant_code, "no_site"
+
+
 def code_insert_witness_chain(source_code, llm_source, model, num_ctx, system_prompt,
                               display_response, verifyprompt=False, code_description=None,
                               is_variant=False):
@@ -1854,6 +2011,15 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
                           f"{len(non_degenerate)} remain.")
                 contract["relations"] = non_degenerate
 
+                # Seed the multi-perturbation set for every SENSITIVITY relation so Stage 0
+                # probes each with a minimal bump AND a large generic outlier (identical
+                # stimulus applied to source and every variant). Only seed when absent so an
+                # LLM- or user-supplied perturbation list is respected. See
+                # MT_SENSITIVITY_PERTURBATIONS / planning/floating-sparking-gosling.md.
+                for rel in contract["relations"]:
+                    if rel.get("type") == "SENSITIVITY" and not rel.get("perturbations"):
+                        rel["perturbations"] = [dict(p) for p in MT_SENSITIVITY_PERTURBATIONS]
+
         except (json.JSONDecodeError, ValueError) as e:
             print(f"\n----- Tier 3 contract JSON parse failed: {e} — Tier 3 disabled -----")
             contract = {}
@@ -1866,7 +2032,9 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
 def code_insert_metamorphic_variant(source_code, relation, llm_source, model, num_ctx,
                                      system_prompt, display_response,
                                      template_code=None, feedback=None, verifyprompt=False,
-                                     repair_mode=False):
+                                     repair_mode=False,
+                                     canonical_transform=None, perturbation_id="default",
+                                     perturbation_spec=None):
     """
     Tier 3: Produce a metamorphic variant of source_code for one relation.
 
@@ -1874,12 +2042,26 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
     designated observation points. Preserves all existing LASSI-VERIFY ASSERTIONS and
     PASSTHROUGH blocks without modification.
 
+    The input transformation is wrapped in MT_TRANSFORM delimiter comments so it can be
+    extracted (at Stage 0) and re-inserted byte-identically into every variant. See
+    _enforce_canonical_transform / planning/floating-sparking-gosling.md.
+
+    Parameters controlling the input transform:
+      canonical_transform : when set, the exact transform interior the SOURCE was validated
+                            against — the LLM is instructed to reproduce it VERBATIM (and the
+                            caller additionally enforces it deterministically after generation).
+                            When None (Stage-0 authoring), the LLM authors the transform.
+      perturbation_id     : block-key suffix ("default", or "p_small"/"p_outlier" for
+                            SENSITIVITY multi-perturbation).
+      perturbation_spec   : SENSITIVITY authoring only — the human-readable spec for THIS
+                            perturbation (overrides the relation description when authoring).
+
     Returns extracted code string (same pattern as code_insert_asserts / code_insert_passthrough).
     Returns "" on failure (causes that relation to be marked SKIP in run_metamorphic_variants).
 
-    Called once per relation per code being tested:
+    Called once per relation (per perturbation) per code being tested:
       - Once for SOURCE_verify in Stage 0 (source filter)
-      - Once per active relation per generated code in the main loop
+      - Once per active relation (per source-active perturbation) per generated code in the main loop
     """
     relation_name = relation.get("name", "unknown")
     relation_type = relation.get("type", "UNKNOWN")
@@ -1890,6 +2072,13 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
     expected_rel  = relation.get("expected_relationship", "")
     tolerance     = relation.get("tolerance", 1e-5)
     input_lines   = len(source_code.splitlines())
+
+    # MT_TRANSFORM block key: uniquely identifies this relation's transform (and, for
+    # SENSITIVITY, which perturbation) so it can be extracted / enforced later.
+    block_key = f"{relation_name}::{perturbation_id}"
+    # SENSITIVITY authoring uses the per-perturbation spec when provided; other types (and
+    # SENSITIVITY without an explicit spec) fall back to the relation description.
+    perturb_desc = perturbation_spec if perturbation_spec else description
 
     # --- Relation specification block (human-readable, for the LLM) ---
     rel_spec = (
@@ -2196,10 +2385,9 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"**Step 1 — Apply the input perturbation:**\n"
             f"Insert the perturbation code AFTER host array initialization but BEFORE the "
             f"first host-to-device memory copy (cudaMemcpy H→D or hipMemcpy H→D).\n\n"
-            f"The perturbation must be NON-TRIVIAL (actually modify the input) and MINIMAL "
-            f"(prefer the smallest change that produces a measurable kernel response). The "
-            f"specific perturbation is described in the relation description above:\n"
-            f"  {description}\n\n"
+            f"The perturbation must be NON-TRIVIAL (actually modify the input). The "
+            f"specific perturbation for THIS variant is:\n"
+            f"  {perturb_desc}\n\n"
             f"Apply the perturbation to ONE of these input arrays/scalars: "
             f"{', '.join(input_vars)}.\n"
             f"(Unlike INVARIANCE which applies its transformation to ALL listed inputs, "
@@ -2231,6 +2419,58 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"**Step 1 — Apply the transformation** appropriate for {relation_type}.\n"
             f"**Step 2 — Insert METAMORPHIC output blocks** at the observation points above.\n"
         )
+
+    # --- MT_TRANSFORM delimiter / canonical-transform enforcement ---
+    # CONSERVATION and MONOTONICITY have no input transformation (they observe the source's
+    # own execution), so they carry no MT_TRANSFORM block. Every other relation type applies
+    # an input transformation that MUST be wrapped in MT_TRANSFORM delimiters so the framework
+    # can (Stage 0) extract the source-validated transform and (main loop) re-insert it
+    # byte-identically into each variant.
+    _is_input_transforming = relation_type not in ("CONSERVATION", "MONOTONICITY")
+    if _is_input_transforming:
+        if canonical_transform is not None:
+            # Enforce mode (main loop / post-Stage-0): the transform is already fixed by the
+            # source-validated version. Instruct the LLM to reproduce it VERBATIM at a
+            # compiling site; the caller additionally enforces it deterministically with
+            # _enforce_canonical_transform after generation, so exact reproduction is
+            # guaranteed regardless of the LLM's fidelity here.
+            transform_instruction = (
+                f"**Step 1 — Insert the input transformation VERBATIM:**\n"
+                f"Insert the following transformation code EXACTLY as written — do NOT modify, "
+                f"strengthen, weaken, reorder, or rename anything, and do NOT change any numeric "
+                f"constants. Place it AFTER host array initialization but BEFORE the first "
+                f"host-to-device memory copy (cudaMemcpy / hipMemcpy H->D), wrapped in these "
+                f"exact delimiter comments:\n\n"
+                f"```\n"
+                f"{MT_TRANSFORM_BEGIN} [{block_key}] >>>\n"
+                f"{canonical_transform}\n"
+                f"{MT_TRANSFORM_END}\n"
+                f"```\n"
+                f"This exact transformation was validated on the reference (source) version. "
+                f"Reproducing it verbatim is REQUIRED so the variant is tested under the same "
+                f"stimulus the source was validated against.\n\n"
+                f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
+                f"After the final device-to-host transfer, insert a METAMORPHIC block at each "
+                f"observation point label listed above, in the format specified below. The "
+                f"output values must be the variant's computed result on the transformed input.\n"
+            )
+        else:
+            # Authoring mode (Stage 0): the LLM chooses the transform, but it MUST wrap the
+            # transformation code in the MT_TRANSFORM delimiters so it can be extracted and
+            # reused as the canonical stimulus for every variant.
+            transform_instruction += (
+                f"\n**MANDATORY — wrap the input transformation in MT_TRANSFORM delimiters:**\n"
+                f"The Step 1 transformation code (the lines that modify the host input arrays "
+                f"before the first H->D copy) MUST be enclosed in these exact delimiter comments "
+                f"so the framework can extract and reuse the exact same transformation:\n\n"
+                f"```\n"
+                f"{MT_TRANSFORM_BEGIN} [{block_key}] >>>\n"
+                f"    <your input transformation statements here>\n"
+                f"{MT_TRANSFORM_END}\n"
+                f"```\n"
+                f"Place ONLY the input-transformation statements inside these delimiters — not "
+                f"the METAMORPHIC output blocks, and not any unrelated code.\n"
+            )
 
     # --- Feedback prefix (Stage 0 retry only) ---
     # Prepended when a previous attempt failed so the LLM can correct its mistake.
@@ -3467,7 +3707,88 @@ def run_metamorphic_variants(source_code, active_relations, contract,
     # Stage 0 is unaffected — it uses the separate Stage 0 retry block below.
     _MAX_VARIANT_REPAIR_RETRIES = 2
 
-    for relation in active_relations:
+    # --- Expand relations into per-perturbation work items ---------------------------------
+    # Every input-transforming relation is tested under one or more perturbations that are
+    # applied IDENTICALLY to source and every variant (the Mode-2 hardening). SENSITIVITY uses
+    # a multi-perturbation set (minimal bump + large generic outlier); all other types use a
+    # single implicit "default" perturbation. For SENSITIVITY we operate on SYNTHETIC copies of
+    # the relation (distinct names `<relation>__<pid>`) so each perturbation gets its own source
+    # variant / source_status; the parent relation's verdict is aggregated afterward (AND-all
+    # over source-active perturbations). Non-SENSITIVITY relations operate on the ORIGINAL object
+    # directly (identity aggregation) so their source_status / result keys are unchanged.
+    # NOTE: `_parent` is set ONLY on synthetic copies (never on a real relation object) to keep
+    # contract["relations"] JSON-serializable (no circular references).
+    _work_items = []
+    for _rel in active_relations:
+        _rel.setdefault("canonical_transform", {})
+        _is_sens = _rel.get("type") == "SENSITIVITY"
+        if code_version is None:
+            _pert_list = _mt_perturbations_for(_rel)            # Stage 0: probe every perturbation
+        else:
+            # Main loop: probe only the perturbations the SOURCE responded to at Stage 0.
+            _pmap = {p["id"]: p.get("spec")
+                     for p in (_rel.get("perturbations") or MT_SENSITIVITY_PERTURBATIONS)}
+            _active = _rel.get("active_perturbations")
+            if _active is None:
+                _pert_list = _mt_perturbations_for(_rel)        # fallback: no Stage-0 record
+            else:
+                _pert_list = [(pid, _pmap.get(pid)) for pid in _active]
+        for _pid, _pspec in _pert_list:
+            if _is_sens:
+                _wi = dict(_rel)
+                _wi["name"] = f"{_rel['name']}__{_pid}"
+                _wi["_parent"] = _rel
+            else:
+                _wi = _rel                                      # operate on the parent directly
+            _wi["_pid"] = _pid
+            _wi["_pspec"] = _pspec
+            _wi["_canonical"] = _rel.get("canonical_transform", {}).get(_pid)  # None at Stage 0
+            _work_items.append(_wi)
+
+    def _capture_canonical(relation, variant_code):
+        """Stage 0 only: extract this variant's MT_TRANSFORM interior and store it on the parent
+        relation as the canonical stimulus for this perturbation, so the main loop can re-insert
+        it byte-identically into every variant."""
+        if code_version is not None:
+            return
+        _parent = relation.get("_parent", relation)
+        _pid = relation.get("_pid", "default")
+        key = f"{relation.get('name', 'unknown')}::{_pid}"
+        interior = _extract_mt_transform_block(variant_code, key)
+        if interior is None:
+            interior = _extract_mt_transform_block(variant_code)  # any block (LLM mislabeled key)
+        if interior is not None:
+            _parent.setdefault("canonical_transform", {})[_pid] = interior
+        elif relation.get("type") not in ("CONSERVATION", "MONOTONICITY"):
+            print(f"  [Tier 3] WARN: no MT_TRANSFORM block found in source variant "
+                  f"'{relation.get('name')}' — cannot capture canonical transform for "
+                  f"perturbation '{_pid}'; variants will fall back to LLM-authored transforms.")
+
+    def _apply_canonical(variant_code, relation):
+        """Main loop only: force the variant's input transform to equal the source-validated
+        canonical transform for this (relation, perturbation). No-op at Stage 0 (the source IS
+        the canonical) and when no canonical was captured (e.g. CONSERVATION/MONOTONICITY)."""
+        if not variant_code or code_version is None:
+            return variant_code
+        canonical = relation.get("_canonical")
+        if not canonical:
+            return variant_code
+        key = f"{relation.get('name', 'unknown')}::{relation.get('_pid', 'default')}"
+        enforced, path = _enforce_canonical_transform(variant_code, key, canonical)
+        _nm, _pid = relation.get("name"), relation.get("_pid")
+        if path == "no_site":
+            print(f"  [Tier 3] WARN: no MT_TRANSFORM block or H->D copy located in variant "
+                  f"'{_nm}' (perturbation {_pid}) — trusting the LLM's verbatim placement of "
+                  f"the canonical transform.")
+        elif path == "spliced":
+            print(f"  [Tier 3] canonical transform SPLICED before first H->D copy in variant "
+                  f"'{_nm}' (perturbation {_pid}).")
+        else:
+            print(f"  [Tier 3] canonical transform ENFORCED in variant '{_nm}' "
+                  f"(perturbation {_pid}).")
+        return enforced
+
+    for relation in _work_items:
         relation_name = relation.get("name", "unknown")
         relation_type = relation.get("type", "UNKNOWN")
         print(f"\n----- Tier 3: testing relation '{relation_name}' ({relation_type}) -----")
@@ -3521,8 +3842,14 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             llm_source, model, num_ctx, system_prompt,
             display_response,
             template_code=template_code,
-            verifyprompt=verifyprompt
+            verifyprompt=verifyprompt,
+            canonical_transform=relation.get("_canonical"),
+            perturbation_id=relation.get("_pid", "default"),
+            perturbation_spec=relation.get("_pspec"),
         )
+        # Stage 0: capture the source's transform as canonical. Main loop: enforce it verbatim.
+        _capture_canonical(relation, variant_code)
+        variant_code = _apply_canonical(variant_code, relation)
         if not variant_code:
             print(f"  [Tier 3] Variant insertion FAILED for '{relation_name}' — SKIP")
             if code_version is None:  # Fix A: never overwrite frozen Stage 0 source_status in main loop
@@ -3594,10 +3921,14 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                     feedback=_repair_feedback,
                     verifyprompt=verifyprompt,
                     repair_mode=True,
+                    canonical_transform=relation.get("_canonical"),
+                    perturbation_id=relation.get("_pid", "default"),
+                    perturbation_spec=relation.get("_pspec"),
                 )
                 if not _repaired_code:
                     print(f"  [Tier 3] Repair {_repair_idx + 1}: no code extracted — retrying")
                     continue
+                _repaired_code = _apply_canonical(_repaired_code, relation)
                 _current_broken = _repaired_code
                 with open(variant_path, 'w') as _rvf:
                     _rvf.write(_repaired_code)
@@ -3722,10 +4053,14 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                         feedback=_repair_feedback,
                         verifyprompt=verifyprompt,
                         repair_mode=True,
+                        canonical_transform=relation.get("_canonical"),
+                        perturbation_id=relation.get("_pid", "default"),
+                        perturbation_spec=relation.get("_pspec"),
                     )
                     if not _repaired_code:
                         print(f"  [Tier 3] Execute repair {_repair_idx + 1}: no code extracted")
                         continue
+                    _repaired_code = _apply_canonical(_repaired_code, relation)
                     _current_broken = _repaired_code
                     with open(variant_path, 'w') as _rvf:
                         _rvf.write(_repaired_code)
@@ -3846,7 +4181,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
     # (all PASS at Stage 0) — failures there are generated-code issues, not Stage 0 filter bugs.
     # Single retry per relation (user requirement: avoid endless retrying on bad math).
     if code_version is None:
-        for relation in active_relations:
+        for relation in _work_items:
             if relation.get("source_status") not in ("SKIP", "FAIL"):
                 continue
 
@@ -3884,8 +4219,13 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                 display_response,
                 template_code=None,
                 feedback=combined_feedback,
-                verifyprompt=verifyprompt
+                verifyprompt=verifyprompt,
+                canonical_transform=relation.get("_canonical"),
+                perturbation_id=relation.get("_pid", "default"),
+                perturbation_spec=relation.get("_pspec"),
             )
+            # Stage 0 retry: (re)capture this variant's transform as the canonical stimulus.
+            _capture_canonical(relation, variant_code)
 
             # Helper: replace the first-pass result entry for this relation
             def _replace_result(new_entry, _results=results):
@@ -3965,6 +4305,80 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             if _verdict == "FAIL" and not first_failure_diagnostic:
                 first_failure_diagnostic = _diagnostic
 
+    # --- Aggregate per-perturbation SENSITIVITY work items back to their parent relation ---
+    # SENSITIVITY relations were expanded into synthetic per-perturbation work items named
+    # "<relation>__<pid>". Collapse their synthetic results into a single parent-keyed row and
+    # compute the parent verdict:
+    #   Stage 0 (source filter): a perturbation is source-active iff the source responded to it
+    #     (synthetic verdict PASS). The relation is active (source_status=PASS) iff >=1 perturbation
+    #     is source-active; FAIL if the source responded to none (insensitive input); SKIP if
+    #     nothing was evaluable. The source-active perturbation ids are recorded on the parent so
+    #     the main loop tests exactly those.
+    #   Main loop (AND-all): the relation PASSES iff the variant responded to EVERY source-active
+    #     perturbation; a single non-PASS perturbation fails the relation (catches partial cheats).
+    _sens_parents = []
+    _seen_parent_ids = set()
+    for _wi in _work_items:
+        _parent = _wi.get("_parent")
+        if _parent is not None and id(_parent) not in _seen_parent_ids:
+            _seen_parent_ids.add(id(_parent))
+            _sens_parents.append(_parent)
+
+    for _parent in _sens_parents:
+        _pname = _parent.get("name", "unknown")
+        _prefix = f"{_pname}__"
+        _child_results = [r for r in results if r.get("name", "").startswith(_prefix)]
+        # Map perturbation id → verdict (in perturbation order).
+        _child_by_pid = {}
+        for _wi in _work_items:
+            if _wi.get("_parent") is _parent:
+                _cr = next((r for r in _child_results if r.get("name") == _wi["name"]), None)
+                if _cr is not None:
+                    _child_by_pid[_wi["_pid"]] = _cr.get("verdict", "SKIP")
+
+        if code_version is None:
+            _active = [pid for pid, v in _child_by_pid.items() if v == "PASS"]
+            _parent["active_perturbations"] = _active
+            if _active:
+                _parent_verdict = "PASS"
+            elif any(v == "FAIL" for v in _child_by_pid.values()):
+                _parent_verdict = "FAIL"   # source insensitive to every perturbation
+            else:
+                _parent_verdict = "SKIP"   # nothing evaluable
+            _parent["source_status"] = _parent_verdict
+        else:
+            _vals = list(_child_by_pid.values())
+            if not _vals:
+                _parent_verdict = "SKIP"
+            elif all(v == "PASS" for v in _vals):
+                _parent_verdict = "PASS"
+            elif any(v == "FAIL" for v in _vals):
+                _parent_verdict = "FAIL"
+            else:
+                _parent_verdict = "SKIP"
+            # Main loop must not overwrite the frozen Stage-0 source_status.
+
+        _summary = {"name": _pname, "verdict": _parent_verdict,
+                    "perturbation_verdicts": dict(_child_by_pid)}
+        _fail_child = next((r for r in _child_results if r.get("verdict") == "FAIL"), None)
+        if _fail_child is not None and _fail_child.get("diagnostic"):
+            _summary["diagnostic"] = _fail_child["diagnostic"]
+        results = [r for r in results if not r.get("name", "").startswith(_prefix)]
+        results.append(_summary)
+
+    # Re-key first_failure_diagnostic from a synthetic perturbation name to its parent.
+    if first_failure_diagnostic.get("relation_name"):
+        for _parent in _sens_parents:
+            if first_failure_diagnostic["relation_name"].startswith(f"{_parent.get('name')}__"):
+                first_failure_diagnostic["relation_name"] = _parent.get("name")
+                break
+
+    # Strip transient per-work-item keys from the relation objects that are returned / persisted
+    # (canonical_transform, active_perturbations, perturbations are kept — they are real state).
+    for _rel in active_relations:
+        for _k in ("_pid", "_pspec", "_canonical", "_parent"):
+            _rel.pop(_k, None)
+
     # --- Determine overall verdict ---
     verdicts = [r["verdict"] for r in results]
     if "FAIL" in verdicts:
@@ -3986,16 +4400,19 @@ def run_metamorphic_variants(source_code, active_relations, contract,
 
 def strip_verify_blocks(source_code):
     """
-    Remove all LASSI-VERIFY ASSERTIONS, PASSTHROUGH, and WITNESS_CHAIN blocks from a
-    C++ source string. Returns uninstrumented code for clean performance measurement.
+    Remove all LASSI-VERIFY ASSERTIONS, PASSTHROUGH, WITNESS_CHAIN, and MT_TRANSFORM
+    blocks from a C++ source string. Returns uninstrumented code for clean performance
+    measurement.
 
-    Block delimiter format (from Tier 1 / Tier 2 / witness-chain instrumentation):
+    Block delimiter format (from Tier 1 / Tier 2 / witness-chain / Tier-3 instrumentation):
       Opening: // >>> BEGIN LASSI-VERIFY ASSERTIONS ...    >>>
                // >>> BEGIN LASSI-VERIFY PASSTHROUGH ...   >>>
                // >>> BEGIN LASSI-VERIFY WITNESS_CHAIN ... >>>
+               // >>> BEGIN LASSI-VERIFY MT_TRANSFORM ...  >>>
       Closing: // <<< END LASSI-VERIFY ASSERTIONS <<<
                // <<< END LASSI-VERIFY PASSTHROUGH <<<
                // <<< END LASSI-VERIFY WITNESS_CHAIN <<<
+               // <<< END LASSI-VERIFY MT_TRANSFORM <<<
 
     Additionally applies a safety-net pass: any raw `_t1_chain_*<<<...>>>(...);` kernel-launch
     call site that escaped the delimiter strip is removed. The witness-chain harness template
@@ -4012,9 +4429,9 @@ def strip_verify_blocks(source_code):
     # (<<<  vs  >>>) because LLMs occasionally generate the wrong closing arrows.
     # The [^\n]* absorbs any trailing characters (including <<< or >>> variants).
     pattern = re.compile(
-        r'// >>> BEGIN LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH|WITNESS_CHAIN)[^\n]*\n'
+        r'// >>> BEGIN LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH|WITNESS_CHAIN|MT_TRANSFORM)[^\n]*\n'
         r'.*?'
-        r'// <<< END LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH|WITNESS_CHAIN)[^\n]*\n?',
+        r'// <<< END LASSI-VERIFY (?:ASSERTIONS|PASSTHROUGH|WITNESS_CHAIN|MT_TRANSFORM)[^\n]*\n?',
         re.DOTALL
     )
     stripped = pattern.sub('', source_code)
