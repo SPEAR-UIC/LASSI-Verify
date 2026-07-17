@@ -20,7 +20,7 @@ from urllib3.exceptions import InsecureRequestWarning
 warnings.simplefilter("ignore", InsecureRequestWarning)
 
 # Argo Gateway username — set this in the notebook via lassi.llm_config.argo_username = "your_username"
-argo_username = "mdearing"
+argo_username = "svclassi"
 
 """
 Local hosted LLM via OLLAMA API, GGUF quantized models
