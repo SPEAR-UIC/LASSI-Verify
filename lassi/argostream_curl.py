@@ -30,6 +30,20 @@ _CURL_MAX_RETRIES = 5
 _CURL_RETRY_BASE_DELAY_S = 5  # exponential backoff: 5, 10, 20, 40, 80 seconds
 _CURL_RETRY_MAX_DELAY_S = 120
 
+# Gateway/reverse-proxy default error-page bodies. curl exits 0 for these (the HTTP
+# transport succeeded — only the upstream application failed), so they slip past the
+# _CURL_RETRYABLE_CODES check above and would otherwise be treated as a real LLM
+# response (fed to the coder as "generated code" or to the judge as a verdict).
+# Matched by exact, case-insensitive equality on the stripped full body — not
+# substring — so a legitimate short LLM response (e.g. "VALID") can never collide.
+_API_ERROR_BODIES = {
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "",
+}
+
 def _curl_backoff_seconds(attempt):
     """Exponential backoff with a cap. attempt is 1-based (1 = first retry)."""
     return min(_CURL_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)),
@@ -183,6 +197,19 @@ def argo_fetch_with_curl(data):
                              else f"transient curl code {process.returncode}")
                     print(f"\n[argo_fetch_with_curl] {_kind} on attempt "
                           f"{_attempt}/{_CURL_MAX_RETRIES} — will retry.")
+                    last_exception = Exception(err_msg)
+                    continue  # retry
+                raise Exception(err_msg)
+
+            # curl succeeded (transport layer OK) but the upstream application may
+            # still have failed, returning a gateway/proxy error page as the body
+            # instead of a real LLM response. Treat that the same as a transient
+            # transport failure: retry with the same backoff schedule.
+            if response_text.strip().lower() in _API_ERROR_BODIES:
+                err_msg = f"Argo gateway returned an API-error body: '{response_text.strip()}'"
+                if _attempt < _CURL_MAX_RETRIES:
+                    print(f"\n[argo_fetch_with_curl] API-error body ('{response_text.strip()}') "
+                          f"on attempt {_attempt}/{_CURL_MAX_RETRIES} — will retry.")
                     last_exception = Exception(err_msg)
                     continue  # retry
                 raise Exception(err_msg)
