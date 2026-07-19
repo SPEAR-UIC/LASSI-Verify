@@ -2071,6 +2071,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                 code_block, llm_source, model, num_ctx, system_prompt, display_response,
                 verifyprompt=verifyprompt, code_description=llm_code_description_response,
                 is_variant=True,
+                # Show the instrumented SOURCE_verify (code_blocks[1]) as a reference so the
+                # variant's harness matches the source's init placement + per-launch coverage
+                # (fixes re-insertion inconsistency, e.g. segment-reduce nested-loop placement).
+                source_harness_reference=code_blocks[1] if len(code_blocks) > 1 else None,
             )
             code_block = _cv_var_code
             print(f"\n----- LASSI-Verify Chain Verification (variant re-install): "
@@ -2787,6 +2791,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         _zs_instr, llm_source, model, num_ctx, system_prompt, display_response,
                         verifyprompt=verifyprompt, code_description=llm_code_description_response,
                         is_variant=True,
+                        source_harness_reference=code_blocks[1] if len(code_blocks) > 1 else None,
                     )
                     print(f"\n----- Zero-Shot Empirical Verify: witness-chain re-install status={_zs_cv_status} -----")
 

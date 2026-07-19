@@ -656,9 +656,130 @@ def _enforce_canonical_transform(variant_code, key, canonical_interior):
     return variant_code, "no_site"
 
 
+# Canonical witness-chain init enforcement — the witness-chain analog of
+# _enforce_canonical_transform (Tier-3). The witness harness is (re-)inserted per code by a
+# dedicated LLM call, and the LLM can place a DIFFERENT number of HARNESS INIT (seed) blocks in
+# the source vs a refactored variant — a benchmark with two timing loops may get one seed-init
+# before EACH loop in the source but only one in the variant. Because the chain state is (re)seeded
+# at each init, a differing init count makes the final witness_chain_state diverge between source
+# and variant even when BOTH perform identical work, spuriously rejecting a correct variant at
+# Tier 2 (observed on `layout`: source 2 inits, variant 1 → mix^2500 vs mix^5000).
+#
+# Fix: enforce a SINGLE, continuous chain — keep only the FIRST HARNESS INIT block and strip any
+# subsequent ones. The chain then accumulates across ALL timing loops from one seed, so source and
+# variant evolve identically given identical work. Loop-deletion is still caught: dropping
+# iterations in ANY loop reduces the total number of chain folds and diverges the final value. This
+# is deterministic (no LLM), keys off harness structure not kernel identity, and mirrors the
+# canonical-transform enforcement that fixed the analogous Tier-3 re-insertion inconsistency
+# (Refinement #7). It removes an instrumentation-consistency false-reject; it is NOT a witness
+# design change — the per-iteration fold logic is untouched.
+_WITNESS_INIT_BLOCK_RE = re.compile(
+    r'[ \t]*// >>> BEGIN LASSI-VERIFY WITNESS_CHAIN \(HARNESS INIT.*?// <<< END LASSI-VERIFY WITNESS_CHAIN <<<\n?',
+    re.DOTALL)
+
+
+def _enforce_canonical_witness_init(code):
+    """Keep only the first WITNESS_CHAIN HARNESS INIT block; strip subsequent ones so the chain is
+    a single continuous accumulation from one seed. Returns (code, n_removed)."""
+    matches = list(_WITNESS_INIT_BLOCK_RE.finditer(code))
+    if len(matches) <= 1:
+        return code, 0
+    removed = 0
+    for m in reversed(matches[1:]):   # remove later blocks first to keep earlier offsets valid
+        code = code[:m.start()] + code[m.end():]
+        removed += 1
+    return code, removed
+
+
+# Canonical witness-chain DEVICE-FUNCTION enforcement (job (ii)) — the fold-semantics analog of
+# _enforce_canonical_witness_init. The witness catches a work-cheat via two things: (1) fold COUNT
+# (loop ran N times) and (2) the seeded sentinel clobber (the kernel must overwrite the tripwire).
+# The ORIGINAL design folded the kernel's OUTPUT VALUE (d_output[0]) to observe (2) — but that made
+# the witness sensitive to benign output differences (FP rounding, alternate correct paths), causing
+# instrumentation-independent false-rejects (observed on `entropy`: a correct variant's output byte
+# differs -> witness diverges even though the harness is placed identically).
+#
+# Job (ii): fold a value-AGNOSTIC BINARY signal — "was the 8-byte tripwire overwritten?" — instead of
+# the value. `_t1_chain_write_sentinel` writes the full 64-bit `_t1_chain_sentinel` into the first 8
+# bytes of the output; `_t1_chain_update` folds `(observed8 != sentinel8) ? 1 : 0`. This:
+#   * fixes value-coupling false-rejects (any correct output != sentinel -> signal=1 -> matches),
+#   * keeps loop-count detection (fold count) and no-op/skip detection (skip -> sentinel persists
+#     -> signal=0 -> diverges),
+#   * is type-agnostic (the 8-byte reinterpret replaces the old per-type sentinel Decision Tree),
+#   * uses 8 bytes so the "output coincidentally == sentinel" collision is ~2^-64 (a 1-byte tripwire
+#     would still over-reject ~50% of the time over N iterations).
+# Net soundness (accepted): witness catches skips on non-memset kernels; on kernels that memset the
+# output before the kernel (which wipes the tripwire) a skip yields WRONG output caught by Tier 2, so
+# the framework verdict stays sound. The run-once-cache cheat (restore cached output) is a documented
+# fundamental idempotency limit shared with the prior value-fold design. Threat model: lazy-LLM
+# (security rests on the runtime-secret seed, not on hiding the mechanism).
+#
+# Enforced deterministically for BOTH source and variants so the fold semantics are identical and
+# correct regardless of LLM re-insertion variance (mirrors _enforce_canonical_witness_init / T3).
+def _canonical_witness_device_body(name, param_name):
+    """Return the canonical job-(ii) function body (the inner statements) for the given harness
+    device kernel, referencing `param_name` (the output-pointer parameter)."""
+    if name == "_t1_chain_write_sentinel":
+        return (
+            "    if (threadIdx.x == 0 && blockIdx.x == 0) {\n"
+            "        // JOB(ii): 8-byte type-agnostic tripwire (value-agnostic overwrite detection;\n"
+            "        // 8 bytes -> ~2^-64 output/sentinel collision vs ~1/256 for a single byte).\n"
+            f"        ((unsigned long long*){param_name})[0] = _t1_chain_sentinel | 1ULL;\n"
+            "    }"
+        )
+    return (  # _t1_chain_update
+        "    if (threadIdx.x == 0 && blockIdx.x == 0) {\n"
+        "        // JOB(ii): fold BINARY \"was the tripwire overwritten?\" (value/FP/path-agnostic),\n"
+        "        // NOT the output value. A correct variant with a different-but-valid output still\n"
+        "        // overwrites the sentinel (signal=1 -> matches source); a skipped/no-op kernel\n"
+        "        // leaves the sentinel (signal=0 -> chain diverges). Tier 2 owns value correctness.\n"
+        f"        unsigned long long _t1_obs = ((const unsigned long long*){param_name})[0];\n"
+        "        unsigned long long _t1_exp = _t1_chain_sentinel | 1ULL;\n"
+        "        unsigned long long _t1_sig = (_t1_obs != _t1_exp) ? 1ULL : 0ULL;\n"
+        "        _t1_chain_state = _t1_one_way_mix(_t1_chain_state ^ _t1_sig);\n"
+        "        _t1_chain_sentinel = _t1_chain_state;\n"
+        "    }"
+    )
+
+
+def _enforce_canonical_witness_device_fns(code):
+    """Replace the BODIES of the two witness device kernels (_t1_chain_write_sentinel and
+    _t1_chain_update) with the canonical job-(ii) value-agnostic binary-overwrite design, keeping
+    each function's existing signature. Deterministic; applied to source and variants alike.
+    Returns (code, n_replaced). A missing/renamed function is skipped (leaves prior behavior, which
+    is sound-but-conservative) rather than corrupting the code."""
+    n = 0
+    for name in ("_t1_chain_write_sentinel", "_t1_chain_update"):
+        sig_re = re.compile(r'__global__\s+void\s+' + name + r'\s*\(([^)]*)\)')
+        m = sig_re.search(code)
+        if not m:
+            continue
+        # Output-pointer parameter name = last identifier in the parameter list.
+        pn_m = re.search(r'(\w+)\s*$', m.group(1).strip())
+        param_name = pn_m.group(1) if pn_m else "d_output"
+        b = code.find('{', m.end())
+        if b < 0:
+            continue
+        depth, j = 0, b
+        while j < len(code):
+            if code[j] == '{':
+                depth += 1
+            elif code[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= len(code):
+            continue
+        new_body = _canonical_witness_device_body(name, param_name)
+        code = code[:b + 1] + "\n" + new_body + "\n}" + code[j + 1:]
+        n += 1
+    return code, n
+
+
 def code_insert_witness_chain(source_code, llm_source, model, num_ctx, system_prompt,
                               display_response, verifyprompt=False, code_description=None,
-                              is_variant=False):
+                              is_variant=False, source_harness_reference=None):
     """
     Insert (or re-insert) the witness-chain harness into source_code via a dedicated,
     focused LLM call — kept SEPARATE from Tier 1 invariant-assertion selection (Option D).
@@ -675,6 +796,10 @@ def code_insert_witness_chain(source_code, llm_source, model, num_ctx, system_pr
     then genuinely means the variant performed fewer real kernel invocations than the source.
 
     is_variant=True selects the re-installation framing (the timed loop may have been restructured).
+    source_harness_reference (variant path only): the instrumented SOURCE_verify code. When given,
+    it is shown to the LLM as a reference so the variant's harness matches the source's init
+    placement and per-launch coverage — the primary fix for re-insertion inconsistency
+    (segment-reduce). Ignored for the source insertion (is_variant=False).
 
     Returns:
         (instrumented_code, status) where status is one of:
@@ -711,6 +836,32 @@ def code_insert_witness_chain(source_code, llm_source, model, num_ctx, system_pr
             " [BEGIN SOURCE CODE DESCRIPTION AND ANALYSIS]\n" + code_description +
             "\n[/END SOURCE CODE DESCRIPTION AND ANALYSIS]\n\n"
         )
+    # For a variant re-install, give the LLM FULL VISIBILITY of how the harness is installed in
+    # the SOURCE program, so it can install an EQUIVALENT-COVERAGE harness in the (possibly
+    # restructured) variant. This is the primary lever for consistent re-insertion: without it,
+    # source and variant get independent LLM insertions that can place the init at a different
+    # nesting level or wrap a different set of timed launches, making a correct variant's
+    # witness_chain_state diverge from the source's (an instrumentation-consistency false-reject,
+    # observed on segment-reduce). We show the source as a REFERENCE, not to copy verbatim (the
+    # variant's loop structure differs) but to match its placement policy and total coverage.
+    if is_variant and source_harness_reference:
+        content_prompt += (
+            "\n----\n\n"
+            "**REFERENCE — the witness-chain harness AS INSTALLED IN THE SOURCE program.** Study how "
+            "the single init is positioned relative to the source's loop nest and how each timed "
+            "kernel launch is wrapped. Your task is to install an EQUIVALENT harness in the refactored "
+            "variant below so its final witness_chain_state is comparable to the source's when the "
+            "variant does the same work:\n"
+            "  - Place EXACTLY ONE init before the OUTERMOST loop that contains any timed kernel "
+            "launch — matching the source's single-continuous-chain placement — even if the variant "
+            "fused, split, or reordered loops.\n"
+            "  - Wrap EVERY timed kernel launch (across all configurations/passes) exactly as the "
+            "source does, so the total number of chain folds matches for equivalent work.\n"
+            "  - Adapt to the variant's ACTUAL current structure; do NOT impose loops it lacks. Never "
+            "leave a timed launch unwrapped or duplicate a wrap — that would let a work-cheat pass.\n\n"
+            " [BEGIN SOURCE HARNESS REFERENCE]\n" + source_harness_reference + "\n[/END SOURCE HARNESS REFERENCE]\n\n"
+        )
+
     content_prompt += " [BEGIN SOURCE CODE]\n" + stripped + "\n[/END SOURCE CODE]\n"
 
     print("\n----- " + color.BOLD + color.PURPLE + "STARTING CODE INSERT - Witness Chain Harness"
@@ -774,6 +925,20 @@ def code_insert_witness_chain(source_code, llm_source, model, num_ctx, system_pr
     # Default applied status if the LLM omitted/garbled the token but the harness is present.
     if not status or not status.startswith("applied"):
         status = "applied_creative"
+
+    # Deterministic canonicalization: enforce a single continuous chain init so the witness
+    # cannot diverge purely from an inconsistent number of seed re-inits across source vs variant
+    # (the layout false-reject). See _enforce_canonical_witness_init.
+    extracted_code, _n_removed_inits = _enforce_canonical_witness_init(extracted_code)
+    if _n_removed_inits:
+        print(f"[witness-chain] canonicalized to a single continuous chain init "
+              f"(stripped {_n_removed_inits} redundant HARNESS INIT block(s)).")
+
+    # Job (ii): deterministically enforce the value-agnostic binary-overwrite device functions so
+    # the fold semantics are identical + correct for source and variants regardless of LLM variance.
+    extracted_code, _n_dev = _enforce_canonical_witness_device_fns(extracted_code)
+    if _n_dev:
+        print(f"[witness-chain] enforced canonical job-(ii) device functions ({_n_dev} replaced).")
     return extracted_code, status
 
 
@@ -1214,7 +1379,8 @@ def _compute_fp_tolerance(spec_block_body, n_safety_override=None):
 
 
 def compare_passthrough_outputs(spec_stdout, generated_stdout,
-                                tolerance=1e-6, n_safety_override=None):
+                                tolerance=1e-6, n_safety_override=None,
+                                order_insensitive=False):
     """
     Tier 2 empirical equivalence check. Compare passthrough output from a generated
     code against the source-as-specification reference (SOURCE_verify stdout).
@@ -1235,6 +1401,25 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     Parse errors (malformed passthrough output) are treated as FAIL and trigger
     self-correction — no LLM fallback. This keeps Tier 2 verdicts fully deterministic
     and independent of the LLM judge.
+
+    order_insensitive (default False — OFF): when True, for multi-occurrence labels,
+    if the positional comparison FAILs, attempt an order-insensitive perfect-bijection
+    rescue so that a variant which emits the same multiset of capture blocks in a
+    different order is not spuriously rejected. **Intentionally OFF by default** so the
+    live pipeline's behavior is byte-identical to the strictly-positional comparison —
+    the rescue code path is not entered at all. It is retained as a validated, opt-in
+    enhancement for FUTURE input-determinism work (see the analysis note below): a
+    config-loop reorder only yields a rescuable block *permutation* once source and
+    variant are guaranteed identical input; without that guarantee (e.g., benchmarks
+    that fill input with unseeded rand() consumed in loop order, like extrema) the
+    reordered blocks hold genuinely different values and correctly do NOT rescue. An
+    empirical re-grade of ~299 on-disk variants across all 13 oracle folders found this
+    flag changes ZERO verdicts on the current corpus (it is a no-op there); enable it
+    deliberately, paired with deterministic-input instrumentation, when returning to
+    input-nondeterministic kernels. Soundness is unchanged either way: the rescue
+    requires a *perfect* bijection under the identical tolerance predicate, so a
+    genuinely-wrong block still FAILs (see _perfect_bijection). The post-hoc re-grade
+    harness (lassi_verify_analysis/tier2_regrade.py) toggles this to A/B the two modes.
 
     Returns:
         verdict (str): "PASS" | "FAIL" | "SKIP"
@@ -1338,6 +1523,196 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
         """Absolute error for failure reporting."""
         return abs(a - b)
 
+    def _compare_block_pair(label, failure_label, spec_body, gen_body):
+        """Compare one spec block against one generated block (pure — mutates no
+        outer state). Returns (pair_failures, pair_max_rel_err, pair_tol_meta):
+          pair_failures  : list of failure dicts (empty iff the pair matches)
+          pair_max_rel_err : largest relative error observed in this pair
+          pair_tol_meta  : {failure_label: tolerance_metadata} for stat blocks, else {}
+        This is the exact per-occurrence predicate the loop used to run inline; it is
+        factored out so the order-insensitive matcher below can probe candidate
+        (spec_i, gen_j) pairings without touching the shared accumulators. A pair
+        "matches" iff pair_failures is empty."""
+        pair_failures = []
+        pair_max_rel_err = 0.0
+        pair_tol_meta = {}
+
+        # --- Special case: witness_chain_state block uses Value: line + exact match ---
+        # The witness_chain_state passthrough carries a 64-bit hash that must match
+        # byte-exactly between source and variant. Allclose-style numerical tolerance
+        # is wrong here (would falsely accept mismatched 64-bit values because bit-level
+        # diffs are dwarfed by the magnitude). String comparison of the Value: hex line
+        # gives the required exact-match semantics. Skip the stats/samples logic below.
+        if label == WITNESS_CHAIN_LABEL:
+            spec_val_m = value_pattern.search(spec_body)
+            gen_val_m  = value_pattern.search(gen_body)
+            # Chain failures use string-based comparison; include abs_err/atol
+            # set to inf/0 so the downstream summary formatter (which expects these
+            # fields on every failure) doesn't KeyError. The summary formatter has
+            # a chain_value_* branch that ignores these numeric fields.
+            if spec_val_m is None or gen_val_m is None:
+                pair_failures.append({
+                    "label":     failure_label,
+                    "stat":      "chain_value_missing",
+                    "spec":      spec_val_m.group(1) if spec_val_m else "(missing)",
+                    "generated": gen_val_m.group(1) if gen_val_m else "(missing)",
+                    "abs_err":   float('inf'),
+                    "atol":      0.0,
+                    "rel_err":   float('inf'),
+                })
+                pair_max_rel_err = float('inf')
+                return pair_failures, pair_max_rel_err, pair_tol_meta
+            spec_val_str = spec_val_m.group(1).strip().lower()
+            gen_val_str  = gen_val_m.group(1).strip().lower()
+            if spec_val_str != gen_val_str:
+                pair_failures.append({
+                    "label":     failure_label,
+                    "stat":      "chain_value_mismatch",
+                    "spec":      spec_val_str,
+                    "generated": gen_val_str,
+                    "abs_err":   float('inf'),
+                    "atol":      0.0,
+                    "rel_err":   float('inf'),
+                })
+                pair_max_rel_err = float('inf')
+            # On match, just return (no failure recorded)
+            return pair_failures, pair_max_rel_err, pair_tol_meta
+
+        # Check element count first — a mismatch means the generated code operates
+        # on a different problem size than the source specification. This is an exact
+        # integer comparison: no tolerance. Only fail if BOTH blocks have parseable
+        # counts that disagree; if either is absent, fall through to stat comparison.
+        spec_elements = parse_elements(spec_body)
+        gen_elements  = parse_elements(gen_body)
+        if spec_elements is not None and gen_elements is not None and spec_elements != gen_elements:
+            pair_max_rel_err = float('inf')
+            pair_failures.append({
+                "label":     failure_label,
+                "stat":      "elements_mismatch",
+                "spec":      spec_elements,
+                "generated": gen_elements,
+                "abs_err":   abs(spec_elements - gen_elements),
+                "atol":      0,
+            })
+            return pair_failures, pair_max_rel_err, pair_tol_meta  # sizes are incommensurate
+
+        spec_stats = parse_stats(spec_body)
+        gen_stats  = parse_stats(gen_body)
+
+        if spec_stats is None or gen_stats is None:
+            # Cannot parse statistics — the generated code did not emit well-formed
+            # passthrough output. Record parse_error (drives Tier 2 self-correction).
+            pair_failures.append({
+                "label":     failure_label,
+                "stat":      "parse_error",
+                "spec":      spec_body[:200],
+                "generated": gen_body[:200],
+                "rel_err":   float('inf'),
+            })
+            return pair_failures, pair_max_rel_err, pair_tol_meta
+
+        # ULP-aware tolerance derivation: ask the helper to parse Type/max/buffer_size
+        # from the spec block and compute (atol, rtol) per the decision tree in
+        # planning/ulp_aware_tolerance_design.md. Replaces the prior scale-blind
+        # `atol = spec_max * tolerance` formula. The helper handles:
+        #   - integer/byte types → exact equality (atol=0, rtol=0)
+        #   - float32 → N × max × 2^-23
+        #   - float64 → N × max × 2^-52
+        #   - unknown → conservative float32 fallback
+        # N defaults to max(16, ceil(log2(buffer_size))); per-kernel override
+        # is plumbed through `n_safety_override` (from source_apps.json).
+        tol_result = _compute_fp_tolerance(spec_body, n_safety_override=n_safety_override)
+        atol = tol_result['atol']
+        rtol = tol_result['rtol']
+        pair_tol_meta[failure_label] = tol_result['metadata']
+
+        # Compare each statistic using allclose: |a-b| <= atol + rtol*max(|a|,|b|)
+        for stat_name, spec_val in spec_stats.items():
+            gen_val = gen_stats.get(stat_name)
+            if gen_val is None:
+                pair_max_rel_err = float('inf')
+                pair_failures.append({
+                    "label":     failure_label,
+                    "stat":      stat_name,
+                    "spec":      spec_val,
+                    "generated": "(missing)",
+                    "abs_err":   float('inf'),
+                    "atol":      atol,
+                    "rtol":      rtol,
+                })
+                continue
+            _denom = max(abs(spec_val), atol)
+            _rel = abs_err(spec_val, gen_val) / _denom if _denom > 0 else (0.0 if abs_err(spec_val, gen_val) == 0.0 else float('inf'))
+            pair_max_rel_err = max(pair_max_rel_err, _rel)
+            if not allclose_pass(spec_val, gen_val, rtol, atol):
+                pair_failures.append({
+                    "label":     failure_label,
+                    "stat":      stat_name,
+                    "spec":      spec_val,
+                    "generated": gen_val,
+                    "abs_err":   abs_err(spec_val, gen_val),
+                    "atol":      atol,
+                    "rtol":      rtol,
+                })
+
+        # Compare sample values element-wise with the same allclose tolerance
+        spec_samples = parse_samples(spec_body)
+        gen_samples  = parse_samples(gen_body)
+        if spec_samples and gen_samples:
+            for idx, (sv, gv) in enumerate(zip(spec_samples, gen_samples)):
+                _denom = max(abs(sv), atol)
+                _rel = abs_err(sv, gv) / _denom if _denom > 0 else (0.0 if abs_err(sv, gv) == 0.0 else float('inf'))
+                pair_max_rel_err = max(pair_max_rel_err, _rel)
+                if not allclose_pass(sv, gv, rtol, atol):
+                    pair_failures.append({
+                        "label":     failure_label,
+                        "stat":      f"sample[{idx}]",
+                        "spec":      sv,
+                        "generated": gv,
+                        "abs_err":   abs_err(sv, gv),
+                        "atol":      atol,
+                        "rtol":      rtol,
+                    })
+
+        return pair_failures, pair_max_rel_err, pair_tol_meta
+
+    def _perfect_bijection(n_spec, n_gen, is_edge):
+        """Order-insensitive matcher for multi-occurrence labels. Given an edge
+        predicate is_edge(i, j) that is True iff spec occurrence i matches gen
+        occurrence j (i.e., _compare_block_pair returns no failures), find a
+        maximum-cardinality bipartite matching (Kuhn's augmenting-path algorithm)
+        and return (match_count, assignment) where assignment[i] = matched j or -1.
+
+        Soundness note: the caller only accepts the rescue when match_count ==
+        n_spec == n_gen (a *perfect* bijection under the identical tolerance
+        predicate). A genuinely-wrong block (deleted loop, wrong value, missing
+        block, count mismatch) matches no spec occurrence, so no perfect matching
+        exists and the label still FAILs. Order-insensitivity therefore only ever
+        forgives a permutation of equal-within-tolerance blocks (e.g., a commutative
+        loop-nest reorder), never a real discrepancy. Deterministic (iterates in
+        occurrence order)."""
+        adj = [[j for j in range(n_gen) if is_edge(i, j)] for i in range(n_spec)]
+        match_r = [-1] * n_gen  # gen occurrence -> matched spec occurrence
+
+        def try_augment(u, seen):
+            for v in adj[u]:
+                if not seen[v]:
+                    seen[v] = True
+                    if match_r[v] == -1 or try_augment(match_r[v], seen):
+                        match_r[v] = u
+                        return True
+            return False
+
+        count = 0
+        for u in range(n_spec):
+            if try_augment(u, [False] * n_gen):
+                count += 1
+        assignment = [-1] * n_spec
+        for v, u in enumerate(match_r):
+            if u != -1:
+                assignment[u] = v
+        return count, assignment
+
     spec_blocks = extract_blocks(spec_stdout)
     gen_blocks  = extract_blocks(generated_stdout)
 
@@ -1395,147 +1770,72 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
                 "rel_err":   float('inf'),
             })
 
-        # Compare each occurrence positionally (occurrence i in spec vs occurrence i in gen)
-        for i, (spec_body, gen_body) in enumerate(zip(spec_bodies, gen_bodies)):
+        # Compare occurrences. Default is positional (occurrence i in spec vs
+        # occurrence i in gen). When the positional pass FAILs and a *perfect*
+        # bijection is possible (equal counts, multi-occurrence label), attempt an
+        # order-insensitive rescue: some correct variants emit the same set of
+        # capture blocks in a different ORDER (e.g., a commutative loop-nest reorder
+        # that iterates an (order × type) grid the other way), so block #i(spec) vs
+        # block #i(gen) misaligns after the first block even though the *multiset*
+        # of results is identical. Positional-PASS cases and FAIL reporting are
+        # byte-for-byte unchanged; the rescue only ever turns a positional-FAIL into
+        # a PASS when every spec block has a distinct equal-within-tolerance gen
+        # block (see _perfect_bijection soundness note).
+        m = min(n_spec, n_gen)
+
+        # First pass: positional comparison (this is the historical behavior).
+        pos_failures = []
+        pos_max_rel_err = 0.0
+        pos_tol_meta = {}
+        for i in range(m):
             failure_label = f"{label}#{i+1}" if multi else label
-            blocks_compared += 1
+            pf, prel, ptol = _compare_block_pair(label, failure_label, spec_bodies[i], gen_bodies[i])
+            pos_failures.extend(pf)
+            pos_max_rel_err = max(pos_max_rel_err, prel)
+            pos_tol_meta.update(ptol)
+        blocks_compared += m
 
-            # --- Special case: witness_chain_state block uses Value: line + exact match ---
-            # The witness_chain_state passthrough carries a 64-bit hash that must match
-            # byte-exactly between source and variant. Allclose-style numerical tolerance
-            # is wrong here (would falsely accept mismatched 64-bit values because bit-level
-            # diffs are dwarfed by the magnitude). String comparison of the Value: hex line
-            # gives the required exact-match semantics. Skip the stats/samples logic below.
-            if label == WITNESS_CHAIN_LABEL:
-                spec_val_m = value_pattern.search(spec_body)
-                gen_val_m  = value_pattern.search(gen_body)
-                # Chain failures use string-based comparison; include abs_err/atol
-                # set to inf/0 so the downstream summary formatter (which expects these
-                # fields on every failure) doesn't KeyError. The summary formatter has
-                # a chain_value_* branch that ignores these numeric fields.
-                if spec_val_m is None or gen_val_m is None:
-                    failures.append({
-                        "label":     failure_label,
-                        "stat":      "chain_value_missing",
-                        "spec":      spec_val_m.group(1) if spec_val_m else "(missing)",
-                        "generated": gen_val_m.group(1) if gen_val_m else "(missing)",
-                        "abs_err":   float('inf'),
-                        "atol":      0.0,
-                        "rel_err":   float('inf'),
-                    })
-                    max_rel_err = max(max_rel_err, float('inf'))
-                    continue
-                spec_val_str = spec_val_m.group(1).strip().lower()
-                gen_val_str  = gen_val_m.group(1).strip().lower()
-                if spec_val_str != gen_val_str:
-                    failures.append({
-                        "label":     failure_label,
-                        "stat":      "chain_value_mismatch",
-                        "spec":      spec_val_str,
-                        "generated": gen_val_str,
-                        "abs_err":   float('inf'),
-                        "atol":      0.0,
-                        "rel_err":   float('inf'),
-                    })
-                    max_rel_err = max(max_rel_err, float('inf'))
-                # On match, just continue (no failure recorded)
-                continue
+        # Accept the positional result when it PASSes, when the order-insensitive
+        # rescue is disabled (order_insensitive=False → historical baseline), or when
+        # no perfect bijection is even possible (unequal counts → some block is
+        # genuinely missing; or a single-occurrence label, where order is meaningless).
+        # In all of these the rescue cannot / must not change the verdict, so behavior
+        # is identical to before this refinement.
+        if not pos_failures or not order_insensitive or n_spec != n_gen or not multi:
+            failures.extend(pos_failures)
+            max_rel_err = max(max_rel_err, pos_max_rel_err)
+            per_block_tolerance.update(pos_tol_meta)
+            continue
 
-            # Check element count first — a mismatch means the generated code operates
-            # on a different problem size than the source specification. This is an exact
-            # integer comparison: no tolerance. Only fail if BOTH blocks have parseable
-            # counts that disagree; if either is absent, fall through to stat comparison.
-            spec_elements = parse_elements(spec_body)
-            gen_elements  = parse_elements(gen_body)
-            if spec_elements is not None and gen_elements is not None and spec_elements != gen_elements:
-                max_rel_err = max(max_rel_err, float('inf'))
-                failures.append({
-                    "label":     failure_label,
-                    "stat":      "elements_mismatch",
-                    "spec":      spec_elements,
-                    "generated": gen_elements,
-                    "abs_err":   abs(spec_elements - gen_elements),
-                    "atol":      0,
-                })
-                continue  # skip stat/sample comparison — sizes are incommensurate
+        # Positional FAILed and a perfect bijection is possible (equal counts,
+        # multi-occurrence). Probe candidate (spec_i, gen_j) pairings with the
+        # identical per-pair predicate and look for a maximum bipartite matching.
+        # Cache each probed pair's result so matched pairs can contribute their
+        # rel-err / tolerance metadata without re-comparing.
+        pair_cache = {}
+        def _is_edge(i, j):
+            if (i, j) not in pair_cache:
+                fl = f"{label}#{i+1}" if multi else label
+                pair_cache[(i, j)] = _compare_block_pair(label, fl, spec_bodies[i], gen_bodies[j])
+            return not pair_cache[(i, j)][0]  # no failures → edge exists
 
-            spec_stats = parse_stats(spec_body)
-            gen_stats  = parse_stats(gen_body)
+        match_count, assignment = _perfect_bijection(n_spec, n_gen, _is_edge)
 
-            if spec_stats is None or gen_stats is None:
-                # Cannot parse statistics — fall through to LLM fallback for this block
-                # Mark as unparseable so fallback is triggered below
-                failures.append({
-                    "label":     failure_label,
-                    "stat":      "parse_error",
-                    "spec":      spec_body[:200],
-                    "generated": gen_body[:200],
-                    "rel_err":   float('inf'),
-                })
-                continue
-
-            # ULP-aware tolerance derivation: ask the helper to parse Type/max/buffer_size
-            # from the spec block and compute (atol, rtol) per the decision tree in
-            # planning/ulp_aware_tolerance_design.md. Replaces the prior scale-blind
-            # `atol = spec_max * tolerance` formula. The helper handles:
-            #   - integer/byte types → exact equality (atol=0, rtol=0)
-            #   - float32 → N × max × 2^-23
-            #   - float64 → N × max × 2^-52
-            #   - unknown → conservative float32 fallback
-            # N defaults to max(16, ceil(log2(buffer_size))); per-kernel override
-            # is plumbed through `n_safety_override` (from source_apps.json).
-            tol_result = _compute_fp_tolerance(spec_body, n_safety_override=n_safety_override)
-            atol = tol_result['atol']
-            rtol = tol_result['rtol']
-            per_block_tolerance[failure_label] = tol_result['metadata']
-
-            # Compare each statistic using allclose: |a-b| <= atol + rtol*max(|a|,|b|)
-            for stat_name, spec_val in spec_stats.items():
-                gen_val = gen_stats.get(stat_name)
-                if gen_val is None:
-                    max_rel_err = max(max_rel_err, float('inf'))
-                    failures.append({
-                        "label":     failure_label,
-                        "stat":      stat_name,
-                        "spec":      spec_val,
-                        "generated": "(missing)",
-                        "abs_err":   float('inf'),
-                        "atol":      atol,
-                        "rtol":      rtol,
-                    })
-                    continue
-                _denom = max(abs(spec_val), atol)
-                _rel = abs_err(spec_val, gen_val) / _denom if _denom > 0 else (0.0 if abs_err(spec_val, gen_val) == 0.0 else float('inf'))
-                max_rel_err = max(max_rel_err, _rel)
-                if not allclose_pass(spec_val, gen_val, rtol, atol):
-                    failures.append({
-                        "label":     failure_label,
-                        "stat":      stat_name,
-                        "spec":      spec_val,
-                        "generated": gen_val,
-                        "abs_err":   abs_err(spec_val, gen_val),
-                        "atol":      atol,
-                        "rtol":      rtol,
-                    })
-
-            # Compare sample values element-wise with the same allclose tolerance
-            spec_samples = parse_samples(spec_body)
-            gen_samples  = parse_samples(gen_body)
-            if spec_samples and gen_samples:
-                for idx, (sv, gv) in enumerate(zip(spec_samples, gen_samples)):
-                    _denom = max(abs(sv), atol)
-                    _rel = abs_err(sv, gv) / _denom if _denom > 0 else (0.0 if abs_err(sv, gv) == 0.0 else float('inf'))
-                    max_rel_err = max(max_rel_err, _rel)
-                    if not allclose_pass(sv, gv, rtol, atol):
-                        failures.append({
-                            "label":     failure_label,
-                            "stat":      f"sample[{idx}]",
-                            "spec":      sv,
-                            "generated": gv,
-                            "abs_err":   abs_err(sv, gv),
-                            "atol":      atol,
-                            "rtol":      rtol,
-                        })
+        if match_count == n_spec == n_gen:
+            # Rescued: a permutation of equal-within-tolerance blocks (not a defect).
+            # Record the matched pairs' rel-err / tolerance metadata for Table 2 /
+            # verification-log reproducibility; no failures are recorded.
+            for i, j in enumerate(assignment):
+                _pf, _prel, _ptol = pair_cache[(i, j)]
+                max_rel_err = max(max_rel_err, _prel)
+                per_block_tolerance.update(_ptol)
+        else:
+            # No perfect bijection → the discrepancy is real. Keep the positional
+            # failures so the diagnostic (and Tier 2 self-correction feedback) is
+            # identical to the pre-refinement message.
+            failures.extend(pos_failures)
+            max_rel_err = max(max_rel_err, pos_max_rel_err)
+            per_block_tolerance.update(pos_tol_meta)
 
     # Check for blocks present in generated output but not in spec (informational only, not a failure)
     extra_labels = set(gen_blocks.keys()) - set(spec_blocks.keys())

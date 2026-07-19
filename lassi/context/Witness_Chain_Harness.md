@@ -97,36 +97,62 @@ __device__ unsigned long long _t1_one_way_mix(unsigned long long state) {
     return state;
 }
 
-// Sentinel-write kernel — see Decision Tree below for the per-output-type body.
-// This template shows the byte-array case (Decision Tree case 1).
-// The `| 0x01` ensures the sentinel is non-zero so it remains distinguishable
-// from kernels whose output buffer is cudaMemset'd to zero before the call.
-__global__ void _t1_chain_write_sentinel(uint8_t* d_output) {
+// Sentinel-write kernel — write the full 64-bit sentinel into the first 8 bytes of the output
+// buffer. This is TYPE-AGNOSTIC (reinterpret as unsigned long long*), so it replaces the older
+// per-output-type Decision Tree: the same 8-byte write works for uint8/int/float/double/struct
+// output buffers (the kernel overwrites those bytes with its real output either way). The `| 1`
+// keeps the sentinel non-zero so it stays distinguishable from a zeroed buffer.
+__global__ void _t1_chain_write_sentinel(void* d_output) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        d_output[0] = (uint8_t)(_t1_chain_sentinel & 0xFF) | (uint8_t)0x01;
+        ((unsigned long long*)d_output)[0] = _t1_chain_sentinel | 1ULL;
     }
 }
 
-// Chain update: read the SENTINEL POSITION (d_output[0]) and mix it into the chain state.
-// This is the witness chain's ONLY job — operational verification: did the kernel run this
-// iteration? If the kernel ran, it overwrote the sentinel at d_output[0] with a real value;
-// if it didn't run, the sentinel value remains, the chain hash diverges from source's, and
-// the variant is rejected at Tier 2's [witness_chain_state] passthrough comparison.
-// Content verification of the rest of d_output is Tier 2's job (statistical comparison via
-// min/max/mean/sample over the full passthrough buffer) — the witness chain deliberately does
-// NOT hash bytes 1..N-1 to keep its cost O(1) per iteration and to keep verification layers
+// Chain update: fold a value-AGNOSTIC BINARY signal — "did the kernel overwrite the 8-byte
+// tripwire this iteration?" — into the chain state. This is the witness chain's ONLY job:
+// operational verification (did the kernel run?), NOT content verification. If the kernel ran it
+// overwrote the sentinel (observed != sentinel -> signal=1); if it was skipped/no-op the sentinel
+// persists (observed == sentinel -> signal=0), diverging the chain. Crucially we fold WHETHER the
+// tripwire was overwritten, not WHAT value replaced it — so a correct variant that produces a
+// different-but-valid output (FP rounding, an alternate correct path) still yields signal=1 and
+// matches the source. Value/tolerance correctness of the output is Tier 2's job (min/max/mean/
+// sample). 8 bytes make the "output coincidentally == sentinel" collision ~2^-64. Layers stay
 // single-purpose: witness chain = operational, Tier 2 = observational, Tier 3 = relational.
-__global__ void _t1_chain_update(const uint8_t* d_output) {
+__global__ void _t1_chain_update(const void* d_output) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        unsigned long long h = (unsigned long long)d_output[0];
-        _t1_chain_state = _t1_one_way_mix(_t1_chain_state ^ h);
+        unsigned long long _t1_obs = ((const unsigned long long*)d_output)[0];
+        unsigned long long _t1_exp = _t1_chain_sentinel | 1ULL;
+        unsigned long long _t1_sig = (_t1_obs != _t1_exp) ? 1ULL : 0ULL;
+        _t1_chain_state = _t1_one_way_mix(_t1_chain_state ^ _t1_sig);
         _t1_chain_sentinel = _t1_chain_state;  // next iteration's sentinel value
     }
 }
 // <<< END LASSI-VERIFY WITNESS_CHAIN <<<
 ```
 
+> **Note (job (ii), type-agnostic tripwire):** the sentinel is written and checked as a single
+> 8-byte quantity regardless of the output buffer's element type, so the older per-type
+> sentinel-write "Decision Tree" (cases 1–8 below) is **superseded** — install the two device
+> kernels exactly as shown above for any output type. The framework additionally re-derives these
+> two device-function bodies deterministically after insertion, so their fold semantics are
+> guaranteed identical for the source and every variant.
+
 ## Required host-side initialization (place before the timed loop, after device allocations are complete)
+
+**Place EXACTLY ONE harness-init block, and place it BEFORE the OUTERMOST loop that contains
+any timed kernel launch — including an outer *configuration* loop that re-runs the timed region
+for several problem sizes / parameters (e.g., `for (segment_size = 16; segment_size <= N; segment_size *= 2) { ... for (i < repeat) { kernel } ... }`).** The witness chain is then a SINGLE
+continuous accumulation across every timed kernel launch in the whole program. This is
+mandatory and non-negotiable:
+
+- **NEVER re-seed inside a loop.** Do NOT emit a second init before an inner timed loop or at the
+  top of a configuration-loop body — that resets the chain each pass and makes the final value
+  reflect only the last pass, so a correct variant that inits once (or a source that inits per
+  pass) will disagree even though both did identical work. One init, before everything timed.
+- The single continuous chain still catches loop-deletion: dropping iterations in ANY timed
+  region reduces the total number of chain folds and changes the final value.
+- Both SOURCE and every refactored variant must follow this identical rule so their
+  `witness_chain_state` values are comparable by construction.
 
 ```cpp
 // >>> BEGIN LASSI-VERIFY WITNESS_CHAIN (HARNESS INIT — do not edit or delete this block) >>>
