@@ -552,6 +552,77 @@ def _extract_mt_transform_block(code, key=None):
     return None
 
 
+# ==========================================================================
+# MT_TARGET_INDEX: a SEPARATE, top-level delimiter (siblings with MT_TRANSFORM, not nested
+# inside it) for the SENSITIVITY local-response probe. The probe needs the perturbation's
+# target index computed EARLY (before the "before"/unperturbed run) and the perturbation VALUE
+# applied LATER (between the "before" and "after" runs) — two program points, not one. Giving
+# each its own top-level delimiter keeps both the framework's single-block-per-key capture and
+# enforcement logic simple (mirrors MT_TRANSFORM's own _extract_/_enforce_ pair exactly) and
+# keeps the actual MT_TRANSFORM block down to exactly one occurrence per key, as everywhere else
+# in the framework already assumes. See the SENSITIVITY authoring instructions below for how the
+# two blocks are placed relative to each other and to the two kernel runs.
+# ==========================================================================
+MT_TARGET_INDEX_BEGIN = "// >>> BEGIN LASSI-VERIFY MT_TARGET_INDEX"
+MT_TARGET_INDEX_END   = "// <<< END LASSI-VERIFY MT_TARGET_INDEX <<<"
+
+_MT_TARGET_INDEX_BLOCK_RE = re.compile(
+    r'([ \t]*)// >>> BEGIN LASSI-VERIFY MT_TARGET_INDEX \[([^\]]*)\][^\n]*>>>\n'
+    r'(.*?)\n[ \t]*// <<< END LASSI-VERIFY MT_TARGET_INDEX <<<',
+    re.DOTALL
+)
+
+
+def _extract_mt_target_index_block(code, key=None):
+    """Return the interior text of the MT_TARGET_INDEX block matching `key` (see
+    `_extract_mt_transform_block`, which this mirrors exactly). Returns None if absent — the
+    local-response probe is optional, so most relations/kernels have no such block."""
+    for m in _MT_TARGET_INDEX_BLOCK_RE.finditer(code):
+        if key is None or m.group(2) == key:
+            return m.group(3)
+    return None
+
+
+def _enforce_canonical_target_index(variant_code, key, canonical_interior):
+    """Force the variant's MT_TARGET_INDEX block (if any) to be byte-identical to the
+    source-validated one. Mirrors `_enforce_canonical_transform` exactly (same three
+    enforced/spliced/no_site resolution paths); kept as a separate function, rather than a
+    shared helper parameterized on delimiter, so each stays a simple, direct mirror of the
+    other and either can evolve independently without the two probes' concerns entangling.
+    The splice fallback uses the same "before first H->D copy" site as MT_TRANSFORM's — that
+    is also the correct site for the target index (it must be computed before EITHER kernel run
+    the probe performs, and the first H->D copy is the earliest of those two runs)."""
+    matches = list(_MT_TARGET_INDEX_BLOCK_RE.finditer(variant_code))
+    if matches:
+        target = next((m for m in matches if m.group(2) == key), matches[0])
+        _seen = {"done": False}
+
+        def _repl(m):
+            if m.start() == target.start() and not _seen["done"]:
+                _seen["done"] = True
+                indent = m.group(1)
+                return (f"{indent}{MT_TARGET_INDEX_BEGIN} [{key}] >>>\n"
+                        f"{canonical_interior}\n"
+                        f"{indent}{MT_TARGET_INDEX_END}")
+            return ""  # duplicate block — remove
+
+        return _MT_TARGET_INDEX_BLOCK_RE.sub(_repl, variant_code), "enforced"
+
+    hd_re = re.compile(
+        r'^[ \t]*(?:cuda|hip)Memcpy\w*\s*\([^;]*?(?:cudaMemcpyHostToDevice|hipMemcpyHostToDevice)[^;]*\);',
+        re.MULTILINE
+    )
+    m = hd_re.search(variant_code)
+    if m:
+        indent = re.match(r'[ \t]*', variant_code[m.start():]).group(0)
+        block = (f"{indent}{MT_TARGET_INDEX_BEGIN} [{key}] >>>\n"
+                 f"{canonical_interior}\n"
+                 f"{indent}{MT_TARGET_INDEX_END}\n")
+        return variant_code[:m.start()] + block + variant_code[m.start():], "spliced"
+
+    return variant_code, "no_site"
+
+
 # Default SENSITIVITY perturbation set. SENSITIVITY relations are probed with MORE THAN ONE
 # perturbation (all applied identically to source and every variant): a MINIMAL bump that tests
 # fine-grained sensitivity, and a LARGE generic OUTLIER that guarantees a response from
@@ -583,7 +654,13 @@ MT_SENSITIVITY_PERTURBATIONS = [
             "where a minimal bump may not cross a decision boundary. Express it GENERICALLY in "
             "terms of the input's own observed range (scan the array for its min/max first, then "
             "push one element past it) — do NOT hard-code a value specific to any particular "
-            "kernel."
+            "kernel. IMPORTANT: 'far outside the observed range' means far outside the range "
+            "actually seen in THIS array — not the full numeric range of the storage type. If "
+            "the code elsewhere reveals a hard domain constraint on this input (e.g. a "
+            "fixed-size lookup/histogram table indexed directly by the value, or an existing "
+            "invariant-assertion checking the value's range), the outlier must stay within that "
+            "declared domain — push it toward the domain's boundary rather than past it, so it "
+            "remains a value the kernel is actually designed to process."
         ),
     },
 ]
@@ -2011,6 +2088,20 @@ def check_tier1_assertions(stdout):
     }
 
 
+def _check_assertion_regression(baseline_stdout, perturbed_stdout):
+    """Return sorted list of Tier-1 assertion labels that PASS in `baseline_stdout` but FAIL in
+    `perturbed_stdout`. A non-empty result means the perturbation/transform under test violates
+    an invariant the SOURCE itself declares (e.g. an input-domain constraint) — the stimulus is
+    invalid for this kernel, independent of what the invariant actually checks. Generic across
+    relation types and kernels: no knowledge of assertion semantics is required, only that a
+    PASS->FAIL flip occurred relative to the unperturbed baseline."""
+    _, baseline_diag = check_tier1_assertions(baseline_stdout)
+    _, perturbed_diag = check_tier1_assertions(perturbed_stdout)
+    baseline_passing = set(baseline_diag.get("passing_labels", []))
+    perturbed_failing = set(perturbed_diag.get("failing_labels", []))
+    return sorted(baseline_passing & perturbed_failing)
+
+
 # =============================================================================
 # TIER 3: METAMORPHIC TESTING
 # =============================================================================
@@ -2334,7 +2425,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
                                      template_code=None, feedback=None, verifyprompt=False,
                                      repair_mode=False,
                                      canonical_transform=None, perturbation_id="default",
-                                     perturbation_spec=None):
+                                     perturbation_spec=None, canonical_target_index=None):
     """
     Tier 3: Produce a metamorphic variant of source_code for one relation.
 
@@ -2355,6 +2446,11 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
                             SENSITIVITY multi-perturbation).
       perturbation_spec   : SENSITIVITY authoring only — the human-readable spec for THIS
                             perturbation (overrides the relation description when authoring).
+      canonical_target_index : SENSITIVITY local-response probe only — when set, the exact
+                            MT_TARGET_INDEX interior the SOURCE was validated against (a
+                            SEPARATE top-level block from MT_TRANSFORM; see
+                            _enforce_canonical_target_index). Reproduced verbatim the same way
+                            canonical_transform is. None when the source didn't use the probe.
 
     Returns extracted code string (same pattern as code_insert_asserts / code_insert_passthrough).
     Returns "" on failure (causes that relation to be marked SKIP in run_metamorphic_variants).
@@ -2551,6 +2647,11 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"Elements: <N>\n"
             f"Statistics: min=%.17g, max=%.17g, mean=%.17g\n"
             f"Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)\n"
+            f"Sample_at_target_before: %.17g %.17g ...  (OPTIONAL — see local-response probe "
+            f"in Step 1; small window of output values centered at mt_target_idx, from a run "
+            f"on the UNPERTURBED input)\n"
+            f"Sample_at_target_after: %.17g %.17g ...  (OPTIONAL — same window, from a run on "
+            f"the PERTURBED input)\n"
             f"=== END LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
             f"```\n\n"
             f"Print this block using printf with %.17g format. The label MUST exactly match "
@@ -2563,7 +2664,14 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"DIFFERS beyond floating-point tolerance — confirming that the variant's "
             f"output responded to the perturbation (the kernel actually uses the perturbed "
             f"input). FAILS when all stats and samples match within tolerance, indicating "
-            f"the variant ignored the perturbation (likely a stub-implementation cheat).\n"
+            f"the variant ignored the perturbation (likely a stub-implementation cheat).\n\n"
+            f"`Sample_at_target_before`/`Sample_at_target_after` are OPTIONAL and only emitted "
+            f"when the local-response probe described in Step 1 applies to this kernel — they "
+            f"let the checker see a perturbation's effect even when the output array is far "
+            f"too large for a single perturbed element to show up in the global Statistics or "
+            f"Sample_first10. Omit them entirely (do not guess values) when Step 1's probe "
+            f"does not apply — the Statistics/Sample_first10 fields alone are a complete, "
+            f"valid SENSITIVITY test on their own for those kernels.\n"
         )
     else:
         block_format = (
@@ -2706,6 +2814,52 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"Apply ONE perturbation per variant (do not chain multiple). The perturbation "
             f"should affect a single bit or single element to keep the response attributable "
             f"to that input dimension specifically.\n\n"
+            f"**OPTIONAL — local-response probe (attempt ONLY when BOTH hold; otherwise skip "
+            f"this sub-step entirely, apply the perturbation as a single MT_TRANSFORM block "
+            f"per the instructions above, and continue to Step 2):**\n"
+            f"  (a) SEMANTIC: this kernel's output preserves a bounded, identifiable positional "
+            f"correspondence to input elements — e.g. an elementwise map, a stencil / windowed / "
+            f"convolution kernel, or nearest-neighbor / interpolation — so perturbing ONE input "
+            f"element can only influence a small, boundable neighborhood of output elements. Do "
+            f"NOT attempt this for reductions, global aggregates (sum / histogram / sort / "
+            f"argmax / argmin), or scatter-gather kernels with data-dependent output indices, "
+            f"where a single input element's effect cannot be localized to a small set of "
+            f"output positions.\n"
+            f"  (b) STRUCTURAL: the kernel's primary computation (H→D copy, kernel launch(es), "
+            f"D→H copy) can be invoked TWICE in a row — once on the UNPERTURBED input, once on "
+            f"the PERTURBED input — without other non-idempotent state (persistent counters, "
+            f"streaming accumulation across calls) getting in the way.\n\n"
+            f"  If BOTH hold, this matters because a huge output array can make a single "
+            f"perturbed element's effect invisible to the global Statistics/Sample_first10 "
+            f"fields below — this probe makes that local effect directly observable instead. "
+            f"The probe needs the kernel to run TWICE with the perturbation applied only "
+            f"in between, so it uses TWO SEPARATE top-level blocks at two different points in "
+            f"the program — NOT one block containing both the index computation and the write:\n\n"
+            f"  1. Immediately AFTER host array initialization — in place of the single "
+            f"perturbation block described above — insert ONLY the target-index computation, "
+            f"with NO write to the input array, in its own MT_TARGET_INDEX block:\n"
+            f"```\n"
+            f"// >>> BEGIN LASSI-VERIFY MT_TARGET_INDEX [{block_key}] >>>\n"
+            f"    long long mt_target_idx = /* ... computed deterministically from array bounds ... */;\n"
+            f"// <<< END LASSI-VERIFY MT_TARGET_INDEX <<<\n"
+            f"```\n"
+            f"  2. Run the primary computation ONCE on the still-unperturbed input, copy the "
+            f"output to host, and keep a small window (~5-10 values) centered on mt_target_idx "
+            f"for printing later as `Sample_at_target_before`.\n"
+            f"  3. THEN apply the perturbation, in its own MT_TRANSFORM block (this block "
+            f"contains ONLY the write — do NOT repeat the index computation inside it):\n"
+            f"```\n"
+            f"// >>> BEGIN LASSI-VERIFY MT_TRANSFORM [{block_key}] >>>\n"
+            f"    input[mt_target_idx] = /* ... the perturbed value ... */;\n"
+            f"// <<< END LASSI-VERIFY MT_TRANSFORM <<<\n"
+            f"```\n"
+            f"  4. Run the primary computation AGAIN on the now-perturbed input, copy the "
+            f"output to host, and keep the SAME window for printing as `Sample_at_target_after`. "
+            f"Print both windows in the METAMORPHIC block (format below).\n\n"
+            f"  If EITHER (a) or (b) does not hold: skip this probe. Apply the perturbation as "
+            f"a single MT_TRANSFORM block per the instructions above (no MT_TARGET_INDEX block, "
+            f"no Sample_at_target_before/after fields) — the standard Statistics/Sample_first10 "
+            f"comparison is the correct, complete tool for this kernel on its own.\n\n"
             f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
             f"After the final device-to-host transfer, insert a METAMORPHIC block at each\n"
             f"observation point label listed above. The output buffer values must be the\n"
@@ -2728,12 +2882,52 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
     # byte-identically into each variant.
     _is_input_transforming = relation_type not in ("CONSERVATION", "MONOTONICITY")
     if _is_input_transforming:
-        if canonical_transform is not None:
-            # Enforce mode (main loop / post-Stage-0): the transform is already fixed by the
-            # source-validated version. Instruct the LLM to reproduce it VERBATIM at a
-            # compiling site; the caller additionally enforces it deterministically with
-            # _enforce_canonical_transform after generation, so exact reproduction is
-            # guaranteed regardless of the LLM's fidelity here.
+        if canonical_transform is not None and canonical_target_index is not None:
+            # Enforce mode, local-response-probe variant: the source used TWO separate
+            # top-level blocks (MT_TARGET_INDEX early, MT_TRANSFORM later, with a run of the
+            # primary computation on each side of MT_TRANSFORM) — reproduce that exact
+            # structure and order. The caller enforces both deterministically afterward
+            # (_enforce_canonical_target_index, then _enforce_canonical_transform), so exact
+            # reproduction is guaranteed regardless of the LLM's fidelity here.
+            transform_instruction = (
+                f"**Step 1 — Insert the local-response probe VERBATIM:**\n"
+                f"The source was validated using the SENSITIVITY local-response probe — "
+                f"reproduce its exact two-block, two-run structure here, in this order:\n\n"
+                f"1. Immediately AFTER host array initialization, insert this EXACT block "
+                f"(do not modify, reorder, or rename anything):\n"
+                f"```\n"
+                f"{MT_TARGET_INDEX_BEGIN} [{block_key}] >>>\n"
+                f"{canonical_target_index}\n"
+                f"{MT_TARGET_INDEX_END}\n"
+                f"```\n"
+                f"2. Run the primary computation ONCE on the still-unperturbed input, copy the "
+                f"output to host, and keep a small window (~5-10 values) centered on the index "
+                f"computed above for printing later as `Sample_at_target_before`.\n"
+                f"3. THEN insert this EXACT block (do not modify, reorder, rename, or change "
+                f"any numeric constants):\n"
+                f"```\n"
+                f"{MT_TRANSFORM_BEGIN} [{block_key}] >>>\n"
+                f"{canonical_transform}\n"
+                f"{MT_TRANSFORM_END}\n"
+                f"```\n"
+                f"4. Run the primary computation AGAIN on the now-perturbed input, copy the "
+                f"output to host, and keep the SAME window for printing as "
+                f"`Sample_at_target_after`.\n\n"
+                f"This exact stimulus was validated on the reference (source) version. "
+                f"Reproducing it verbatim, including the two-run structure, is REQUIRED so the "
+                f"variant is tested under the same conditions the source was validated against.\n\n"
+                f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
+                f"After the SECOND (post-perturbation) run's device-to-host transfer, insert a "
+                f"METAMORPHIC block at each observation point label listed above, in the format "
+                f"specified below, printing BOTH `Sample_at_target_before` (saved in step 2 "
+                f"above) and `Sample_at_target_after` (from this run).\n"
+            )
+        elif canonical_transform is not None:
+            # Enforce mode, single-block variant (no local-response probe was used at Stage 0):
+            # the transform is already fixed by the source-validated version. Instruct the LLM
+            # to reproduce it VERBATIM at a compiling site; the caller additionally enforces it
+            # deterministically with _enforce_canonical_transform after generation, so exact
+            # reproduction is guaranteed regardless of the LLM's fidelity here.
             transform_instruction = (
                 f"**Step 1 — Insert the input transformation VERBATIM:**\n"
                 f"Insert the following transformation code EXACTLY as written — do NOT modify, "
@@ -2757,20 +2951,26 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
         else:
             # Authoring mode (Stage 0): the LLM chooses the transform, but it MUST wrap the
             # transformation code in the MT_TRANSFORM delimiters so it can be extracted and
-            # reused as the canonical stimulus for every variant.
-            transform_instruction += (
-                f"\n**MANDATORY — wrap the input transformation in MT_TRANSFORM delimiters:**\n"
-                f"The Step 1 transformation code (the lines that modify the host input arrays "
-                f"before the first H->D copy) MUST be enclosed in these exact delimiter comments "
-                f"so the framework can extract and reuse the exact same transformation:\n\n"
-                f"```\n"
-                f"{MT_TRANSFORM_BEGIN} [{block_key}] >>>\n"
-                f"    <your input transformation statements here>\n"
-                f"{MT_TRANSFORM_END}\n"
-                f"```\n"
-                f"Place ONLY the input-transformation statements inside these delimiters — not "
-                f"the METAMORPHIC output blocks, and not any unrelated code.\n"
-            )
+            # reused as the canonical stimulus for every variant. SENSITIVITY's own authoring
+            # instructions above already show the exact delimiter placement for both the
+            # single-block and local-response-probe cases, so this generic reminder — written
+            # for relation types with no explicit delimiter example of their own (SCALING,
+            # SYMMETRY, PERMUTATIVE, the generic fallback) — would be redundant there and is
+            # skipped for SENSITIVITY.
+            if relation_type != "SENSITIVITY":
+                transform_instruction += (
+                    f"\n**MANDATORY — wrap the input transformation in MT_TRANSFORM delimiters:**\n"
+                    f"The Step 1 transformation code (the lines that modify the host input arrays "
+                    f"before the first H->D copy) MUST be enclosed in these exact delimiter comments "
+                    f"so the framework can extract and reuse the exact same transformation:\n\n"
+                    f"```\n"
+                    f"{MT_TRANSFORM_BEGIN} [{block_key}] >>>\n"
+                    f"    <your input transformation statements here>\n"
+                    f"{MT_TRANSFORM_END}\n"
+                    f"```\n"
+                    f"Place ONLY the input-transformation statements inside these delimiters — not "
+                    f"the METAMORPHIC output blocks, and not any unrelated code.\n"
+                )
 
     # --- Feedback prefix (Stage 0 retry only) ---
     # Prepended when a previous attempt failed so the LLM can correct its mistake.
@@ -2984,6 +3184,8 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
     )
     stats_pattern  = re.compile(r'Statistics:\s*min=([^,\s]+),\s*max=([^,\s]+),\s*mean=([^,\s]+)')
     sample_pattern = re.compile(r'Sample_(first10|last10|spread10):(.*)')
+    target_before_pattern = re.compile(r'Sample_at_target_before:(.*)')
+    target_after_pattern  = re.compile(r'Sample_at_target_after:(.*)')
     sum_pattern    = re.compile(r'Sum:\s*([^\s]+)')
     residual_patt  = re.compile(r'Residual:\s*([^\s]+)')
     iter_patt      = re.compile(r'Iteration:\s*(\d+)')
@@ -3016,6 +3218,19 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
         for m in sample_pattern.finditer(body):
             try:
                 vals.extend(float(v) for v in m.group(2).split())
+            except ValueError:
+                pass
+        return vals
+
+    def parse_target_samples(body, patt):
+        """Parse the SENSITIVITY local-response-probe window (Sample_at_target_before/after) —
+        an OPTIONAL, self-contained before/after pair printed within a single variant run (see
+        the local-response-probe prompt guidance). Absent for kernels the LLM judged ineligible;
+        returns [] in that case, making the caller's fold a no-op."""
+        vals = []
+        for m in patt.finditer(body):
+            try:
+                vals.extend(float(v) for v in m.group(1).split())
             except ValueError:
                 pass
         return vals
@@ -3880,6 +4095,28 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                             "atol": atol, "rtol": rtol,
                         })
 
+                # Local-response probe (OPTIONAL — see the local-response-probe prompt
+                # guidance): a self-contained before/after window around the perturbation's
+                # target index, both printed by THIS SAME variant run, so no cross-run/baseline
+                # correlation is needed. Makes a spatially local effect visible even when the
+                # output array is far too large for it to show up in Statistics/Sample_first10
+                # above. Additive to the existing tally; a no-op (both lists empty) for any
+                # kernel where the LLM judged the probe inapplicable — unchanged behavior there.
+                target_before = parse_target_samples(meta_bodies[i], target_before_pattern)
+                target_after  = parse_target_samples(meta_bodies[i], target_after_pattern)
+                for idx, (bv, av) in enumerate(zip(target_before, target_after)):
+                    if not both_finite(bv, av):
+                        continue
+                    total_compared += 1
+                    if not allclose(av, bv, rtol, atol):
+                        total_differed += 1
+                        differing_stats.append({
+                            "label": block_label, "stat": f"target_window[{idx}]",
+                            "orig": bv, "variant": av,
+                            "abs_err": abs(av - bv),
+                            "atol": atol, "rtol": rtol,
+                        })
+
         # Verdict:
         #   - 0 comparisons ran → SKIP (block parse failure across the board — can't tell)
         #   - ≥1 comparison ran AND ≥1 differed → PASS (variant responded to the perturbation)
@@ -4021,6 +4258,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
     _work_items = []
     for _rel in active_relations:
         _rel.setdefault("canonical_transform", {})
+        _rel.setdefault("canonical_target_index", {})
         _is_sens = _rel.get("type") == "SENSITIVITY"
         if code_version is None:
             _pert_list = _mt_perturbations_for(_rel)            # Stage 0: probe every perturbation
@@ -4043,12 +4281,15 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             _wi["_pid"] = _pid
             _wi["_pspec"] = _pspec
             _wi["_canonical"] = _rel.get("canonical_transform", {}).get(_pid)  # None at Stage 0
+            _wi["_canonical_target_index"] = _rel.get("canonical_target_index", {}).get(_pid)
             _work_items.append(_wi)
 
     def _capture_canonical(relation, variant_code):
-        """Stage 0 only: extract this variant's MT_TRANSFORM interior and store it on the parent
-        relation as the canonical stimulus for this perturbation, so the main loop can re-insert
-        it byte-identically into every variant."""
+        """Stage 0 only: extract this variant's MT_TRANSFORM interior (and, if present, its
+        separate MT_TARGET_INDEX interior — the SENSITIVITY local-response probe's index
+        computation, a sibling top-level block, not nested inside MT_TRANSFORM) and store them
+        on the parent relation as the canonical stimulus for this perturbation, so the main loop
+        can re-insert both byte-identically into every variant."""
         if code_version is not None:
             return
         _parent = relation.get("_parent", relation)
@@ -4064,18 +4305,46 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                   f"'{relation.get('name')}' — cannot capture canonical transform for "
                   f"perturbation '{_pid}'; variants will fall back to LLM-authored transforms.")
 
+        target_idx_interior = _extract_mt_target_index_block(variant_code, key)
+        if target_idx_interior is None:
+            target_idx_interior = _extract_mt_target_index_block(variant_code)
+        if target_idx_interior is not None:
+            _parent.setdefault("canonical_target_index", {})[_pid] = target_idx_interior
+
     def _apply_canonical(variant_code, relation):
-        """Main loop only: force the variant's input transform to equal the source-validated
-        canonical transform for this (relation, perturbation). No-op at Stage 0 (the source IS
-        the canonical) and when no canonical was captured (e.g. CONSERVATION/MONOTONICITY)."""
+        """Main loop only: force the variant's input transform (and, if the source used the
+        local-response probe, its separate MT_TARGET_INDEX block) to equal the source-validated
+        canonical versions. No-op at Stage 0 (the source IS the canonical) and when no canonical
+        was captured (e.g. CONSERVATION/MONOTONICITY)."""
         if not variant_code or code_version is None:
             return variant_code
+        key = f"{relation.get('name', 'unknown')}::{relation.get('_pid', 'default')}"
+        _nm, _pid = relation.get("name"), relation.get("_pid")
+
+        canonical_target_index = relation.get("_canonical_target_index")
+        if canonical_target_index:
+            # Enforce the target-index block FIRST — it must land before the MT_TRANSFORM
+            # block in program order (the index is computed before it's used), and enforcing
+            # it first means MT_TRANSFORM's own splice fallback (if needed) still correctly
+            # finds the first H->D copy and lands immediately after the just-enforced index.
+            variant_code, _ti_path = _enforce_canonical_target_index(
+                variant_code, key, canonical_target_index
+            )
+            if _ti_path == "no_site":
+                print(f"  [Tier 3] WARN: no MT_TARGET_INDEX block or H->D copy located in "
+                      f"variant '{_nm}' (perturbation {_pid}) — trusting the LLM's verbatim "
+                      f"placement of the canonical target index.")
+            elif _ti_path == "spliced":
+                print(f"  [Tier 3] canonical target index SPLICED before first H->D copy in "
+                      f"variant '{_nm}' (perturbation {_pid}).")
+            else:
+                print(f"  [Tier 3] canonical target index ENFORCED in variant '{_nm}' "
+                      f"(perturbation {_pid}).")
+
         canonical = relation.get("_canonical")
         if not canonical:
             return variant_code
-        key = f"{relation.get('name', 'unknown')}::{relation.get('_pid', 'default')}"
         enforced, path = _enforce_canonical_transform(variant_code, key, canonical)
-        _nm, _pid = relation.get("name"), relation.get("_pid")
         if path == "no_site":
             print(f"  [Tier 3] WARN: no MT_TRANSFORM block or H->D copy located in variant "
                   f"'{_nm}' (perturbation {_pid}) — trusting the LLM's verbatim placement of "
@@ -4087,6 +4356,40 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             print(f"  [Tier 3] canonical transform ENFORCED in variant '{_nm}' "
                   f"(perturbation {_pid}).")
         return enforced
+
+    def _score_with_assertion_guard(stdout_to_score, relation, tolerance, is_stage0):
+        """Score one Tier-3 work item's stdout. At Stage 0, first checks whether the
+        relation/perturbation's stimulus caused a Tier-1 assertion regression against the
+        unperturbed baseline (`original_passthrough_stdout`) — a domain-invalid stimulus (e.g. an
+        outlier value outside the kernel's declared valid input range) can produce a crash or
+        corrupted state that spuriously satisfies or fails almost any relation-specific
+        comparison, so it must be caught before the relation-type check runs at all. Scoped to
+        Stage 0 only: this validates the stimulus BEFORE it is frozen canonically into every
+        variant (`_capture_canonical`); the main loop reuses an already-validated stimulus, so
+        this guard is not repeated there."""
+        if is_stage0:
+            _regressed = _check_assertion_regression(original_passthrough_stdout, stdout_to_score)
+            if _regressed:
+                return "FAIL", {
+                    "verdict": "FAIL", "relation_name": relation.get("name", "unknown"),
+                    "factor": None, "blocks_compared": 0,
+                    "failures": [{"label": l, "stat": "assertion_regression",
+                                  "detail": f"Invariant assertion [{l}] passes on the unperturbed "
+                                            f"source but fails under this perturbation."}
+                                 for l in _regressed],
+                    "summary": (
+                        f"FAIL: perturbation violates declared invariant assertion(s) "
+                        + ", ".join(f"[{l}]" for l in _regressed)
+                        + " (PASS on unperturbed source, FAIL under this perturbation). The "
+                        "perturbation value is outside this kernel's valid input domain — "
+                        "regenerate a perturbation that stays within the domain the invariant "
+                        "enforces."
+                    ),
+                }
+        return check_metamorphic_relation(
+            stdout_to_score, original_passthrough_stdout, relation, tolerance,
+            n_safety_override=n_safety_override,
+        )
 
     for relation in _work_items:
         relation_name = relation.get("name", "unknown")
@@ -4146,6 +4449,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             canonical_transform=relation.get("_canonical"),
             perturbation_id=relation.get("_pid", "default"),
             perturbation_spec=relation.get("_pspec"),
+            canonical_target_index=relation.get("_canonical_target_index"),
         )
         # Stage 0: capture the source's transform as canonical. Main loop: enforce it verbatim.
         _capture_canonical(relation, variant_code)
@@ -4224,6 +4528,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                     canonical_transform=relation.get("_canonical"),
                     perturbation_id=relation.get("_pid", "default"),
                     perturbation_spec=relation.get("_pspec"),
+                    canonical_target_index=relation.get("_canonical_target_index"),
                 )
                 if not _repaired_code:
                     print(f"  [Tier 3] Repair {_repair_idx + 1}: no code extracted — retrying")
@@ -4356,6 +4661,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                         canonical_transform=relation.get("_canonical"),
                         perturbation_id=relation.get("_pid", "default"),
                         perturbation_spec=relation.get("_pspec"),
+                        canonical_target_index=relation.get("_canonical_target_index"),
                     )
                     if not _repaired_code:
                         print(f"  [Tier 3] Execute repair {_repair_idx + 1}: no code extracted")
@@ -4416,9 +4722,8 @@ def run_metamorphic_variants(source_code, active_relations, contract,
 
         # --- Step 5: Check metamorphic relation ---
         tolerance = relation.get("tolerance", 1e-5)
-        verdict, diagnostic = check_metamorphic_relation(
-            variant_stdout, original_passthrough_stdout, relation, tolerance,
-            n_safety_override=n_safety_override,
+        verdict, diagnostic = _score_with_assertion_guard(
+            variant_stdout, relation, tolerance, code_version is None
         )
         # Only update source_status during Stage 0 (code_version is None).
         # In the main loop, source_status was frozen at Stage 0 and must not be overwritten
@@ -4523,6 +4828,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                 canonical_transform=relation.get("_canonical"),
                 perturbation_id=relation.get("_pid", "default"),
                 perturbation_spec=relation.get("_pspec"),
+                canonical_target_index=relation.get("_canonical_target_index"),
             )
             # Stage 0 retry: (re)capture this variant's transform as the canonical stimulus.
             _capture_canonical(relation, variant_code)
@@ -4589,9 +4895,8 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                 continue
 
             _tolerance = relation.get("tolerance", 1e-5)
-            _verdict, _diagnostic = check_metamorphic_relation(
-                _variant_stdout, original_passthrough_stdout, relation, _tolerance,
-                n_safety_override=n_safety_override,
+            _verdict, _diagnostic = _score_with_assertion_guard(
+                _variant_stdout, relation, _tolerance, True  # retry loop is Stage-0-only
             )
             relation["source_status"] = _verdict  # update for Stage 0 filter
             _replace_result({"name": relation_name, "verdict": _verdict,

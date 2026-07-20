@@ -1575,6 +1575,26 @@ in the contract; propose the SENSITIVITY relation naming the sensitive input dim
 framework supplies the perturbation set. Express any perturbation you do describe GENERICALLY
 in terms of the input's own observed range — never a value specific to one kernel.
 
+**The outlier perturbation must stay within the kernel's actual valid domain.** "Far outside
+the observed range" means far outside the range actually present in the sampled input array —
+NOT the full numeric range of the storage type. If the code elsewhere reveals a hard domain
+constraint on an input (a fixed-size lookup/histogram table indexed directly by the value, or
+an existing invariant assertion checking the value's range), the outlier must stay within that
+domain. Pushing a value outside it produces undefined behavior (e.g. an out-of-bounds table
+index) rather than a legitimate large-but-valid stimulus, and the framework's Stage-0 filter
+will reject such a perturbation and ask for a corrected one.
+
+**Large output arrays and locally-confined perturbations.** A perturbation to a single
+element only ever affects a small, local region of a kernel's output — for a huge output array
+that region can be invisible to generic aggregate/sample-based comparison. When authoring the
+actual perturbation code (a separate, later step — not part of contract proposal), the
+framework's instructions offer an OPTIONAL local-response probe for kernels whose output
+preserves a bounded positional correspondence to input (elementwise maps, stencils/windowed
+kernels, nearest-neighbor/interpolation). It does not apply to reductions, global aggregates,
+sorts, or scatter/gather kernels with data-dependent output indices — nothing to propose here,
+just be aware the eventual perturbation code may or may not include it depending on the
+kernel's structure.
+
 The contract `factor` field is **always null** for SENSITIVITY (the output magnitude of
 change is not specified, only its existence). The input perturbation is named in the
 `description` and the `Perturbation_under:` line of the METAMORPHIC block.
