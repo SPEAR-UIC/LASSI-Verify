@@ -3,7 +3,7 @@
         "source_folder": "HeCBench",
         "matrix-rotate": {
             "app_folder": "matrix-rotate",
-            "app_params": ["30000", "100"],
+            "app_params": ["5000", "101"],
             "code_lines": 107
         },
         "marchingCubes": {
@@ -13,7 +13,7 @@
         },
         "stu-matrix-rotate": {
             "app_folder": "stu-matrix-rotate",
-            "app_params": ["30000", "100"],
+            "app_params": ["5000", "101"],
             "code_lines": 67
         },
         "all-pairs-distance": {

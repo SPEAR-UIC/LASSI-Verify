@@ -185,19 +185,23 @@ KERNEL_CONFIGS: dict[str, KernelOracleConfig] = {
         run_args=["750"], oracle_primary="class1", class2_mode="none",
         class1_mode="fail_if_present", class1_fail_pattern=r"test: FAILED",
     ),
-    # colorwheel: EXCLUDED from the oracle analysis (2026-07-15). Its built-in check is an EXACT
-    # byte `memcmp` of the host reference image vs the device image, but both are computed from
-    # FP trig (host `computeColor` vs GPU `color` kernel). Host and device rounding differ, so the
-    # PRISTINE UNMODIFIED SOURCE fails its own check (max_error=1 on sm_89). Unreliable exact-FP
-    # oracle, same class as keogh/threadfence — we do NOT grade variants against a check the source
-    # cannot pass, and we do NOT modify the kernel. Config kept for provenance; do not aggregate.
-    # A source-device (not host-device) diff with a small pixel tolerance is a possible future
-    # revisit (see planning/per_kernel_oracle_decisions.md).
+    # colorwheel: SOURCE-AS-SPEC grading (updated 2026-07-19; was EXCLUDED via fail_if_present,
+    # which incorrectly failed the source itself). Its built-in check is an EXACT byte `memcmp` of
+    # the host reference image vs the device image, but both are computed from FP trig (host
+    # `computeColor` vs GPU `color` kernel) — host/device rounding differs, so even the PRISTINE
+    # UNMODIFIED SOURCE fails its own memcmp and instead prints "Maximum error ... : 1" (never
+    # "PASS") on sm_89, deterministically every run. We treat that printed error count as a
+    # class-2 signal and grade each variant against the SOURCE's OWN measured count (not against
+    # memcmp==0), using the same self-variance-derived tolerance machinery as jacobi/lid-driven-
+    # cavity. Known edge case (not yet observed in practice): a variant that achieves a bit-exact
+    # host/device match prints "PASS" with no numeric error count, which this regex will not
+    # capture (-> UNTESTABLE rather than a implicit PASS at error=0); revisit only if such a
+    # variant actually appears (see project_source_as_spec_tolerance_policy).
     "colorwheel": KernelOracleConfig(
         app_name="colorwheel", source_rel="colorwheel/colorwheel-cuda_main.cu",
-        run_args=["10000", "256", "500000"], oracle_primary="class1", class2_mode="none",
-        class1_mode="fail_if_present",
-        class1_fail_pattern=r"Maximum error between host and device",
+        run_args=["10000", "256", "500000"], oracle_primary="class2", class2_mode="tolerance",
+        class2_signal_regex=r"Maximum error between host and device results:\s*(\d+)",
+        source_variance_runs=5,
     ),
     "chacha20": KernelOracleConfig(
         app_name="chacha20", source_rel="chacha20/chacha20-cuda_main.cu",
@@ -266,6 +270,27 @@ KERNEL_CONFIGS: dict[str, KernelOracleConfig] = {
         app_name="jaccard", source_rel="jaccard/jaccard-cuda_main.cu",
         run_args=["1024", "512", "1000"], compile_extra=["-DDEBUG"],
         oracle_primary="class1", class2_mode="none",
+        class1_mode="fail_if_present", class1_fail_pattern=r"FAIL",
+    ),
+    # matrix-rotate: built-in check IS a serial-vs-parallel exact compare (element-by-element
+    # float `!=`, no tolerance) already baked into the source — it prints a single "PASS"/"FAIL"
+    # token, so this is a strong, reliable Class-1 oracle (no custom diff harness needed).
+    # app_params=["5000","101"] is the framework-validated workload (101 mod 4 = 1, a genuine
+    # rotation — see project_matrix_rotate_tier3_timeout for why repeat must be !=0 mod 4).
+    "matrix-rotate": KernelOracleConfig(
+        app_name="matrix-rotate", source_rel="matrix-rotate/matrix-rotate-cuda_main.cu",
+        run_args=["5000", "101"], oracle_primary="class1", class2_mode="none",
+        class1_regex=r"(PASS|FAIL)$", class1_pass_value="PASS",
+    ),
+    # atomicCost: built-in check is `memcmp(result_wi, result_wo, result_size)`, printed as a
+    # PASS/FAIL token once per type instantiation (FP64/INT32/FP32 — three lines per run).
+    # Each thread owns its own `result[tid]` (no cross-thread sharing) so atomic vs non-atomic
+    # must agree exactly regardless of scheduling — reliable, deterministic oracle.
+    # fail_if_present (not token) because of the three PASS/FAIL lines, like layout/entropy.
+    # app_params=["16","10"] is the framework-validated workload (nelems=16, repeat=10).
+    "atomicCost": KernelOracleConfig(
+        app_name="atomicCost", source_rel="atomicCost/atomicCost-cuda_main.cu",
+        run_args=["16", "10"], oracle_primary="class1", class2_mode="none",
         class1_mode="fail_if_present", class1_fail_pattern=r"FAIL",
     ),
 }
