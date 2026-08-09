@@ -56,10 +56,13 @@ which represents one full algorithm run.
 
 1. Reads a 64-bit runtime seed from the `LASSI_VERIFY_SEED` environment variable (provided by the
    pipeline).
-2. Wraps each timed kernel invocation with a **pre-call sentinel-write step** (writes a sentinel
-   byte derived from the current chain state into ONE byte of the kernel's output buffer) and a
-   **post-call chain-update step** (reads the kernel's actual output, hashes it into the chain
-   state alongside the current chain state).
+2. Wraps each timed kernel invocation with a **pre-call sentinel-write step** (writes an 8-byte
+   type-agnostic sentinel derived from the current chain state into the first 8 bytes of the
+   kernel's output buffer) and a **post-call chain-update step** (folds a **value-agnostic binary
+   signal — whether the kernel overwrote the 8-byte tripwire this iteration** (`observed != sentinel
+   → 1`, else `0`) — into the chain state; it folds *whether* the tripwire was overwritten, **not
+   what value** replaced it, so a correct variant producing a different-but-valid output still
+   matches the source. Output value/tolerance correctness is Tier 2's job).
 3. After the timed loop completes, captures the final chain state as a separate Tier 2 passthrough
    block (`[witness_chain_state]`) for the framework's cross-execution comparison.
 
@@ -340,9 +343,21 @@ the price of clean stripping.
 
 ## Decision tree — sentinel-write site selection by output buffer type
 
-The sentinel-write kernel body varies depending on the primary timed-kernel OUTPUT parameter's
-type. Match the source's output parameter type to one of the cases below and use the matching
-body. Matching is mechanical (parameter-type lookup), not creative reasoning.
+> **⚠ LEGACY / REFERENCE ONLY — do NOT hand-pick a per-type body.** The sentinel write is now a
+> single **type-agnostic 8-byte write** (install the two device kernels exactly as shown in the
+> "Required file-scope declarations" section above, verbatim, for ANY output type). The framework
+> additionally re-derives both device-kernel bodies deterministically **after** insertion
+> (`_enforce_canonical_witness_device_fns`), so whatever body you write is normalized to the
+> canonical value-agnostic form — the per-type cases below have **no effect on the installed code**.
+> The table is retained only as historical reference. **The one rule in this section that still
+> matters is the insertion-ORDER rule** (sentinel as the FIRST loop-body statement when the source
+> touches the output buffer before the kernel), which is already stated in full in the "Required
+> per-iteration wrapping" section above. You do not need to consult the type table to install the
+> harness correctly.
+
+The sentinel-write kernel body was historically selected from the primary timed-kernel OUTPUT
+parameter's type. This per-type matching is superseded (see the banner above); the cases below are
+kept for reference.
 
 The kernel's primary output buffer is the one the source's post-loop validation reads (often the
 buffer passed to the final `cudaMemcpyDeviceToHost` or compared in the source's reference check).
@@ -381,22 +396,25 @@ the kernel's actual output value after each iteration.
 | 7 | Bit-packed `uint64*` output (boolean adjacency, masks) | `((uint8_t*)&d_output[0])[0] = (uint8_t)(_t1_chain_sentinel & 0xFF) \| (uint8_t)0x01;` |
 | 8 | Output is a struct array | Sentinel-write the first scalar field of `d_output[0]` using the matching case for that field's type |
 
-For output patterns that do not match any of cases 1–8, do NOT generate the witness chain
-harness; return the code unchanged and report status `soft_flag_no_safe_site`.
+If there is no safe output buffer to host the 8-byte tripwire (no identifiable primary output
+buffer at least 8 bytes wide), do NOT generate the witness chain harness; return the code unchanged
+and report status `soft_flag_no_safe_site`.
 
 ---
 
-## Why the harness MUST use the kernel's actual output for the chain update (not a constant or analytical shortcut)
+## Why the harness MUST observe the kernel's real output buffer each iteration (not a constant or analytical shortcut)
 
-The chain state is updated each iteration by mixing the actual kernel output into the previous
-chain state via a one-way function. This means:
-- The final chain state depends on the kernel's actual per-iteration output, which depends on the
-  kernel actually executing and overwriting the sentinel value placed in the output buffer.
-- The sentinel at iteration `i` derives from the chain state at iteration `i-1`, which derives
-  from the kernel's output at iteration `i-1`.
+Each iteration, the chain update reads the first 8 bytes of the kernel's output buffer and folds a
+**value-agnostic binary signal — whether the kernel overwrote the sentinel tripwire** — into the
+previous chain state via a one-way function. It does NOT fold the output *value* itself (that is
+Tier 2's job). This means:
+- The final chain state depends on the kernel **actually executing and overwriting the sentinel** in
+  the output buffer every iteration — not on what specific values it wrote.
+- The sentinel at iteration `i` derives from the chain state at iteration `i-1`, which derives from
+  whether the kernel overwrote the tripwire at iteration `i-1`.
 - A variant that skips iterations or runs the kernel fewer than `repeat` times cannot produce the
   correct final chain state, because the sentinel from skipped iterations persists in the output
-  buffer and pollutes the chain hash for those iterations.
+  buffer (signal=0 for those iterations) and diverges the chain hash.
 - The runtime seed (provided via env var) is unknown at the LLM's code-generation time, so the
   chain cannot be pre-computed offline.
 
@@ -508,10 +526,17 @@ defeats the cheat-resistance property the harness was designed to provide.
 After your code output, on a single final line OUTSIDE the code fence, report exactly one status
 token so the pipeline can log which path you took:
 
-- `WITNESS_CHAIN_STATUS: applied_decision_tree_case_N` — harness installed using Decision Tree
-  case N (N = 1..8). Replace N with the matched case number.
-- `WITNESS_CHAIN_STATUS: soft_flag_no_safe_site` — a timing loop exists but the output type
-  matches none of cases 1–8; harness NOT installed, code returned unchanged.
+- `WITNESS_CHAIN_STATUS: applied_creative` — harness installed. Use this as the default "applied"
+  token: the sentinel write is now a single type-agnostic 8-byte write (see the device kernels
+  above) and the framework re-derives the device-kernel bodies deterministically after insertion,
+  so there is no per-output-type case to match. Report this whenever you successfully install the
+  harness.
+- `WITNESS_CHAIN_STATUS: applied_decision_tree_case_N` — LEGACY, still accepted. Only if you
+  deliberately followed a specific numbered case in the (now-superseded) Decision Tree below; the
+  case number has no effect on the installed code. Prefer `applied_creative`.
+- `WITNESS_CHAIN_STATUS: soft_flag_no_safe_site` — a timing loop exists but there is no safe
+  output buffer to host the 8-byte tripwire (e.g., no identifiable primary output buffer at least
+  8 bytes wide); harness NOT installed, code returned unchanged.
 - `WITNESS_CHAIN_STATUS: not_applied_no_timing_loop` — no benchmark timing loop found; harness
   NOT installed, code returned unchanged.
 
