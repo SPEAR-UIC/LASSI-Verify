@@ -3,6 +3,7 @@ import os
 import json
 import math
 import subprocess
+import shutil
 from lassi.format_colors import color
 from lassi.prompt_dictionary import PromptDictionary
 from lassi.llm_config import argo_llm, cerebras_llm, ollama_llm, ollama_llm_nostream
@@ -193,6 +194,24 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
                 }
                 printf("\n");
             }
+
+            // Checksum — INTEGER/BYTE-TYPED BUFFERS ONLY (int, long, short, unsigned
+            // variants, char, bool, byte, size_t, fixed-width intN_t/uintN_t). Do NOT add
+            // this for float/double buffers — a content hash would flag legitimate
+            // floating-point reordering as a mismatch. Statistics/Sample_* above cover
+            // only ~30 elements regardless of buffer size; this FNV-1a fold covers every
+            // byte, catching a correctness violation the samples don't happen to land on.
+            {
+                uint64_t lv_checksum = 0xcbf29ce484222325ULL;               // FNV-1a offset basis
+                const unsigned char* lv_bytes = (const unsigned char*)lv_host_buf;
+                long long lv_nbytes = (long long)<N> * (long long)sizeof(lv_host_buf[0]);
+                for (long long lv_i = 0; lv_i < lv_nbytes; lv_i++) {
+                    lv_checksum ^= lv_bytes[lv_i];
+                    lv_checksum *= 0x100000001b3ULL;                         // FNV-1a prime
+                }
+                printf("Checksum: 0x%016llx\n", (unsigned long long)lv_checksum);
+            }
+
             printf("=== END LASSI-VERIFY PASSTHROUGH [label] ===\n");
             free(lv_host_buf);
         }
@@ -212,6 +231,9 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
         - Use the `lv_` prefix for ALL passthrough-local variables to avoid name collisions
         - For float buffers: cast to double in printf calls (already shown as `(double)lv_host_buf[lv_i]`)
         - For integer buffers: use `%d` instead of `%.17g`, no cast needed
+        - Include the `Checksum:` block ONLY when `<dtype>` is an integer or byte type
+          (int, long, short, unsigned variants, char, bool, byte, size_t, intN_t/uintN_t).
+          OMIT it entirely for float/double buffers.
 
         **STEP 4: Add required headers if not present**
         - C++: `<cstdio>` / `<stdio.h>` for printf, `<cstdlib>` / `<stdlib.h>` for malloc/free
@@ -623,6 +645,19 @@ def _enforce_canonical_target_index(variant_code, key, canonical_interior):
     return variant_code, "no_site"
 
 
+# Re-execution budget for a FAILing SENSITIVITY check: a single observed response across these
+# attempts is conclusive (a genuine stub/cheat never responds, in any run); only consistent
+# non-response across every attempt is treated as a real FAIL. Exists because kernels where many
+# independent operations write into a shared structure (atomic updates to a shared table, scatter
+# into overlapping regions, hash collisions) can legitimately mask a single perturbed element's
+# effect on some runs and not others, purely from real GPU scheduling nondeterminism -- a single
+# unlucky run cannot distinguish "genuinely insensitive" from "responded, but this run's
+# scheduling masked it" (see Metamorphic_Relations_Catalog.md's SENSITIVITY contraindication).
+# Mirrors the n=3 adopted for Step 1's buffer-stability classification
+# (lassi_verify_analysis/buffer_stability_classification.py) -- same asymmetric-evidence logic,
+# applied to a different observable.
+_SENSITIVITY_REPEAT_N = 3
+
 # Default SENSITIVITY perturbation set. SENSITIVITY relations are probed with MORE THAN ONE
 # perturbation (all applied identically to source and every variant): a MINIMAL bump that tests
 # fine-grained sensitivity, and a LARGE generic OUTLIER that guarantees a response from
@@ -660,7 +695,12 @@ MT_SENSITIVITY_PERTURBATIONS = [
             "fixed-size lookup/histogram table indexed directly by the value, or an existing "
             "invariant-assertion checking the value's range), the outlier must stay within that "
             "declared domain — push it toward the domain's boundary rather than past it, so it "
-            "remains a value the kernel is actually designed to process."
+            "remains a value the kernel is actually designed to process. If the chosen input "
+            "dimension instead controls a loop bound, buffer size, or repeat/iteration count "
+            "rather than a per-element value, an outlier pushed far outside the observed range "
+            "can blow up RUNTIME rather than producing an invalid value — bound it to a value "
+            "that still completes within the harness's execution timeout, not just one that is "
+            "numerically far from the observed range."
         ),
     },
 ]
@@ -849,6 +889,92 @@ def _enforce_canonical_witness_device_fns(code):
         if j >= len(code):
             continue
         new_body = _canonical_witness_device_body(name, param_name)
+        code = code[:b + 1] + "\n" + new_body + "\n}" + code[j + 1:]
+        n += 1
+    return code, n
+
+
+# Fallback witness-chain device-function design (Step 3, 2026-08-20) — used ONLY when the
+# non-interference gate (lassi/pipeline_v4.py) detects that the primary job-(ii) sentinel design
+# above corrupts real computation on a given kernel: an in-place/read-modify-write buffer whose
+# pre-launch content is legitimate input (confirmed on matrix-rotate — the sentinel write lands on
+# bytes the rotation kernel is about to read as its actual corner value, before it ever computes).
+#
+# The primary design's contradiction: it can't both (a) hold the tripwire when the kernel launches
+# (so the kernel proves it overwrote something) and (b) hold the buffer's true value when the
+# kernel launches (so the kernel computes correctly) — those are mutually exclusive states of the
+# same bytes at the same instant. This fallback resolves it by never writing to the buffer at all:
+# snapshot the TRUE pre-launch bytes (pure read, zero interference), let the kernel run completely
+# unperturbed, then fold whether the post-kernel bytes differ from that snapshot — instead of from
+# a fixed magic constant. Reuses the existing `_t1_chain_sentinel` global as the snapshot slot
+# (repurposed, not overwritten with a magic value) so no new symbol or call-site change is needed.
+#
+# Accepted trade-off (empirically checked, not just reasoned about, 2026-08-20 session): a kernel
+# whose per-iteration result coincidentally reproduces the exact same 8 bytes it started with would
+# look like a skip (a false-reject risk, not a false-accept — the sign of the error is on the safe
+# side). Checked directly against the two real kernels available: matrix-rotate's corner changes on
+# every single rotation step (0/101 iterations unchanged, confirmed by direct execution), so it is
+# not at risk; jacobi was ruled out as a test case for a different, unrelated reason (its witness
+# target is a dead corner never touched by the stencil at all — 0/1548 iterations show any change
+# even under the PRIMARY design — a separate, not-yet-fixed defect tracked independently, see
+# memory `project_witness_chain_dead_target_jacobi.md`). No other kernel has been checked yet;
+# treat this trade-off as validated for the case that motivated it, not proven in general.
+def _snapshot_witness_device_body(name, param_name):
+    """Return the canonical FALLBACK device-function body (the inner statements) for the given
+    harness device kernel, referencing `param_name` (the output-pointer parameter). Mirrors
+    _canonical_witness_device_body's shape but never writes to the buffer."""
+    if name == "_t1_chain_write_sentinel":
+        return (
+            "    if (threadIdx.x == 0 && blockIdx.x == 0) {\n"
+            "        // FALLBACK: snapshot the TRUE pre-launch value instead of overwriting it,\n"
+            "        // so the kernel-under-test always computes on unperturbed input. Reuses\n"
+            "        // _t1_chain_sentinel as the snapshot slot (read-only from here on).\n"
+            f"        _t1_chain_sentinel = ((const unsigned long long*){param_name})[0];\n"
+            "    }"
+        )
+    return (  # _t1_chain_update
+        "    if (threadIdx.x == 0 && blockIdx.x == 0) {\n"
+        "        // FALLBACK: fold BINARY \"did this position's value change from its pre-launch\n"
+        "        // snapshot\" (never a fixed magic constant, so the buffer is never clobbered\n"
+        "        // ahead of the real kernel). A skipped/no-op kernel leaves the value identical\n"
+        "        // to the snapshot -> signal=0 -> chain diverges, same detection shape as the\n"
+        "        // primary design for that case.\n"
+        f"        unsigned long long _t1_obs = ((const unsigned long long*){param_name})[0];\n"
+        "        unsigned long long _t1_sig = (_t1_obs != _t1_chain_sentinel) ? 1ULL : 0ULL;\n"
+        "        _t1_chain_state = _t1_one_way_mix(_t1_chain_state ^ _t1_sig);\n"
+        "    }"
+    )
+
+
+def _enforce_fallback_witness_device_fns(code):
+    """Replace the BODIES of the two witness device kernels with the snapshot-based FALLBACK
+    design (see _snapshot_witness_device_body above) instead of the primary job-(ii) sentinel
+    design. Kept as a standalone function (not a mode flag on _enforce_canonical_witness_device_fns)
+    so the validated, live-used primary path can never be affected by this addition. Returns
+    (code, n_replaced) — same contract as _enforce_canonical_witness_device_fns."""
+    n = 0
+    for name in ("_t1_chain_write_sentinel", "_t1_chain_update"):
+        sig_re = re.compile(r'__global__\s+void\s+' + name + r'\s*\(([^)]*)\)')
+        m = sig_re.search(code)
+        if not m:
+            continue
+        pn_m = re.search(r'(\w+)\s*$', m.group(1).strip())
+        param_name = pn_m.group(1) if pn_m else "d_output"
+        b = code.find('{', m.end())
+        if b < 0:
+            continue
+        depth, j = 0, b
+        while j < len(code):
+            if code[j] == '{':
+                depth += 1
+            elif code[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= len(code):
+            continue
+        new_body = _snapshot_witness_device_body(name, param_name)
         code = code[:b + 1] + "\n" + new_body + "\n}" + code[j + 1:]
         n += 1
     return code, n
@@ -1455,9 +1581,31 @@ def _compute_fp_tolerance(spec_block_body, n_safety_override=None):
     }
 
 
+def load_buffer_classification(app_name, classification_dir=None):
+    """Return the {label: record} "buffers" dict from a kernel's
+    lassi_verify_analysis/buffer_classification/{app_name}_buffer_classification.json
+    sidecar (planning/LASSI_Verify_Phase2_Bridge.md Step 1), or None if no such file
+    exists or it can't be read/parsed. Never raises: most kernels — anything not yet
+    run through the offline classification pass — simply have no file yet, and that
+    must silently fall back to compare_passthrough_outputs()'s default (type-derived)
+    behavior, not error. classification_dir defaults to the repo's
+    lassi_verify_analysis/buffer_classification directory, resolved relative to this
+    file (same pattern PromptDictionary.get_codeknowledge() uses for lassi/context/)."""
+    if classification_dir is None:
+        classification_dir = os.path.join(
+            os.path.dirname(__file__), "..", "lassi_verify_analysis", "buffer_classification")
+    path = os.path.join(classification_dir, f"{app_name}_buffer_classification.json")
+    try:
+        with open(path, "r") as f:
+            record = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return record.get("buffers")
+
+
 def compare_passthrough_outputs(spec_stdout, generated_stdout,
                                 tolerance=1e-6, n_safety_override=None,
-                                order_insensitive=False):
+                                order_insensitive=False, buffer_classification=None):
     """
     Tier 2 empirical equivalence check. Compare passthrough output from a generated
     code against the source-as-specification reference (SOURCE_verify stdout).
@@ -1497,6 +1645,47 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     requires a *perfect* bijection under the identical tolerance predicate, so a
     genuinely-wrong block still FAILs (see _perfect_bijection). The post-hoc re-grade
     harness (lassi_verify_analysis/tier2_regrade.py) toggles this to A/B the two modes.
+
+    buffer_classification (default None — OFF): optional {label: record} dict, the
+    "buffers" value of a `{kernel}_buffer_classification.json` sidecar produced by
+    `lassi_verify_analysis/buffer_stability_classification.py` (planning/
+    LASSI_Verify_Phase2_Bridge.md Step 1). Each record's `comparison_mode` is either
+    "exact" or "tolerant", determined by measuring whether the label's own SOURCE_verify
+    content is bit-stable across repeated seeded re-executions — evidence-based, not
+    derived from the declared C type the way `_compute_fp_tolerance()` below is. **Default
+    None preserves this function's behavior byte-for-byte**, same guarantee as
+    order_insensitive=False above: nothing changes for any existing caller unless a
+    classification dict is deliberately passed in. When provided, a label whose record has
+    comparison_mode="tolerant" AND a populated `tolerance: {atol, rtol}` block uses that
+    measured tolerance directly instead of _compute_fp_tolerance()'s type-derived result
+    for that block's Statistics/Sample comparison — tagged tolerance_source=
+    "measured_classification" in the returned metadata for auditability. A label whose
+    record has comparison_mode="exact" is enforced bit-exact (atol=0, rtol=0 — tagged
+    tolerance_source="measured_classification_exact"): the offline classification pass
+    already proved zero legitimate run-to-run variance for that buffer, so the type-derived
+    tolerance's slack is no longer licensed. Only a label absent from the dict, or
+    "tolerant" with no calibrated tolerance yet (see `calibrate_tolerance()` in the
+    classification script), falls through to today's type-derived path unchanged. This is
+    the "unclassified/uncalibrated defaults to exact" safe-direction rule from the bridge
+    doc, encoded here rather than just intended — note that an *unclassified* label
+    defaulting to exact goes through the type-derived path (which is itself exact for
+    integer/byte types), while a label explicitly *classified* exact goes through this
+    branch instead; the two converge on the same result for non-float types. Does not
+    apply to witness_chain_state or element-count comparisons,
+    which stay exact by separate hardcoded branches regardless (see the Scope caveat in
+    the bridge doc, Section 2 Step 1) — classification is only meaningful for the
+    Statistics/Sample numeric path.
+
+    Exhaustive checksum (no opt-in needed — always active when present): a block whose
+    Statistics/Sample text also carries an optional `Checksum: 0x...` line (see
+    lassi/context/Passthrough_Catalog.md) gets that checksum compared exactly whenever the
+    block resolves to exact tolerance (atol==0 and rtol==0), on top of the existing
+    Statistics/Sample checks. This closes the sparse-sampling gap: Statistics/Sample_* only
+    ever inspect ~30 elements regardless of buffer size, so a correctness violation confined
+    to elements they don't sample can otherwise pass undetected. Purely additive and
+    backward compatible — pre-existing instrumented code (all archived data as of this
+    writing) simply lacks the line, so nothing changes for it; this can only ever surface a
+    failure the existing checks missed, never suppress one they already caught.
 
     Returns:
         verdict (str): "PASS" | "FAIL" | "SKIP"
@@ -1538,6 +1727,12 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
     # full rationale (allclose-style tolerance on a 64-bit hash would falsely accept
     # mismatched chain states because bit-level diffs are dwarfed by the value scale).
     value_pattern = re.compile(r'Value:\s*(\S+)')
+    # Regex for the optional Checksum line (planning/LASSI_Verify_Phase2_Bridge.md Step 1,
+    # sparse-sampling piece; see lassi/context/Passthrough_Catalog.md). An FNV-1a hash over
+    # every byte of an integer/byte-typed buffer — additive to Statistics/Sample, not a
+    # replacement. Older instrumented codes (and any float/double buffer, which should never
+    # carry one per the catalog) simply lack this line; absence is not an error.
+    checksum_pattern = re.compile(r'Checksum:\s*(0x[0-9a-fA-F]+)')
 
     # Label of the witness-chain passthrough block — handled with exact-string comparison
     # instead of the standard Statistics/Sample numerical comparison.
@@ -1588,6 +1783,12 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
             except ValueError:
                 pass
         return samples
+
+    def parse_checksum(block_body):
+        """Parse the optional Checksum line; return the hex string (lowercase) or None
+        if absent/unparseable. Absence is normal, not an error — see checksum_pattern."""
+        m = checksum_pattern.search(block_body)
+        return m.group(1).lower() if m else None
 
     def allclose_pass(a, b, rtol, atol):
         """numpy.allclose-style check: |a-b| <= atol + rtol*max(|a|,|b|).
@@ -1688,20 +1889,52 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
             })
             return pair_failures, pair_max_rel_err, pair_tol_meta
 
-        # ULP-aware tolerance derivation: ask the helper to parse Type/max/buffer_size
-        # from the spec block and compute (atol, rtol) per the decision tree in
-        # planning/ulp_aware_tolerance_design.md. Replaces the prior scale-blind
-        # `atol = spec_max * tolerance` formula. The helper handles:
-        #   - integer/byte types → exact equality (atol=0, rtol=0)
-        #   - float32 → N × max × 2^-23
-        #   - float64 → N × max × 2^-52
-        #   - unknown → conservative float32 fallback
-        # N defaults to max(16, ceil(log2(buffer_size))); per-kernel override
-        # is plumbed through `n_safety_override` (from source_apps.json).
-        tol_result = _compute_fp_tolerance(spec_body, n_safety_override=n_safety_override)
-        atol = tol_result['atol']
-        rtol = tol_result['rtol']
-        pair_tol_meta[failure_label] = tol_result['metadata']
+        # Measured-classification override (planning/LASSI_Verify_Phase2_Bridge.md Step 1):
+        # if the caller supplied buffer_classification and this label was measured
+        # "exact" or "tolerant" (with a calibrated tolerance), use that directly instead
+        # of the type-derived heuristic below. See buffer_classification's docstring above
+        # for the full rationale — this branch is only ever reachable when a caller
+        # deliberately opts in; buffer_classification=None (the default) never enters it.
+        classified = (buffer_classification or {}).get(label)
+        classified_mode = classified.get("comparison_mode") if classified else None
+        classified_tol = (classified or {}).get("tolerance") if classified_mode == "tolerant" else None
+        if classified_mode == "exact":
+            # The offline classification pass already proved zero legitimate run-to-run
+            # variance for this buffer (planning/LASSI_Verify_Phase2_Bridge.md Step 1) — the
+            # type-derived tolerance's slack is not licensed here. Bit-exact via allclose
+            # with atol=rtol=0 (equivalent to ==, but reuses the same comparison path).
+            atol = 0.0
+            rtol = 0.0
+            pair_tol_meta[failure_label] = {
+                "type":             classified.get("declared_type", "unknown"),
+                "tolerance_source": "measured_classification_exact",
+                "atol":             atol,
+                "rtol":             rtol,
+            }
+        elif classified_tol and classified_tol.get("atol") is not None and classified_tol.get("rtol") is not None:
+            atol = classified_tol["atol"]
+            rtol = classified_tol["rtol"]
+            pair_tol_meta[failure_label] = {
+                "type":             classified.get("declared_type", "unknown"),
+                "tolerance_source": "measured_classification",
+                "atol":             atol,
+                "rtol":             rtol,
+            }
+        else:
+            # ULP-aware tolerance derivation: ask the helper to parse Type/max/buffer_size
+            # from the spec block and compute (atol, rtol) per the decision tree in
+            # planning/ulp_aware_tolerance_design.md. Replaces the prior scale-blind
+            # `atol = spec_max * tolerance` formula. The helper handles:
+            #   - integer/byte types → exact equality (atol=0, rtol=0)
+            #   - float32 → N × max × 2^-23
+            #   - float64 → N × max × 2^-52
+            #   - unknown → conservative float32 fallback
+            # N defaults to max(16, ceil(log2(buffer_size))); per-kernel override
+            # is plumbed through `n_safety_override` (from source_apps.json).
+            tol_result = _compute_fp_tolerance(spec_body, n_safety_override=n_safety_override)
+            atol = tol_result['atol']
+            rtol = tol_result['rtol']
+            pair_tol_meta[failure_label] = tol_result['metadata']
 
         # Compare each statistic using allclose: |a-b| <= atol + rtol*max(|a|,|b|)
         for stat_name, spec_val in spec_stats.items():
@@ -1750,6 +1983,37 @@ def compare_passthrough_outputs(spec_stdout, generated_stdout,
                         "atol":      atol,
                         "rtol":      rtol,
                     })
+
+        # Exhaustive checksum (planning/LASSI_Verify_Phase2_Bridge.md Step 1,
+        # sparse-sampling piece; see lassi/context/Passthrough_Catalog.md "Why Checksum").
+        # Statistics/Sample_* above cover ~30 elements regardless of buffer size — a
+        # correctness violation confined to elements they don't happen to sample can pass
+        # every check above undetected. When BOTH sides carry a Checksum line AND this
+        # block resolved to exact tolerance (atol==0 and rtol==0 — true for every
+        # integer/byte type by default, and for any buffer a measured classification
+        # marks exact), require the checksums to match exactly: this is coverage of every
+        # byte, not a sample of it. A checksum is the wrong tool for a nonzero-tolerance
+        # block (any bit difference changes it, which would flag legitimate FP
+        # reassociation), so this is skipped whenever atol/rtol is nonzero — matching the
+        # catalog's own instruction to never add a checksum to a float/double buffer.
+        # Absence of the line on either side (all pre-existing instrumented code, and any
+        # buffer this classification doesn't apply to) is normal, not a parse error, and
+        # falls through to exactly today's behavior — this check can only ever ADD a
+        # failure that Statistics/Sample_* missed, never remove one they already caught.
+        if atol == 0 and rtol == 0:
+            spec_checksum = parse_checksum(spec_body)
+            gen_checksum = parse_checksum(gen_body)
+            if spec_checksum is not None and gen_checksum is not None and spec_checksum != gen_checksum:
+                pair_max_rel_err = float('inf')
+                pair_failures.append({
+                    "label":     failure_label,
+                    "stat":      "checksum_mismatch",
+                    "spec":      spec_checksum,
+                    "generated": gen_checksum,
+                    "abs_err":   float('inf'),
+                    "atol":      0,
+                    "rtol":      0,
+                })
 
         return pair_failures, pair_max_rel_err, pair_tol_meta
 
@@ -2619,6 +2883,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"Elements: <N>\n"
             f"Statistics: min=%.17g, max=%.17g, mean=%.17g\n"
             f"Sample_first10: %.17g %.17g ...  (up to 10 values, space-separated)\n"
+            f"Checksum: 0x%016llx  (OPTIONAL — see instruction below)\n"
             f"=== END LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
             f"```\n\n"
             f"Print this block using printf with %.17g format. The label MUST exactly match "
@@ -2628,7 +2893,27 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"specific input transformation applied — it is informational for diagnostic "
             f"output and does not affect the check. The checker compares each variant "
             f"statistic Z_stat to the original statistic Y_stat (factor = 1.0 by definition "
-            f"for INVARIANCE).\n"
+            f"for INVARIANCE).\n\n"
+            f"**Include the `Checksum:` line ONLY when this buffer is an integer or byte type** "
+            f"(int, long, short, unsigned variants, char, bool, byte, size_t, "
+            f"intN_t/uintN_t) — omit it entirely for float/double buffers. Statistics/"
+            f"Sample_first10 above cover only ~13 elements regardless of buffer size; a "
+            f"correctness violation confined to elements they don't happen to sample can pass "
+            f"every check above undetected. Use the SAME FNV-1a fold as your PASSTHROUGH "
+            f"block for this buffer, computed over the SAME captured host buffer, so a "
+            f"byte-identical buffer produces a byte-identical checksum on both sides:\n"
+            f"```\n"
+            f"{{\n"
+            f"    uint64_t lv_checksum = 0xcbf29ce484222325ULL;\n"
+            f"    const unsigned char* lv_bytes = (const unsigned char*)<buffer_name>;\n"
+            f"    long long lv_nbytes = (long long)<N> * (long long)sizeof(<buffer_name>[0]);\n"
+            f"    for (long long lv_i = 0; lv_i < lv_nbytes; lv_i++) {{\n"
+            f"        lv_checksum ^= lv_bytes[lv_i];\n"
+            f"        lv_checksum *= 0x100000001b3ULL;\n"
+            f"    }}\n"
+            f"    printf(\"Checksum: 0x%016llx\\n\", (unsigned long long)lv_checksum);\n"
+            f"}}\n"
+            f"```\n"
         )
     elif relation_type == "SENSITIVITY":
         # Mirrors INVARIANCE's block format but uses `Perturbation_under:` to name the
@@ -2652,6 +2937,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"on the UNPERTURBED input)\n"
             f"Sample_at_target_after: %.17g %.17g ...  (OPTIONAL — same window, from a run on "
             f"the PERTURBED input)\n"
+            f"Checksum: 0x%016llx  (OPTIONAL — see instruction below)\n"
             f"=== END LASSI-VERIFY METAMORPHIC [{first_label}] ===\n"
             f"```\n\n"
             f"Print this block using printf with %.17g format. The label MUST exactly match "
@@ -2671,7 +2957,30 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"too large for a single perturbed element to show up in the global Statistics or "
             f"Sample_first10. Omit them entirely (do not guess values) when Step 1's probe "
             f"does not apply — the Statistics/Sample_first10 fields alone are a complete, "
-            f"valid SENSITIVITY test on their own for those kernels.\n"
+            f"valid SENSITIVITY test on their own for those kernels.\n\n"
+            f"**Include the `Checksum:` line ONLY when this buffer is an integer or byte type** "
+            f"(int, long, short, unsigned variants, char, bool, byte, size_t, "
+            f"intN_t/uintN_t) — omit it entirely for float/double buffers. This closes the "
+            f"same blind spot as the local-response probe by a different route: a single "
+            f"perturbed element in a huge buffer is genuinely, deterministically different "
+            f"from the un-perturbed baseline, but that difference can be invisible to "
+            f"Statistics/Sample_first10 AND fall outside where a local-response probe applies "
+            f"(e.g. scatter/gather kernels with data-dependent output indices). A checksum "
+            f"over every byte cannot miss it. Use the SAME FNV-1a fold as your PASSTHROUGH "
+            f"block for this buffer, computed over the SAME captured host buffer, so a "
+            f"byte-identical buffer produces a byte-identical checksum on both sides:\n"
+            f"```\n"
+            f"{{\n"
+            f"    uint64_t lv_checksum = 0xcbf29ce484222325ULL;\n"
+            f"    const unsigned char* lv_bytes = (const unsigned char*)<buffer_name>;\n"
+            f"    long long lv_nbytes = (long long)<N> * (long long)sizeof(<buffer_name>[0]);\n"
+            f"    for (long long lv_i = 0; lv_i < lv_nbytes; lv_i++) {{\n"
+            f"        lv_checksum ^= lv_bytes[lv_i];\n"
+            f"        lv_checksum *= 0x100000001b3ULL;\n"
+            f"    }}\n"
+            f"    printf(\"Checksum: 0x%016llx\\n\", (unsigned long long)lv_checksum);\n"
+            f"}}\n"
+            f"```\n"
         )
     else:
         block_format = (
@@ -2793,6 +3102,42 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
             f"**Step 1 — Apply the input perturbation:**\n"
             f"Insert the perturbation code AFTER host array initialization but BEFORE the "
             f"first host-to-device memory copy (cudaMemcpy H→D or hipMemcpy H→D).\n\n"
+            f"**CRITICAL — verify the perturbation survives to the observation point:** many "
+            f"benchmarks run their timed kernel(s) inside an outer repeat/timing loop that "
+            f"resets or re-touches state tied to the perturbed input on EVERY iteration to "
+            f"produce a stable average runtime — for example, re-running a setup/init kernel, "
+            f"or redundantly repeating the perturbed input's own host-to-device copy inside "
+            f"the loop body instead of doing it once before the loop. If such a loop exists "
+            f"between the host-to-device copy above and the observation point in Step 2, trace "
+            f"whether anything in that loop re-copies or re-initializes the perturbed buffer, "
+            f"or otherwise resets device-side state derived from it, on iterations AFTER the "
+            f"first — if it does, either the perturbation itself is silently erased, or "
+            f"whatever the kernel accumulated in device memory across earlier iterations is "
+            f"discarded before the final iteration (the one whose output actually reaches the "
+            f"observation point) runs — in both cases the observation point no longer reflects "
+            f"the perturbation the way a single-iteration run would, regardless of the "
+            f"perturbation itself being correct. Two ways to avoid this:\n"
+            f"  - Re-apply the perturbation at the START of every iteration, immediately after "
+            f"any per-iteration reset and immediately before that iteration's own computation "
+            f"kernel — not just once before the loop — and do NOT repeat any other copy/reset "
+            f"of that state inside the loop beyond what the perturbation itself requires.\n"
+            f"  - Or confirm the buffer you perturbed, and any device-side state derived from "
+            f"it, is never touched again after the loop's first iteration, so a single "
+            f"one-time perturbation before the loop is sufficient. Before concluding this, "
+            f"check for EVERY write to that buffer inside the loop — a kernel launch, a "
+            f"memcpy, or any direct assignment — not just calls with an obviously "
+            f"init-sounding name; a benchmark's per-iteration reset can be spread across more "
+            f"than one line.\n"
+            f"**Common mistake to avoid:** do NOT gate the re-apply on the iteration counter "
+            f"(e.g. `if (i == 0) {{ ...reapply... }}`) — that only re-applies on the FIRST "
+            f"iteration and reproduces the exact same bug this guidance exists to prevent, "
+            f"just one code path removed: the perturbation is still gone by the LAST "
+            f"iteration, which is what the observation point actually captures. If you choose "
+            f"the re-apply approach, it must run unconditionally on every iteration, with no "
+            f"iteration-number check of any kind.\n\n"
+            f"Either way, the perturbation must still be present in — and not have been reset "
+            f"out of — the state the LAST iteration operates on, since that is what gets "
+            f"captured in Step 2.\n\n"
             f"The perturbation must be NON-TRIVIAL (actually modify the input). The "
             f"specific perturbation for THIS variant is:\n"
             f"  {perturb_desc}\n\n"
@@ -2943,6 +3288,32 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
                 f"This exact transformation was validated on the reference (source) version. "
                 f"Reproducing it verbatim is REQUIRED so the variant is tested under the same "
                 f"stimulus the source was validated against.\n\n"
+                f"**CRITICAL — verify the perturbation survives to the observation point in "
+                f"THIS variant's own structure:** the transform content above is fixed, but "
+                f"WHERE you place it, and whether it needs to be reapplied, is your decision "
+                f"for this specific code — which may be structured differently from the "
+                f"reference it was validated against. If this variant runs its timed kernel(s) "
+                f"inside an outer repeat/timing loop that resets or re-touches state tied to "
+                f"the perturbed input on every iteration — e.g. re-running a setup/init "
+                f"kernel, or redundantly repeating the perturbed input's own host-to-device "
+                f"copy inside the loop instead of once before it — a perturbation applied only "
+                f"once before the loop can be silently erased, or whatever the kernel "
+                f"accumulated in device memory across earlier iterations can be discarded, "
+                f"before the final iteration — the one whose output reaches the observation "
+                f"point in Step 2 — runs. If this variant has such a loop, either re-apply the "
+                f"transform at the start of every iteration (after any per-iteration reset, "
+                f"before that iteration's own computation, with no other repeated copy/reset "
+                f"of that state inside the loop), or confirm the perturbed buffer and any "
+                f"device-side state derived from it is never touched again after the loop's "
+                f"first iteration — check for EVERY write to that buffer inside the loop (a "
+                f"kernel launch, a memcpy, or any direct assignment), not just calls with an "
+                f"obviously init-sounding name. **Common mistake to avoid:** do NOT gate the "
+                f"re-apply on the iteration counter (e.g. `if (i == 0) {{ ...reapply... }}`) — "
+                f"that only re-applies on the FIRST iteration and reproduces the exact same "
+                f"bug this guidance exists to prevent, just one code path removed: the "
+                f"transform is still gone by the LAST iteration, which is what the "
+                f"observation point actually captures. The re-apply, if used, must run "
+                f"unconditionally on every iteration, with no iteration-number check.\n\n"
                 f"**Step 2 — Insert METAMORPHIC output blocks:**\n"
                 f"After the final device-to-host transfer, insert a METAMORPHIC block at each "
                 f"observation point label listed above, in the format specified below. The "
@@ -3189,6 +3560,7 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
     sum_pattern    = re.compile(r'Sum:\s*([^\s]+)')
     residual_patt  = re.compile(r'Residual:\s*([^\s]+)')
     iter_patt      = re.compile(r'Iteration:\s*(\d+)')
+    checksum_pattern = re.compile(r'Checksum:\s*(0x[0-9a-fA-F]+)')
 
     def extract_meta_blocks(text):
         """Return dict mapping label → ordered list of block body strings (all occurrences)."""
@@ -3221,6 +3593,14 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
             except ValueError:
                 pass
         return vals
+
+    def parse_checksum(body):
+        """Parse the optional Checksum line; return the hex string (lowercase) or None if
+        absent. Mirrors compare_passthrough_outputs()'s local helper of the same name —
+        absence is normal (pre-existing code without the new template line, or a
+        float/double buffer), not a parse error."""
+        m = checksum_pattern.search(body)
+        return m.group(1).lower() if m else None
 
     def parse_target_samples(body, patt):
         """Parse the SENSITIVITY local-response-probe window (Sample_at_target_before/after) —
@@ -3960,6 +4340,28 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                             "atol": atol, "rtol": rtol,
                         })
 
+                # Exhaustive checksum (mirrors compare_passthrough_outputs()'s Tier-2 check,
+                # verify.py ~1875-1888): Statistics/Sample_first10 above cover only ~13
+                # elements regardless of buffer size — a violation confined to elements they
+                # don't happen to sample can pass every check above undetected. Only trusted
+                # when the buffer resolved to exact tolerance (atol==0 and rtol==0 — true for
+                # every integer/byte type by default), since a checksum is the wrong tool for
+                # a nonzero-tolerance block (any bit difference would flag legitimate FP
+                # reassociation). Absence of the line on either side (pre-existing code without
+                # the new template line, or a float/double buffer) is normal, not a parse
+                # error — this check can only ever ADD a failure the checks above missed,
+                # never remove one they already caught.
+                if atol == 0 and rtol == 0:
+                    orig_checksum = parse_checksum(pass_bodies[i])
+                    var_checksum = parse_checksum(meta_bodies[i])
+                    if orig_checksum is not None and var_checksum is not None and orig_checksum != var_checksum:
+                        failures.append({
+                            "label": failure_label, "stat": "checksum_mismatch",
+                            "orig": orig_checksum, "expected_variant": orig_checksum,
+                            "actual_variant": var_checksum,
+                            "abs_err": float('inf'), "atol": 0, "rtol": 0,
+                        })
+
         if failures:
             lines = []
             for f in failures:
@@ -4117,6 +4519,35 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                             "atol": atol, "rtol": rtol,
                         })
 
+                # Exhaustive checksum (mirrors compare_passthrough_outputs()'s Tier-2 check
+                # and INVARIANCE's use above, verify.py ~1875-1888): Statistics/Sample_first10
+                # cover only ~13 elements regardless of buffer size, and the local-response
+                # probe above only applies to kernels with a bounded positional correspondence
+                # to input — neither covers a scatter/gather kernel where a single perturbed
+                # element's real, deterministic effect lands outside every sampled position
+                # (confirmed root cause of randomaccess's false-rejects, see
+                # planning/LASSI_Verify_Phase2_Bridge.md 2026-08-18 entry). Only trusted when
+                # the buffer resolved to exact tolerance (atol==0 and rtol==0). Absence of the
+                # line on either side (pre-existing code without the new template line, or a
+                # float/double buffer) is normal, not a parse error — polarity is inverted
+                # from INVARIANCE's use: a checksum MISMATCH here is the PASS evidence (the
+                # variant's output genuinely differs from source's un-perturbed baseline),
+                # feeding the SAME total_compared/total_differed tally the stats/sample checks
+                # above already use, so this can only ever rescue a FAIL into a PASS via a
+                # real detected difference, never suppress one the checks above already found.
+                if atol == 0 and rtol == 0:
+                    orig_checksum = parse_checksum(pass_bodies[i])
+                    var_checksum = parse_checksum(meta_bodies[i])
+                    if orig_checksum is not None and var_checksum is not None:
+                        total_compared += 1
+                        if orig_checksum != var_checksum:
+                            total_differed += 1
+                            differing_stats.append({
+                                "label": block_label, "stat": "checksum_mismatch",
+                                "orig": orig_checksum, "variant": var_checksum,
+                                "abs_err": float('inf'), "atol": 0, "rtol": 0,
+                            })
+
         # Verdict:
         #   - 0 comparisons ran → SKIP (block parse failure across the board — can't tell)
         #   - ≥1 comparison ran AND ≥1 differed → PASS (variant responded to the perturbation)
@@ -4181,6 +4612,30 @@ def check_metamorphic_relation(variant_stdout, original_passthrough_stdout, rela
                 f"SKIP: Relation type '{relation_type}' not yet implemented."
             ),
         }
+
+
+def _archive_variant_before_overwrite(path):
+    """Copy an existing file aside (with a numeric suffix) before it gets overwritten.
+
+    Tier-3 variant files (`{file_name}_mt_{relation_name}_v{code_version}.cu`) are keyed by
+    code_version only, not by attempt -- a self-correction retry against the same slot silently
+    erases the previous attempt's generated perturbation code, the same per-attempt-archival gap
+    documented for the main generated-code file in Step 2
+    (planning/LASSI_Verify_Phase2_Bridge.md, handoff_step2_overstrictness_taxonomy_for_writing_
+    agent.md Section 6.1 item 3). Narrowly scoped to Tier-3 variant files only. Never raises
+    (archival is a nice-to-have and must never break a live experiment) and never changes `path`
+    itself, so nothing that reads the "current" variant file is affected.
+    """
+    if not os.path.exists(path):
+        return
+    try:
+        base, ext = os.path.splitext(path)
+        n = 1
+        while os.path.exists(f"{base}__prior{n}{ext}"):
+            n += 1
+        shutil.copy2(path, f"{base}__prior{n}{ext}")
+    except OSError:
+        pass
 
 
 def run_metamorphic_variants(source_code, active_relations, contract,
@@ -4479,6 +4934,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
             continue
 
         # --- Step 2: Write variant to disk ---
+        _archive_variant_before_overwrite(variant_path)
         with open(variant_path, 'w') as vf:
             vf.write(variant_code)
         print(f"  [Tier 3] Variant written to {variant_path}")
@@ -4535,6 +4991,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                     continue
                 _repaired_code = _apply_canonical(_repaired_code, relation)
                 _current_broken = _repaired_code
+                _archive_variant_before_overwrite(variant_path)
                 with open(variant_path, 'w') as _rvf:
                     _rvf.write(_repaired_code)
                 _r_compile_err, _r_variant_exe = lassi.code_manager.compile_code(
@@ -4668,6 +5125,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                         continue
                     _repaired_code = _apply_canonical(_repaired_code, relation)
                     _current_broken = _repaired_code
+                    _archive_variant_before_overwrite(variant_path)
                     with open(variant_path, 'w') as _rvf:
                         _rvf.write(_repaired_code)
                     _r_compile_err, _r_variant_exe = lassi.code_manager.compile_code(
@@ -4725,6 +5183,37 @@ def run_metamorphic_variants(source_code, active_relations, contract,
         verdict, diagnostic = _score_with_assertion_guard(
             variant_stdout, relation, tolerance, code_version is None
         )
+        _sensitivity_n_runs = 1
+        # SENSITIVITY-only, clean-execution-only re-run: give a FAIL more chances to reveal a
+        # masked response before trusting it (see _SENSITIVITY_REPEAT_N above). Applied
+        # identically at Stage 0 (code_version is None) and in the main loop, so neither side is
+        # held to a stricter single-shot standard than the other. Every other relation type keeps
+        # today's exact single-execute-single-score behavior. The repair-retry path
+        # (_skip_execute=True) is left untouched -- an orthogonal failure mode.
+        if relation.get("type") == "SENSITIVITY" and not _skip_execute:
+            _exe_abs = os.path.abspath(variant_exe)
+            _exe_dir = os.path.dirname(_exe_abs)
+            _exe_base = os.path.basename(_exe_abs)
+            while verdict == "FAIL" and _sensitivity_n_runs < _SENSITIVITY_REPEAT_N:
+                try:
+                    _rerun = subprocess.run(
+                        ["./" + _exe_base] + list(exe_input_parameters),
+                        cwd=_exe_dir, capture_output=True, text=True, timeout=120,
+                    )
+                except (subprocess.TimeoutExpired, Exception):
+                    break  # can't get more evidence; keep current verdict
+                _sensitivity_n_runs += 1
+                verdict, diagnostic = _score_with_assertion_guard(
+                    _rerun.stdout, relation, tolerance, code_version is None
+                )
+            # Written UNCONDITIONALLY whenever a SENSITIVITY relation actually executes here
+            # (not only when a rerun occurred) -- value=1 means a single-shot result (no rerun
+            # needed), value>1 means N reruns ran before the final verdict. Its absence from a
+            # diagnostic therefore means one of: not a SENSITIVITY relation, Tier 3 didn't run
+            # for that entry, or execution took the repair-retry (_skip_execute=True) path --
+            # never "the rerun logic silently didn't fire for a normal SENSITIVITY check."
+            if isinstance(diagnostic, dict):
+                diagnostic = dict(diagnostic, sensitivity_reruns=_sensitivity_n_runs)
         # Only update source_status during Stage 0 (code_version is None).
         # In the main loop, source_status was frozen at Stage 0 and must not be overwritten
         # by per-generated-code verdicts — doing so would corrupt the contract JSON record.
@@ -4848,6 +5337,7 @@ def run_metamorphic_variants(source_code, active_relations, contract,
                 continue
 
             # Write, compile, execute, check — same flow as first pass
+            _archive_variant_before_overwrite(variant_path)
             with open(variant_path, 'w') as _vf:
                 _vf.write(variant_code)
             print(f"  [Tier 3 retry] Variant written to {variant_path}")

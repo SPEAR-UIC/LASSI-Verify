@@ -534,6 +534,7 @@ def experimental_setup(cfg):
         # ★ Witness Chain (cheat-resistant loop-deletion detection — see planning/chain_verify_design.md):
         "witness_chain_status",       # ★ "applied_decision_tree_case_N" (N=1..8) | "applied_creative" | "soft_flag_no_safe_site"
         "witness_chain_mismatches",   # ★ count of LASSI variants where witness_chain_state differed from source's (cheats detected)
+        "witness_chain_fallback_status", # ★ non-interference gate outcome: "not_applicable" | "not_needed" | "fallback_success" | "fallback_*_error" | "fallback_also_failed"
         "stage0_abort_reason"        # ★ set when Stage 0 aborts (None for completed trials)
     ]
 

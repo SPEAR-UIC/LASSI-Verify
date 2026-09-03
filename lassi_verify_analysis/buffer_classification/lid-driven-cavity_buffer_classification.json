@@ -1,0 +1,96 @@
+{
+  "_meta": {
+    "kernel": "lid-driven-cavity",
+    "exp_dir": "KERNEL_EXP-SC26_LIDDRIVENC_1__07-24-2026_t16_03_41",
+    "trial": 1,
+    "target_n": 3,
+    "runs_executed": 3,
+    "stop_reason": "target_n_reached",
+    "elapsed_seconds": 66.12
+  },
+  "buffers": {
+    "final_u_field": {
+      "comparison_mode": "unclassified_pending_recalibration",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 3,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "real",
+      "last_updated": null,
+      "regrade_correction": {
+        "date": "2026-08-27",
+        "reason": "Source-self-stability (dedicated_stability_run: N reruns of the SAME unmodified SOURCE_verify binary) establishes only that this buffer is deterministic WITHIN one binary. It does not establish that a different, legitimately-correct GENERATED VARIANT reproduces the same value bit-for-bit -- that is a distinct question (cross-implementation floating-point reassociation, e.g. a different reduction/accumulation order), which this evidence cannot speak to. buffer_classification_regrade.py re-graded every archived variant for all 16 classified kernels under bit-exact grading and found this label newly false-rejects real, non-defective, previously-PASS variants -- so bit-exact grading is not licensed for it. Reverted from comparison_mode=exact to unclassified so the live pipeline falls back to the type-derived (ULP-aware) tolerance, matching prior behavior for this label specifically. Original source-self-stability evidence is preserved below for record; it remains true and simply does not settle this question.",
+        "evidence_pointer": "lassi_verify_analysis/buffer_classification/no_regression_check_results.json",
+        "original_comparison_mode": "exact"
+      }
+    },
+    "final_v_field": {
+      "comparison_mode": "unclassified_pending_recalibration",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 3,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "real",
+      "last_updated": null,
+      "regrade_correction": {
+        "date": "2026-08-27",
+        "reason": "Source-self-stability (dedicated_stability_run: N reruns of the SAME unmodified SOURCE_verify binary) establishes only that this buffer is deterministic WITHIN one binary. It does not establish that a different, legitimately-correct GENERATED VARIANT reproduces the same value bit-for-bit -- that is a distinct question (cross-implementation floating-point reassociation, e.g. a different reduction/accumulation order), which this evidence cannot speak to. buffer_classification_regrade.py re-graded every archived variant for all 16 classified kernels under bit-exact grading and found this label newly false-rejects real, non-defective, previously-PASS variants -- so bit-exact grading is not licensed for it. Reverted from comparison_mode=exact to unclassified so the live pipeline falls back to the type-derived (ULP-aware) tolerance, matching prior behavior for this label specifically. Original source-self-stability evidence is preserved below for record; it remains true and simply does not settle this question.",
+        "evidence_pointer": "lassi_verify_analysis/buffer_classification/no_regression_check_results.json",
+        "original_comparison_mode": "exact"
+      }
+    },
+    "final_pressure_red": {
+      "comparison_mode": "unclassified_pending_recalibration",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 3,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "real",
+      "last_updated": null,
+      "regrade_correction": {
+        "date": "2026-08-27",
+        "reason": "Source-self-stability (dedicated_stability_run: N reruns of the SAME unmodified SOURCE_verify binary) establishes only that this buffer is deterministic WITHIN one binary. It does not establish that a different, legitimately-correct GENERATED VARIANT reproduces the same value bit-for-bit -- that is a distinct question (cross-implementation floating-point reassociation, e.g. a different reduction/accumulation order), which this evidence cannot speak to. buffer_classification_regrade.py re-graded every archived variant for all 16 classified kernels under bit-exact grading and found this label newly false-rejects real, non-defective, previously-PASS variants -- so bit-exact grading is not licensed for it. Reverted from comparison_mode=exact to unclassified so the live pipeline falls back to the type-derived (ULP-aware) tolerance, matching prior behavior for this label specifically. Original source-self-stability evidence is preserved below for record; it remains true and simply does not settle this question.",
+        "evidence_pointer": "lassi_verify_analysis/buffer_classification/no_regression_check_results.json",
+        "original_comparison_mode": "exact"
+      }
+    },
+    "final_pressure_black": {
+      "comparison_mode": "unclassified_pending_recalibration",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 3,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "real",
+      "last_updated": null,
+      "regrade_correction": {
+        "date": "2026-08-27",
+        "reason": "Source-self-stability (dedicated_stability_run: N reruns of the SAME unmodified SOURCE_verify binary) establishes only that this buffer is deterministic WITHIN one binary. It does not establish that a different, legitimately-correct GENERATED VARIANT reproduces the same value bit-for-bit -- that is a distinct question (cross-implementation floating-point reassociation, e.g. a different reduction/accumulation order), which this evidence cannot speak to. buffer_classification_regrade.py re-graded every archived variant for all 16 classified kernels under bit-exact grading and found this label newly false-rejects real, non-defective, previously-PASS variants -- so bit-exact grading is not licensed for it. Reverted from comparison_mode=exact to unclassified so the live pipeline falls back to the type-derived (ULP-aware) tolerance, matching prior behavior for this label specifically. Original source-self-stability evidence is preserved below for record; it remains true and simply does not settle this question.",
+        "evidence_pointer": "lassi_verify_analysis/buffer_classification/no_regression_check_results.json",
+        "original_comparison_mode": "exact"
+      }
+    },
+    "witness_chain_state": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "structural_exact",
+        "n_comparisons": null,
+        "observed_stable": null,
+        "max_observed_delta": null
+      },
+      "declared_type": null,
+      "last_updated": null
+    }
+  }
+}

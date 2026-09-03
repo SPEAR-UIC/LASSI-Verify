@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "kernel": "jaccard",
+    "exp_dir": "KERNEL_EXP-SC26_JACCARD_1__07-24-2026_t10_49_40",
+    "trial": 1,
+    "target_n": 149,
+    "runs_executed": 2,
+    "stop_reason": "all_labels_settled",
+    "elapsed_seconds": 0.02
+  },
+  "buffers": {
+    "final_weight_j": {
+      "comparison_mode": "tolerant",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 2,
+        "observed_stable": false,
+        "max_observed_delta": 5755.2666015625,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "float",
+      "last_updated": null
+    },
+    "witness_chain_state": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "structural_exact",
+        "n_comparisons": null,
+        "observed_stable": null,
+        "max_observed_delta": null
+      },
+      "declared_type": null,
+      "last_updated": null
+    }
+  }
+}

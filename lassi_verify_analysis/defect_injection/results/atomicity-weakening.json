@@ -1,0 +1,394 @@
+{
+  "operator_id": "atomicity-weakening",
+  "family": "program-defect",
+  "detector": "tiers_1_3",
+  "observed_failure_class_generalized": "atomic intrinsic replaced with non-atomic equivalent on a multi-thread-addressable buffer",
+  "evidence_pointer": "planning/LASSI_Verify_Phase2_Bridge.md 2026-08-23 design-proper entry, catalog entry 2",
+  "mechanism": "generic_rule",
+  "mechanism_description": "replace atomicAdd/atomicXor with a non-atomic op= on a data-dependent (non-bijective) index",
+  "applicability_rule": "an atomic call's index expression is confirmed data-dependent, not a bijective per-thread id",
+  "per_instance": [
+    {
+      "kernel": "all-pairs-distance",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_ALLPAIRS_1__07-20-2026_t00_11_40",
+        "trial": 1,
+        "code_version": 4
+      },
+      "diff": "'atomicAdd(distance + INSTANCES*gx + gy, count);' -> 'distance[INSTANCES*gx + gy] += count;'",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_distance_device": "exact",
+          "final_distance_host": "exact"
+        },
+        "per_label_results": {
+          "final_distance_device": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            }
+          ],
+          "final_distance_host": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_reversal_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_categorical_value_relabeling_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_row_swap_permutation_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_swap_permutative_v4.cu": "UNRESOLVED: RUN FAIL: ",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_value_relabeling_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_reversal_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_categorical_value_relabeling_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_row_swap_permutation_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_swap_permutative_v4.cu": "UNRESOLVED: RUN FAIL: ",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_value_relabeling_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_reversal_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_categorical_value_relabeling_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_row_swap_permutation_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_swap_permutative_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_value_relabeling_invariance_v4.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_reversal_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_categorical_value_relabeling_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_row_swap_permutation_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_swap_permutative_v4.cu": "UNRESOLVED: RUN FAIL: ",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_value_relabeling_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "jaccard",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_JACCARD_1__07-24-2026_t10_49_40",
+        "trial": 1,
+        "code_version": 6
+      },
+      "diff": "'atomicAdd(&weight_i[j],ref_val);' -> 'weight_i[j] += ref_val;'",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_weight_j": "exact"
+        },
+        "per_label_results": {
+          "final_weight_j": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5b9a33a9c66fa3a00b05527b07ec932d",
+              "injected_md5": "5b9a33a9c66fa3a00b05527b07ec932d"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5b9a33a9c66fa3a00b05527b07ec932d",
+              "injected_md5": "5b9a33a9c66fa3a00b05527b07ec932d"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5b9a33a9c66fa3a00b05527b07ec932d",
+              "injected_md5": "5b9a33a9c66fa3a00b05527b07ec932d"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_negation_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_scaling_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_sensitivity__p_outlier_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_negation_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_scaling_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_sensitivity__p_outlier_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_negation_v6.cu": "not_available",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_scaling_v6.cu": "not_available",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_sensitivity__p_outlier_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_negation_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_scaling_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_sensitivity__p_outlier_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "randomaccess",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_RANDA_1__07-21-2026_t21_03_54",
+        "trial": 1,
+        "code_version": 11
+      },
+      "diff": "'atomicXor((unsigned long long*)&Table[state & mask], (unsigned long long)state);' -> 'Table[state & mask] ^= state;'",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "post_validation_table": "exact",
+          "final_device_table": "exact"
+        },
+        "per_label_results": {
+          "post_validation_table": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "72501eddc76722414f976562d2a6c525"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "72501eddc76722414f976562d2a6c525"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "72501eddc76722414f976562d2a6c525"
+            }
+          ],
+          "final_device_table": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "2696d599ca29be1db41199f2a59c6323"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "3eed167725df05c6212e9c935aec5906"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "af5a3fdbf85fbd70e5b54f476ef656bd"
+            }
+          ]
+        },
+        "verdict": "BEHAVIOR_CHANGING"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "undetected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "PASS",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "PASS",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "not_available",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "not_available",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "PASS",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        }
+      }
+    }
+  ]
+}

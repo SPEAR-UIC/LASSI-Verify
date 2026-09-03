@@ -271,10 +271,19 @@ dim3 threads(blockDim.x, blockDim.y);
     bool _t1_pass = (num_streams == 4);  // WRONG: 1, 2, or 8 streams compute the same result
     printf("LASSI-VERIFY ASSERTIONS [stream_count_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
 }
-```
-**WHY THIS IS WRONG:** Thread block dimensions, stream counts, shared memory tile sizes, and reduction strategies are hardware mapping decisions — they control how the GPU schedules work, not what is computed. Changing them is the primary mechanism by which an LLM optimization can improve energy efficiency or runtime. An assertion on these values directly forbids the optimization the framework is designed to find.
 
-Applying the decision test: if `blockDim.x` changes from 16 to 32, does the code compute a wrong answer? No — Tier 2 confirms numerical equivalence independently. Therefore it is a Type B parameter and must never be asserted.
+// ALSO BAD — asserts the specific grid shape/size computed for a launch
+{
+    bool _t1_pass = (dimGrid.x == N && dimGrid.y == N);
+    // WRONG: a launch mapping that avoids redundant work (e.g. one thread per unique
+    // work-item instead of one thread per cell of a full N×N space, with an index-decode
+    // formula inside the kernel) computes the identical answer with different grid dims.
+    printf("LASSI-VERIFY ASSERTIONS [grid_dims_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+**WHY THIS IS WRONG:** Thread block dimensions, grid dimensions, stream counts, shared memory tile sizes, and reduction strategies are hardware mapping decisions — they control how the GPU schedules work, not what is computed. Changing them is the primary mechanism by which an LLM optimization can improve energy efficiency or runtime. An assertion on these values directly forbids the optimization the framework is designed to find. This applies equally to grid dimensions as to block dimensions: a smarter launch that covers the same logical work through a different index mapping (fewer threads, a reshaped grid, a decode formula recovering the original indices) is exactly the kind of optimization Tier 1 must not block.
+
+Applying the decision test: if `blockDim.x` changes from 16 to 32, or `dimGrid` changes shape while still covering the same work, does the code compute a wrong answer? No — Tier 2 confirms numerical equivalence independently. Therefore these are Type B parameters and must never be asserted by their specific value.
 
 **CORRECT:** Assert only that the problem-size count is positive and the device pointer is non-null:
 ```cpp
@@ -460,6 +469,49 @@ cudaMemcpy(h_out, d_out, N * sizeof(uint64_t), cudaMemcpyDeviceToHost);  // copy
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
+
+### ❌ WRONG: Asserting a Fixed Inventory of Allocated Buffers
+```cpp
+// BAD — enumerates a specific set of device pointers that must all be non-null
+{
+    bool _t1_pass = (d_buf_a != NULL && d_buf_b != NULL &&
+                     d_buf_c != NULL && d_buf_d != NULL);
+    printf("LASSI-VERIFY ASSERTIONS [device_allocations_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+**WHY THIS IS WRONG:** How many distinct buffers a computation uses, and whether a particular
+buffer is allocated at all, is an implementation choice — not a property of the algorithm. A
+valid optimization may fuse two buffers into one, or may legitimately leave a buffer unallocated
+(NULL) because a restructured code path no longer needs it — NULL used deliberately as a "this
+output is not produced here" sentinel is not a bug. An assertion that hardcodes a specific set of
+pointers as "must all be non-null" fails the moment a correct optimization changes that set, even
+though the actual computation and its output are unaffected.
+
+Applying the decision test: if a buffer is deliberately left unallocated because a legitimate
+restructuring no longer needs it, does the code compute a wrong answer? No — Tier 2 confirms the
+output is correct independently. A fixed pointer-inventory check is therefore a Type B assertion
+in disguise (it fixes an implementation detail — how many buffers exist and which ones — rather
+than a semantic property) and must not be written this way.
+
+**CORRECT:** Assert non-null only for buffers you can justify, in one sentence, as unconditionally
+required by *any* valid implementation of this algorithm — typically the primary input and output
+actually passed to the kernel launch you are instrumenting near. If you cannot state that
+one-sentence justification for a specific pointer, leave it out of the check.
+```cpp
+// GOOD — checks only the buffers this launch site cannot function without
+{
+    bool _t1_pass = (d_input != NULL && d_output != NULL);
+    printf("LASSI-VERIFY ASSERTIONS [device_allocations_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+
+> **General principle behind both anti-patterns above:** if a legitimate optimization could
+> change WHICH buffers exist, WHICH launch geometry is used, or HOW MANY of something there are —
+> while still computing the correct answer — do not hardcode that structural detail into a
+> pass/fail check. This applies beyond launch configuration and buffer counts to any structural
+> quantity an optimization is free to change (loop trip counts from a restructured tiling, number
+> of kernel launches from a fused or split kernel, etc.): check that the computation's inputs and
+> outputs are valid, never that its shape matches one particular implementation.
 
 ### ❌ WRONG: `*_unchanged` Assertions on Mutable Buffers or Mutated Variables
 

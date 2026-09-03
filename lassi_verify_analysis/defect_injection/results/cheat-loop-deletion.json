@@ -1,0 +1,1601 @@
+{
+  "operator_id": "cheat-loop-deletion",
+  "family": "program-defect",
+  "detector": "tiers_1_3",
+  "observed_failure_class_generalized": "idempotent outer repeat/timing loop collapsed to one iteration",
+  "evidence_pointer": "planning/LASSI_Verify_Phase2_Bridge.md 2026-08-23 design-proper entry, catalog entry 3; generalizes project_chacha20_role's documented cheat",
+  "mechanism": "hand_authored",
+  "mechanism_description": "collapse the outer HeCBench repeat/timing loop's bound to 1",
+  "applicability_rule": "hand-traced idempotence: the loop body does not read back its own prior iteration's output as input Excluded: entropy (2026-08-27) -- idempotent, but its validated workload already runs repeat=1, making the loop-collapse a no-op; confirmed from the real campaign's own monitor log, not assumed.",
+  "per_instance": [
+    {
+      "kernel": "all-pairs-distance",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_ALLPAIRS_1__07-20-2026_t00_11_40",
+        "trial": 1,
+        "code_version": 4
+      },
+      "diff": "collapsed 3 loop bound(s) ['iterations', 'iterations', 'iterations'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+n\\\\s*=\\\\s*0\\\\s*;\\\\s*n\\\\s*<\\\\s*(iterations)\\\\s*;\\\\s*n\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: k1/k2/k3 each recompute distance_device fully from the fixed, never-mutated data_char_device input every iteration; k1's in-loop memset only zeroes the output before recompute.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_distance_host": "exact",
+          "final_distance_device": "exact"
+        },
+        "per_label_results": {
+          "final_distance_host": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            }
+          ],
+          "final_distance_device": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "052cd12355bceedf76be89d12ee8104a",
+              "injected_md5": "052cd12355bceedf76be89d12ee8104a"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_reversal_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_categorical_value_relabeling_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_row_swap_permutation_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_swap_permutative_v4.cu": "UNRESOLVED: RUN FAIL: ",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_value_relabeling_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_reversal_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_categorical_value_relabeling_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_row_swap_permutation_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_swap_permutative_v4.cu": "UNRESOLVED: RUN FAIL: ",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_value_relabeling_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_reversal_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_categorical_value_relabeling_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_row_swap_permutation_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_swap_permutative_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_value_relabeling_invariance_v4.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_attribute_order_reversal_invariance_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_categorical_value_relabeling_invariance_v4.cu": "PASS",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_row_swap_permutation_v4.cu": "not_available",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_instance_swap_permutative_v4.cu": "UNRESOLVED: RUN FAIL: ",
+            "all-pairs-distance-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ALLPAIRS_1_mt_value_relabeling_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "bsearch",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_BSEARCH_1__07-21-2026_t07_47_59",
+        "trial": 1,
+        "code_version": 3
+      },
+      "diff": "collapsed 4 loop bound(s) ['repeat', 'repeat', 'repeat', 'repeat'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+i\\\\s*=\\\\s*0\\\\s*;\\\\s*i\\\\s*<\\\\s*(repeat)\\\\s*;\\\\s*i\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: bs/bs2/bs3/bs4 each fully overwrite d_r from const, never-mutated d_a/d_z every call; no pre-loop one-time init to preserve.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_bs4_output": "exact",
+          "final_bs_output": "exact",
+          "final_bs3_output": "exact",
+          "final_bs2_output": "exact"
+        },
+        "per_label_results": {
+          "final_bs4_output": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "ada360b5fcbe5e47417697f2af57d8b9",
+              "injected_md5": "ada360b5fcbe5e47417697f2af57d8b9"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "ada360b5fcbe5e47417697f2af57d8b9",
+              "injected_md5": "ada360b5fcbe5e47417697f2af57d8b9"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "ada360b5fcbe5e47417697f2af57d8b9",
+              "injected_md5": "ada360b5fcbe5e47417697f2af57d8b9"
+            }
+          ],
+          "final_bs_output": [
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            }
+          ],
+          "final_bs3_output": [
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            }
+          ],
+          "final_bs2_output": [
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_outlier_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_small_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_shift_invariance_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_outlier_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_small_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_shift_invariance_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_shift_invariance_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_outlier_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_small_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_shift_invariance_v3.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "chacha20",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_CHACHA20_1__07-22-2026_t17_22_45",
+        "trial": 1,
+        "code_version": 10
+      },
+      "diff": "collapsed 1 loop bound(s) ['repeat'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+i\\\\s*=\\\\s*0\\\\s*;\\\\s*i\\\\s*<\\\\s*(repeat)\\\\s*;\\\\s*i\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: loop body replays a captured CUDA graph (cudaGraphLaunch, not a raw kernel<<<>>>); d_result is fully overwritten by test_keystreams on every replay from fixed d_raw_key/d_raw_nonce -- collapsing the bound to 1 still yields exactly one graph replay, no special-casing needed.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_generated_keystream": "exact",
+          "final_expected_keystream": "exact"
+        },
+        "per_label_results": {
+          "final_generated_keystream": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "6730696bd791cd2d9e400bd9dc21fe64",
+              "injected_md5": "6730696bd791cd2d9e400bd9dc21fe64"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "6730696bd791cd2d9e400bd9dc21fe64",
+              "injected_md5": "6730696bd791cd2d9e400bd9dc21fe64"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "6730696bd791cd2d9e400bd9dc21fe64",
+              "injected_md5": "6730696bd791cd2d9e400bd9dc21fe64"
+            }
+          ],
+          "final_expected_keystream": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "6730696bd791cd2d9e400bd9dc21fe64",
+              "injected_md5": "6730696bd791cd2d9e400bd9dc21fe64"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "6730696bd791cd2d9e400bd9dc21fe64",
+              "injected_md5": "6730696bd791cd2d9e400bd9dc21fe64"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "6730696bd791cd2d9e400bd9dc21fe64",
+              "injected_md5": "6730696bd791cd2d9e400bd9dc21fe64"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_key_bitflip_sensitivity__p_outlier_v10.cu": "SKIP",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_key_bitflip_sensitivity__p_small_v10.cu": "SKIP",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_nonce_bitflip_sensitivity__p_outlier_v10.cu": "PASS",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_nonce_bitflip_sensitivity__p_small_v10.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_key_bitflip_sensitivity__p_outlier_v10.cu": "SKIP",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_key_bitflip_sensitivity__p_small_v10.cu": "SKIP",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_nonce_bitflip_sensitivity__p_outlier_v10.cu": "PASS",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_nonce_bitflip_sensitivity__p_small_v10.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_key_bitflip_sensitivity__p_outlier_v10.cu": "not_available",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_key_bitflip_sensitivity__p_small_v10.cu": "not_available",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_nonce_bitflip_sensitivity__p_outlier_v10.cu": "not_available",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_nonce_bitflip_sensitivity__p_small_v10.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_key_bitflip_sensitivity__p_outlier_v10.cu": "SKIP",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_key_bitflip_sensitivity__p_small_v10.cu": "SKIP",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_nonce_bitflip_sensitivity__p_outlier_v10.cu": "PASS",
+            "chacha20-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_CHACHA20_1_mt_nonce_bitflip_sensitivity__p_small_v10.cu": "PASS"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "colorwheel",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_COLORW_1__07-22-2026_t13_50_27",
+        "trial": 1,
+        "code_version": 9
+      },
+      "diff": "collapsed 1 loop bound(s) ['repeat'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+i\\\\s*=\\\\s*0\\\\s*;\\\\s*i\\\\s*<\\\\s*(repeat)\\\\s*;\\\\s*i\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: color kernel computes each pixel purely from fixed scalar params, full overwrite of d_pix every call; one-time cudaMemset(d_pix) sits well before the loop and is unaffected by collapsing it.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_cpu_reference_image": "exact",
+          "final_gpu_image": "exact"
+        },
+        "per_label_results": {
+          "final_cpu_reference_image": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09",
+              "injected_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09",
+              "injected_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09",
+              "injected_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09"
+            }
+          ],
+          "final_gpu_image": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd",
+              "injected_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd",
+              "injected_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd",
+              "injected_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_output_sensitivity_to_range__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_repeat_invariance_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_small_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_outlier_v9.cu": "PASS",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_small_v9.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_output_sensitivity_to_range__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_repeat_invariance_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_small_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_outlier_v9.cu": "PASS",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_small_v9.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_output_sensitivity_to_range__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_repeat_invariance_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_small_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_small_v9.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_output_sensitivity_to_range__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_repeat_invariance_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_small_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_outlier_v9.cu": "PASS",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_small_v9.cu": "PASS"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "extrema",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_EXTREMA_1__07-19-2026_t21_47_11",
+        "trial": 2,
+        "code_version": 3
+      },
+      "diff": "collapsed 2 loop bound(s) ['repeat', 'repeat'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+n\\\\s*=\\\\s*0\\\\s*;\\\\s*n\\\\s*<\\\\s*(repeat)\\\\s*;\\\\s*n\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: both the 1D and 2D test loops fully recompute d_result from d_x, which is copied once before the loop and never mutated inside it.",
+      "neutrality_verdict": "UNRESOLVED",
+      "decisive_test_record": {
+        "verdict": "UNRESOLVED",
+        "error": "DumpSpecError: label 'final_1d_result': setup doesn't match the fixed lv_min/lv_N template (buf_m=False, cnt_m=True) -- do not guess, inspect this kernel's PASSTHROUGH block by hand before adding it to the neutrality check"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_1d_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_2d_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_1d_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_2d_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_1d_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_2d_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_1d_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_2d_v3.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "floydwarshall",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_FLOYDW_1__07-23-2026_t00_31_21",
+        "trial": 1,
+        "code_version": 4
+      },
+      "diff": "collapsed 1 loop bound(s) ['numIterations'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*unsigned\\\\s+int\\\\s+n\\\\s*=\\\\s*0\\\\s*;\\\\s*n\\\\s*<\\\\s*(numIterations)\\\\s*;\\\\s*n\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: OUTER loop only -- re-uploads pathDistanceMatrix/pathMatrix from the unchanging host arrays at the top of every outer iteration before recomputing; the INNER numTiles loop (tile i depends on tile i-1) is the real sequential algorithm and is never touched by this pattern.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_path_distance_matrix": "exact"
+        },
+        "per_label_results": {
+          "final_path_distance_matrix": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "22f94cef71875f451b079e529cba3202",
+              "injected_md5": "22f94cef71875f451b079e529cba3202"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "22f94cef71875f451b079e529cba3202",
+              "injected_md5": "22f94cef71875f451b079e529cba3202"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "22f94cef71875f451b079e529cba3202",
+              "injected_md5": "22f94cef71875f451b079e529cba3202"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "floydwarshall-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_FLOYDW_1_mt_distance_matrix_reversal_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "floydwarshall-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_FLOYDW_1_mt_distance_matrix_reversal_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "floydwarshall-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_FLOYDW_1_mt_distance_matrix_reversal_invariance_v4.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "floydwarshall-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_FLOYDW_1_mt_distance_matrix_reversal_invariance_v4.cu": "PASS"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "layout",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_LAYOUT_1__07-20-2026_t18_40_16",
+        "trial": 1,
+        "code_version": 3
+      },
+      "diff": "collapsed 2 loop bound(s) ['iterations', 'iterations'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+i\\\\s*=\\\\s*0\\\\s*;\\\\s*i\\\\s*<\\\\s*(iterations)\\\\s*;\\\\s*i\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: both the AoS and SoA loops fully overwrite outputBuffer from inputBuffer, which is not written inside either loop body.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "soa_output_buffer": "exact",
+          "aos_output_buffer": "exact"
+        },
+        "per_label_results": {
+          "soa_output_buffer": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "1bab9e8906998da188adb47310dc3e9c",
+              "injected_md5": "1bab9e8906998da188adb47310dc3e9c"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "1bab9e8906998da188adb47310dc3e9c",
+              "injected_md5": "1bab9e8906998da188adb47310dc3e9c"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "1bab9e8906998da188adb47310dc3e9c",
+              "injected_md5": "1bab9e8906998da188adb47310dc3e9c"
+            }
+          ],
+          "aos_output_buffer": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "1bab9e8906998da188adb47310dc3e9c",
+              "injected_md5": "1bab9e8906998da188adb47310dc3e9c"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "1bab9e8906998da188adb47310dc3e9c",
+              "injected_md5": "1bab9e8906998da188adb47310dc3e9c"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "1bab9e8906998da188adb47310dc3e9c",
+              "injected_md5": "1bab9e8906998da188adb47310dc3e9c"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_aos_input_sensitivity__p_outlier_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_aos_input_sensitivity__p_small_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_input_negation_aos_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_input_negation_soa_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_soa_input_sensitivity__p_outlier_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_soa_input_sensitivity__p_small_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_tree_permutation_aos_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_tree_permutation_soa_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_aos_input_sensitivity__p_outlier_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_aos_input_sensitivity__p_small_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_input_negation_aos_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_input_negation_soa_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_soa_input_sensitivity__p_outlier_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_soa_input_sensitivity__p_small_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_tree_permutation_aos_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_tree_permutation_soa_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_aos_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_aos_input_sensitivity__p_small_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_input_negation_aos_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_input_negation_soa_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_soa_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_soa_input_sensitivity__p_small_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_tree_permutation_aos_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_tree_permutation_soa_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_aos_input_sensitivity__p_outlier_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_aos_input_sensitivity__p_small_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_input_negation_aos_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_input_negation_soa_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_soa_input_sensitivity__p_outlier_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_soa_input_sensitivity__p_small_v3.cu": "PASS",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_tree_permutation_aos_v3.cu": "not_available",
+            "layout-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LAYOUT_1_mt_tree_permutation_soa_v3.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "murmurhash3",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_MURMURH_1__07-23-2026_t19_45_45",
+        "trial": 1,
+        "code_version": 6
+      },
+      "diff": "collapsed 1 loop bound(s) ['repeat'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*uint32_t\\\\s+n\\\\s*=\\\\s*0\\\\s*;\\\\s*n\\\\s*<\\\\s*(repeat)\\\\s*;\\\\s*n\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: dev_out is fully overwritten from fixed dev_keys/dev_length/key_length every iteration.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_gpu_hash_output": "exact"
+        },
+        "per_label_results": {
+          "final_gpu_hash_output": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "544769a15764679a4be4dc6ecf925545",
+              "injected_md5": "544769a15764679a4be4dc6ecf925545"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "544769a15764679a4be4dc6ecf925545",
+              "injected_md5": "544769a15764679a4be4dc6ecf925545"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "544769a15764679a4be4dc6ecf925545",
+              "injected_md5": "544769a15764679a4be4dc6ecf925545"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_perturbation_sensitivity__p_outlier_v6.cu": "PASS",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_perturbation_sensitivity__p_small_v6.cu": "PASS",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_index_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_offset_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_offset_sensitivity__p_small_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_perturbation_sensitivity__p_outlier_v6.cu": "PASS",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_perturbation_sensitivity__p_small_v6.cu": "PASS",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_index_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_offset_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_offset_sensitivity__p_small_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_perturbation_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_perturbation_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_index_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_offset_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_offset_sensitivity__p_small_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_perturbation_sensitivity__p_outlier_v6.cu": "PASS",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_perturbation_sensitivity__p_small_v6.cu": "PASS",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_key_byte_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_index_sensitivity__p_small_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_offset_sensitivity__p_outlier_v6.cu": "not_available",
+            "murmurhash3-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_MURMURH_1_mt_seed_offset_sensitivity__p_small_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "randomaccess",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_RANDA_1__07-21-2026_t21_03_54",
+        "trial": 1,
+        "code_version": 11
+      },
+      "diff": "collapsed 1 loop bound(s) ['repeat'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+irep\\\\s*=\\\\s*0\\\\s*;\\\\s*irep\\\\s*<\\\\s*(repeat)\\\\s*;\\\\s*irep\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: canonical-init idempotence: initTable() re-resets d_Table to its canonical starting state INSIDE the loop, immediately before update() runs -- each iteration discards the prior iteration's mutated table.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_device_table": "exact",
+          "post_validation_table": "exact"
+        },
+        "per_label_results": {
+          "final_device_table": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "5cecfc84dd721e91bd5130bd4fb2d902"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "5cecfc84dd721e91bd5130bd4fb2d902"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "5cecfc84dd721e91bd5130bd4fb2d902"
+            }
+          ],
+          "post_validation_table": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "72501eddc76722414f976562d2a6c525"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "72501eddc76722414f976562d2a6c525"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "72501eddc76722414f976562d2a6c525"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "FAIL",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness",
+            "tier3"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "FAIL",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness",
+            "tier3"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "not_available",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "FAIL",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier3"
+          ]
+        }
+      }
+    },
+    {
+      "kernel": "segment-reduce",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_SEGMENTR_1__07-25-2026_t19_56_25",
+        "trial": 1,
+        "code_version": 6
+      },
+      "diff": "collapsed 1 loop bound(s) ['repeat'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+i\\\\s*=\\\\s*0\\\\s*;\\\\s*i\\\\s*<\\\\s*(repeat)\\\\s*;\\\\s*i\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: d_keys_out/d_out are fully recomputed each iteration from the same fixed transform-iterator inputs; the only cross-iteration state (actual_segments, captured on i==repeat-1) is a printf-only report value, harmless when repeat collapses to 1 (i==repeat-1 still holds).",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_segment_sums": "exact"
+        },
+        "per_label_results": {
+          "final_segment_sums": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "34f50f0c0188ec28016e871d004bf191",
+              "injected_md5": "34f50f0c0188ec28016e871d004bf191"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "34f50f0c0188ec28016e871d004bf191",
+              "injected_md5": "34f50f0c0188ec28016e871d004bf191"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "34f50f0c0188ec28016e871d004bf191",
+              "injected_md5": "34f50f0c0188ec28016e871d004bf191"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "segment-reduce-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_SEGMENTR_1_mt_input_value_scaling_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "segment-reduce-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_SEGMENTR_1_mt_input_value_scaling_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "segment-reduce-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_SEGMENTR_1_mt_input_value_scaling_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "segment-reduce-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_SEGMENTR_1_mt_input_value_scaling_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "threadfence",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_THREADF_1__07-20-2026_t14_07_07",
+        "trial": 1,
+        "code_version": 5
+      },
+      "diff": "collapsed 1 loop bound(s) ['repeat'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+n\\\\s*=\\\\s*0\\\\s*;\\\\s*n\\\\s*<\\\\s*(repeat)\\\\s*;\\\\s*n\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: d_array is fixed and never mutated inside the loop; d_result/d_partial are fully recomputed each outer iteration via the inner ping-pong reduction. Note: this variant's `count` kernel parameter is dead code ((void)count;) -- the classic threadfence last-block atomic pattern is not actually exercised by this refactor.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_reduction_result": "exact"
+        },
+        "per_label_results": {
+          "final_reduction_result": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "a60cd2e7f8612abf22a7720ca7e788e5"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "a60cd2e7f8612abf22a7720ca7e788e5"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "a60cd2e7f8612abf22a7720ca7e788e5"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "not_available",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "jaccard",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_JACCARD_1__07-24-2026_t10_49_40",
+        "trial": 1,
+        "code_version": 6
+      },
+      "diff": "collapsed 1 loop bound(s) ['iteration'] -> 1 (pattern='for\\\\s*\\\\(\\\\s*int\\\\s+i\\\\s*=\\\\s*0\\\\s*;\\\\s*i\\\\s*<\\\\s*(iteration)\\\\s*;\\\\s*i\\\\+\\\\+\\\\s*\\\\)')\nidempotence argument: explicit-reset idempotence: d_weight_j/d_weight_i/d_work/d_weight_s are all re-filled or fully overwritten at the start of every iteration before being read; graph-structure inputs are copied once before the loop and never mutated inside it.",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_weight_j": "exact"
+        },
+        "per_label_results": {
+          "final_weight_j": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5b9a33a9c66fa3a00b05527b07ec932d",
+              "injected_md5": "5b9a33a9c66fa3a00b05527b07ec932d"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5b9a33a9c66fa3a00b05527b07ec932d",
+              "injected_md5": "5b9a33a9c66fa3a00b05527b07ec932d"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "5b9a33a9c66fa3a00b05527b07ec932d",
+              "injected_md5": "5b9a33a9c66fa3a00b05527b07ec932d"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_negation_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_scaling_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_sensitivity__p_outlier_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_negation_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_scaling_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_sensitivity__p_outlier_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_negation_v6.cu": "not_available",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_scaling_v6.cu": "not_available",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_sensitivity__p_outlier_v6.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_negation_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_scaling_v6.cu": "PASS",
+            "jaccard-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_JACCARD_1_mt_csr_value_sensitivity__p_outlier_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    }
+  ]
+}

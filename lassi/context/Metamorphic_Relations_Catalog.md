@@ -1548,6 +1548,36 @@ attend to" question from both sides.
 - Aggregating / reduction kernels where the perturbation gets averaged below the noise
   floor (a 1-byte change in a 16 MB sum may not move any statistical digit). For these,
   choose a larger perturbation or a different relation type.
+- **A single-element perturbation on a shared output structure that many independent
+  operations write into, where the update is NOT invertible.** This covers atomic writes to
+  a shared table, scatter operations into overlapping output regions, hash insertions with
+  collisions, or any design where a large number of updates act on the same output space —
+  but only when the update operation itself is destructive. **Recognize this with a single,
+  domain-agnostic self-check question: is the shared update operation invertible — does an
+  earlier change survive as a recoverable difference in the final state no matter what lands
+  afterward?** Operations like XOR-fold or modular addition ARE invertible: perturbing a
+  value before any updates apply changes the final state by a fixed, provable delta
+  regardless of how many other updates subsequently touch the same location (e.g. for XOR,
+  `final = initial ⊕ all_updates`, so perturbing `initial` shifts `final` by exactly that
+  same perturbation, always). Operations like plain overwrite (`a[i] = x`), keep-the-max, or
+  keep-the-last-write are NOT invertible: a later write to the same location genuinely and
+  permanently erases the earlier one, with zero recoverable trace.
+  - **If the update is invertible:** single-element SENSITIVITY is still a valid choice — the
+    perturbation's effect is real and provable, it may simply be too localized for
+    Statistics/Sample_first10 to happen to land on in a large buffer. This is a MEASUREMENT
+    problem, not an algorithm problem, and the framework's exhaustive checksum comparison
+    (integer/byte buffers only) is built to catch exactly this — do not avoid the relation on
+    this basis.
+  - **If the update is NOT invertible:** single-element SENSITIVITY on that shared buffer is
+    genuinely unfalsifiable — the effect can be legitimately erased with nothing left to
+    detect, by any comparison tool. Perturb a large enough FRACTION of the input that the
+    aggregate statistics must shift, or choose a relation type that does not require one
+    point's effect to individually survive to the final readout.
+  - **This contraindication is about the perturbation, not the kernel as a whole.** A kernel
+    with a lossy shared-write update can still be validly tested with a SENSITIVITY relation
+    that perturbs something broader than one element of the shared buffer (e.g. a scalar
+    parameter that shifts the whole computation) — that is not a single-element perturbation
+    on the shared structure and this contraindication does not apply to it.
 - Stochastic / non-deterministic kernels whose output varies even without perturbation.
 
 **Choosing the input perturbation T.** The perturbation must be:
@@ -1582,7 +1612,11 @@ constraint on an input (a fixed-size lookup/histogram table indexed directly by 
 an existing invariant assertion checking the value's range), the outlier must stay within that
 domain. Pushing a value outside it produces undefined behavior (e.g. an out-of-bounds table
 index) rather than a legitimate large-but-valid stimulus, and the framework's Stage-0 filter
-will reject such a perturbation and ask for a corrected one.
+will reject such a perturbation and ask for a corrected one. If the chosen input dimension
+instead controls a loop bound, buffer size, or repeat/iteration count rather than a per-element
+value, an outlier pushed far outside the observed range can blow up runtime rather than
+producing an invalid value — bound it to a value that still completes within the harness's
+execution timeout, not just one that is numerically far from the observed range.
 
 **Large output arrays and locally-confined perturbations.** A perturbation to a single
 element only ever affects a small, local region of a kernel's output — for a huge output array

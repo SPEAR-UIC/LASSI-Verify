@@ -1,0 +1,48 @@
+{
+  "_meta": {
+    "kernel": "randomaccess",
+    "exp_dir": "KERNEL_EXP-SC26_RANDA_1__07-21-2026_t21_03_54",
+    "trial": 1,
+    "target_n": 3,
+    "runs_executed": 3,
+    "stop_reason": "target_n_reached",
+    "elapsed_seconds": 30.82
+  },
+  "buffers": {
+    "witness_chain_state": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "structural_exact",
+        "n_comparisons": null,
+        "observed_stable": null,
+        "max_observed_delta": null
+      },
+      "declared_type": null,
+      "last_updated": null
+    },
+    "final_device_table": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 3,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "u64int",
+      "last_updated": null
+    },
+    "post_validation_table": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 3,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "u64int",
+      "last_updated": null
+    }
+  }
+}

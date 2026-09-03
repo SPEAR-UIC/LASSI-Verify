@@ -1,0 +1,48 @@
+{
+  "_meta": {
+    "kernel": "chacha20",
+    "exp_dir": "KERNEL_EXP-SC26_CHACHA20_1__07-22-2026_t17_22_45",
+    "trial": 1,
+    "target_n": 149,
+    "runs_executed": 149,
+    "stop_reason": "target_n_reached",
+    "elapsed_seconds": 4.57
+  },
+  "buffers": {
+    "final_generated_keystream": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 149,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "uint8_t",
+      "last_updated": null
+    },
+    "final_expected_keystream": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 149,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "uint8_t",
+      "last_updated": null
+    },
+    "witness_chain_state": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "structural_exact",
+        "n_comparisons": null,
+        "observed_stable": null,
+        "max_observed_delta": null
+      },
+      "declared_type": null,
+      "last_updated": null
+    }
+  }
+}

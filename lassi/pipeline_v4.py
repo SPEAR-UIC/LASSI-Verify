@@ -55,6 +55,22 @@ def _strip_lassi_verify_stdout(stdout_text):
     return stripped.strip()
 
 
+def _apply_witness_fallback_if_needed(code, use_fallback_design):
+    """After code_insert_witness_chain() re-installs a variant's harness (which always
+    canonicalizes to the PRIMARY sentinel device-function design internally), override its
+    device-function bodies with the snapshot-based FALLBACK design when the source-level
+    non-interference gate determined this kernel needs it. Propagates the one Stage-0 decision
+    to every later variant/zero-shot re-insertion in the trial rather than re-running the
+    (expensive) gate per attempt — source is treated as the specification for which design this
+    kernel needs (see planning/LASSI_Verify_Phase2_Bridge.md Step 3). No-op when the flag is
+    False, or when the expected two device functions aren't found (leaves the already-inserted
+    primary design in place rather than risking a partial/corrupting edit)."""
+    if not use_fallback_design:
+        return code
+    _fb_code, _n_replaced = lassi.verify._enforce_fallback_witness_device_fns(code)
+    return _fb_code if _n_replaced == 2 else code
+
+
 def _build_attempt_record(app_name, trial_number, code_block_index, attempt_number,
                           is_final_attempt, generation_type, sc_trigger,
                           llm_temperature, compile_status, execute_status,
@@ -274,10 +290,28 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["experiment"] = experiment
     experiment_data["app_name"] = file_name
     experiment_data["code_line_count"] = lines_of_code
+
+    # Per-kernel buffer classification (planning/LASSI_Verify_Phase2_Bridge.md Step 1):
+    # {label: record} dict from lassi_verify_analysis/buffer_classification/{app_name}_
+    # buffer_classification.json if this kernel has been through the offline stability
+    # classification pass, else None. Loaded once per trial and passed into the Tier-2
+    # verdict call sites that actually gate variant acceptance (compare_passthrough_outputs()
+    # falls back to its default type-derived tolerance when this is None — most kernels,
+    # not yet classified, are completely unaffected).
+    tier2_buffer_classification = lassi.verify.load_buffer_classification(app_name)
     experiment_data["llm"] = model
     experiment_data["llm_coder"] = model_coder
     experiment_data["llm_judge"] = model_judge
-    
+
+    # Schema-registration safeguard (added 2026-08-21, after a writing-agent review caught the
+    # witness_chain_fallback_status field silently producing a CSV header/row misalignment —
+    # experiment_data.keys() is fixed at dict.fromkeys(DATAFIELDNAMES, None) in run_lassi.py
+    # before this function runs; any NEW key added anywhere below without a matching
+    # DATAFIELDNAMES registration would silently append an unlabeled trailing CSV column
+    # instead of erroring). Snapshot the registered key set now; asserted unchanged right
+    # before the CSV write at the end of this function.
+    _experiment_data_registered_keys = frozenset(experiment_data.keys())
+
     actual_energy = 0
     actual_ave_power = 0
     idle_energy_joules = 0
@@ -675,6 +709,20 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Witness-chain status for SOURCE_verify (set by the witness-chain insertion step each attempt;
     # the final-attempt value persists). Default covers run_witness_chain/run_tier2 disabled.
     _witness_chain_status = "not_applied_no_timing_loop"
+    # Default covers witness chain disabled/not-applied (non-interference gate never runs);
+    # overwritten inside the gate to "not_needed" (primary passed) or a fallback outcome.
+    experiment_data["witness_chain_fallback_status"] = "not_applicable"
+    # T1+T2-only code (no witness chain), captured just before witness-chain insertion each
+    # attempt, so the final-attempt value survives past the loop for the non-interference gate.
+    _t1t2_only_code = None
+    # Set True inside the gate when SOURCE_verify needed the snapshot-based fallback design.
+    # Propagated to every later per-variant/zero-shot witness-chain re-insertion in this trial
+    # (see _apply_witness_fallback_if_needed below) instead of re-running the non-interference
+    # gate per attempt — source is treated as the specification for which design this kernel
+    # needs, per planning/LASSI_Verify_Phase2_Bridge.md Step 3. Known, accepted residual gap:
+    # a variant that regresses from a safe source into an in-place pattern would inherit the
+    # primary design undetected — not re-verified per attempt, propagated only.
+    _witness_chain_use_fallback_design = False
 
     for _stage0_attempt in range(1, STAGE0_T1_RETRY_MAX + 1):
         if _stage0_attempt > 1:
@@ -823,6 +871,10 @@ def auto_code_llmgeneration_pipeline(prompts,
         # passthrough block. Runs inside the Stage 0 retry loop so a broken harness is caught and
         # re-instrumented by the existing SOURCE_verify compile/execute retry below.
         if run_witness_chain and run_tier2:
+            # Snapshot the T1+T2-only code (pre-witness-chain) for the non-interference gate
+            # below — the only reference build that could never carry witness-chain-induced
+            # corruption, since the chain hasn't been inserted into it yet.
+            _t1t2_only_code = input_code
             _cv_code, _witness_chain_status = lassi.verify.code_insert_witness_chain(
                 input_code, llm_source, model, num_ctx, system_prompt, display_response,
                 verifyprompt=verifyprompt, code_description=llm_code_description_response,
@@ -1056,6 +1108,223 @@ def auto_code_llmgeneration_pipeline(prompts,
                   f"reproducible within Tier 2 tolerance across two runs; "
                   f"tolerance_verdict={_consistency_verdict}) -----")
 
+    # --- Witness-chain non-interference gate ---
+    # The witness chain is the only instrumentation category that WRITES into the program's
+    # own live output buffer (the pre-kernel sentinel) before the kernel-under-test runs. On
+    # an out-of-place kernel this is a safe no-op; on an in-place (read-modify-write) kernel
+    # whose buffer's pre-launch content is legitimate input, the sentinel corrupts that input
+    # before the real kernel ever reads it — confirmed on matrix-rotate (2026-07-23): the
+    # kernel computes on poisoned data and produces a genuinely wrong answer. Because the
+    # per-trial LASSI_VERIFY_SEED is shared by SOURCE_verify and every generated variant, this
+    # corruption is DETERMINISTIC and SYMMETRIC across whatever is being compared — Tier 2's
+    # own comparison (however exhaustive) cannot detect it, since source and variant corrupt
+    # identically and still agree with each other (confirmed by a direct byte-for-byte diff of
+    # two independently-generated matrix-rotate variants run under a fixed seed, 2026-08-20:
+    # identical wrong output, both individually failing the benchmark's own internal oracle).
+    # The only way to detect it is to compare against a build that was never subject to the
+    # witness chain at all.
+    #
+    # Reuses existing machinery only: `_t1t2_only_code` is the T1+T2-instrumented code from
+    # immediately before witness-chain insertion (this attempt); compiling and running it,
+    # then comparing its PASSTHROUGH output against SOURCE_verify's via the SAME
+    # compare_passthrough_outputs() Tier 2 already uses downstream, isolates exactly the
+    # witness chain's effect — no new comparator, and no dependence on the benchmark's own
+    # stdout conventions (some kernels have a rich embedded oracle, some have none at all;
+    # this check needs neither, only the framework's own standardized PASSTHROUGH format).
+    #
+    # SOURCE-level only for now: this covers SOURCE_verify, not each per-variant witness-chain
+    # re-insertion later in the pipeline (a variant restructuring buffer layout could in
+    # principle introduce or remove the same failure mode independently) — that is a separate,
+    # costed follow-on (one extra compile+run per variant attempt) tracked in
+    # planning/LASSI_Verify_Phase2_Bridge.md Step 3, not bundled in here.
+    _witness_chain_applied_this_attempt = (
+        run_witness_chain and run_tier2 and str(_witness_chain_status).startswith("applied"))
+    if _witness_chain_applied_this_attempt and _t1t2_only_code is not None:
+        print(f"\n----- Witness-chain non-interference check: compiling T1+T2-only reference "
+              f"build (no witness chain) -----")
+        _ni_ext = os.path.splitext(verify_source_file_path)[1]
+        _ni_source_path = os.path.splitext(verify_source_file_path)[0] + "_t1t2only" + _ni_ext
+        with open(_ni_source_path, 'w') as _nf:
+            _nf.write(_t1t2_only_code)
+
+        _ni_compile_result, _ni_executable = lassi.code_manager.compile_code(
+            _ni_source_path, source_lang, code_compiler, code_compiler_kwds)
+
+        if _ni_compile_result != "":
+            print(color.RED + color.BOLD +
+                  f"\n[PIPELINE ABORT] Witness-chain non-interference check: the T1+T2-only "
+                  f"reference build failed to compile — cannot verify the witness chain is "
+                  f"side-effect-free on this kernel. This indicates a bug in the harness's own "
+                  f"block-stripping logic (_strip_witness_chain_blocks), not the kernel or the "
+                  f"LLM's instrumentation choices." + color.END)
+            experiment_data["stage0_abort_reason"] = "witness_noninterference_reference_compile_error"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+
+        try:
+            (_ni_result, _ni_stdout, _, _, _, _, _) = lassi.code_manager.execute_code_selectvendor(
+                experiment_data_directory, code_version, False, trial_number,
+                directory, _ni_executable, exe_input_parameters,
+                False,  # power_measure=False — non-interference check doesn't need power data
+                "source", target_lang, build_script, make_script,
+                gpu_vendor="auto", wait=1,
+            )
+        except Exception as _ni_err:
+            print(color.RED + color.BOLD +
+                  f"\n[Witness-chain non-interference check] reference build raised "
+                  f"{type(_ni_err).__name__}: {str(_ni_err)[:120]} — treating as unverifiable "
+                  f"and aborting." + color.END)
+            _ni_result = "EXCEPTION"
+            _ni_stdout = ""
+
+        if _ni_result != "0":
+            print(color.RED + color.BOLD +
+                  f"\n[PIPELINE ABORT] Witness-chain non-interference check: the T1+T2-only "
+                  f"reference build failed to execute (status={_ni_result}) — cannot verify "
+                  f"the witness chain is side-effect-free on this kernel." + color.END)
+            experiment_data["stage0_abort_reason"] = "witness_noninterference_reference_execute_error"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+
+        _ni_verdict, _ni_diag = lassi.verify.compare_passthrough_outputs(
+            _ni_stdout,             # T1+T2-only reference (no witness chain) = the "spec"
+            source_verify_stdout,   # T1+T2+witness (actual SOURCE_verify) = "generated"
+            tolerance=tier2_tolerance,
+            n_safety_override=tolerance_safety_factor,
+        )
+        _ni_mismatches = _ni_diag.get("failures", [])
+        verification_log["witness_chain_noninterference_primary_verdict"] = _ni_verdict
+        verification_log["witness_chain_noninterference_primary_mismatches"] = _ni_mismatches
+        experiment_data["witness_chain_fallback_status"] = "not_needed"
+
+        if _ni_verdict == "FAIL":
+            # Primary (sentinel) design corrupts this kernel's real computation — try the
+            # snapshot-based FALLBACK design instead of aborting immediately. The fallback never
+            # writes to the buffer (see _enforce_fallback_witness_device_fns in lassi/verify.py),
+            # so it structurally can't cause this specific failure mode; only trigger it here,
+            # reactively, on a detected primary failure — the vast majority of kernels never take
+            # this path and see no behavior change at all.
+            print(color.YELLOW + color.BOLD +
+                  f"\n[Witness-chain non-interference check] Primary sentinel design FAILED — "
+                  f"inserting the witness chain changed SOURCE_verify's observable PASSTHROUGH "
+                  f"output beyond Tier 2 tolerance relative to the T1+T2-only reference build "
+                  f"(the classic case: an in-place/read-modify-write buffer whose pre-launch "
+                  f"content is legitimate input). Retrying with the snapshot-based fallback "
+                  f"design before giving up." + color.END)
+            for _mm in _ni_mismatches[:3]:
+                print(f"    mismatch: {_mm}")
+
+            _fallback_code, _n_fallback_replaced = lassi.verify._enforce_fallback_witness_device_fns(input_code)
+            if _n_fallback_replaced != 2:
+                print(color.RED + color.BOLD +
+                      f"\n[PIPELINE ABORT] Witness-chain non-interference check: fallback device "
+                      f"functions not found (replaced {_n_fallback_replaced}/2) — harness structure "
+                      f"unexpected. Cannot attempt the fallback design." + color.END)
+                experiment_data["witness_chain_fallback_status"] = "fallback_functions_not_found"
+                experiment_data["stage0_abort_reason"] = "witness_chain_noninterference_violation"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+            with open(verify_source_file_path, 'w') as _vf:
+                _vf.write(_fallback_code)
+            _fb_compile_result, _fb_executable = lassi.code_manager.compile_code(
+                verify_source_file_path, source_lang, code_compiler, code_compiler_kwds)
+
+            if _fb_compile_result != "":
+                print(color.RED + color.BOLD +
+                      f"\n[PIPELINE ABORT] Witness-chain non-interference check: the fallback "
+                      f"rebuild failed to compile." + color.END)
+                experiment_data["witness_chain_fallback_status"] = "fallback_compile_error"
+                experiment_data["stage0_abort_reason"] = "witness_chain_noninterference_violation"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+            try:
+                (_fb_result, _fb_stdout, _, _, _, _, _) = lassi.code_manager.execute_code_selectvendor(
+                    experiment_data_directory, code_version, False, trial_number,
+                    directory, _fb_executable, exe_input_parameters,
+                    False,  # power_measure=False — fallback rebuild doesn't need power data
+                    "source", target_lang, build_script, make_script,
+                    gpu_vendor="auto", wait=1,
+                )
+            except Exception as _fb_err:
+                print(color.RED + color.BOLD +
+                      f"\n[Witness-chain non-interference check] fallback rebuild raised "
+                      f"{type(_fb_err).__name__}: {str(_fb_err)[:120]} — treating as unverifiable "
+                      f"and aborting." + color.END)
+                _fb_result = "EXCEPTION"
+                _fb_stdout = ""
+
+            if _fb_result != "0":
+                print(color.RED + color.BOLD +
+                      f"\n[PIPELINE ABORT] Witness-chain non-interference check: the fallback "
+                      f"rebuild failed to execute (status={_fb_result})." + color.END)
+                experiment_data["witness_chain_fallback_status"] = "fallback_execute_error"
+                experiment_data["stage0_abort_reason"] = "witness_chain_noninterference_violation"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+            # Re-run the SAME non-interference check against the fallback rebuild. _ni_stdout
+            # (the T1+T2-only reference) is unaffected by which witness design is used, so it does
+            # not need to be recompiled — it's still the correct ground truth to compare against.
+            _fb_verdict, _fb_diag = lassi.verify.compare_passthrough_outputs(
+                _ni_stdout, _fb_stdout,
+                tolerance=tier2_tolerance, n_safety_override=tolerance_safety_factor,
+            )
+            _fb_mismatches = _fb_diag.get("failures", [])
+            verification_log["witness_chain_noninterference_fallback_verdict"] = _fb_verdict
+            verification_log["witness_chain_noninterference_fallback_mismatches"] = _fb_mismatches
+
+            if _fb_verdict == "FAIL":
+                print(color.RED + color.BOLD +
+                      f"\n[PIPELINE ABORT] Witness-chain non-interference check: the fallback "
+                      f"design ALSO failed to reproduce the T1+T2-only reference — both witness "
+                      f"designs corrupt this kernel's computation. Unexpected; needs its own "
+                      f"investigation rather than a further fallback." + color.END)
+                for _mm in _fb_mismatches[:3]:
+                    print(f"    mismatch: {_mm}")
+                experiment_data["witness_chain_fallback_status"] = "fallback_also_failed"
+                experiment_data["stage0_abort_reason"] = "witness_chain_noninterference_violation_fallback_also_failed"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+            # Fallback succeeded — adopt it as the real SOURCE_verify going forward. Everything
+            # downstream (Tier 2 spec, judge context, per-variant witness-chain re-insertion
+            # reference) must see the fallback code/output, not the corrupted primary one.
+            print(color.GREEN + color.BOLD +
+                  f"\n----- Witness-chain non-interference check: fallback design PASS — "
+                  f"adopting it as SOURCE_verify for this trial -----" + color.END)
+            input_code = _fallback_code
+            input_content_llmjudge_dict["source_code"] = _fallback_code
+            source_verify_stdout = _fb_stdout
+            passthrough_spec_output = _fb_stdout
+            verification_log["tier2_spec_output"] = _fb_stdout
+            experiment_data["witness_chain_fallback_status"] = "fallback_success"
+            _witness_chain_use_fallback_design = True
+        else:
+            print(f"----- Witness-chain non-interference check: PASS (SOURCE_verify's "
+                  f"PASSTHROUGH output matches the T1+T2-only reference within Tier 2 "
+                  f"tolerance — the witness chain has no observable side effect on this "
+                  f"kernel's computation) -----")
+
     # ULP-aware tolerance derivation: parse SOURCE_verify's PASSTHROUGH blocks once and
     # record the per-block tolerance (atol, rtol, type, max_magnitude, buffer_size, N) in
     # the verification log. This is deterministic for a given source — the same tolerance
@@ -1095,11 +1364,12 @@ def auto_code_llmgeneration_pipeline(prompts,
           f"N_override={tolerance_safety_factor or '(default log2-derived)'} -----")
 
     # Record the chain-verification status SOURCE_verify settled on (set inside the Stage 0 loop).
-    # _witness_chain_applied gates per-variant re-insertion in the main loop below.
+    # _witness_chain_applied gates per-variant re-insertion in the main loop below. Same
+    # condition as _witness_chain_applied_this_attempt (computed earlier, at the
+    # non-interference gate) — reused here rather than recomputed, so the two can't drift.
     experiment_data["witness_chain_status"] = _witness_chain_status
     verification_log["witness_chain_status"] = _witness_chain_status
-    _witness_chain_applied = (run_witness_chain and run_tier2
-                             and str(_witness_chain_status).startswith("applied"))
+    _witness_chain_applied = _witness_chain_applied_this_attempt
 
     # Initialize per-code-block stdout list (indexed like code_blocks):
     #   [0] = SOURCE_orig stdout (no passthrough instrumentation)
@@ -2076,7 +2346,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # (fixes re-insertion inconsistency, e.g. segment-reduce nested-loop placement).
                 source_harness_reference=code_blocks[1] if len(code_blocks) > 1 else None,
             )
-            code_block = _cv_var_code
+            code_block = _apply_witness_fallback_if_needed(_cv_var_code, _witness_chain_use_fallback_design)
             print(f"\n----- LASSI-Verify Chain Verification (variant re-install): "
                   f"status={_cv_var_status} -----")
 
@@ -2545,6 +2815,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     generated_stdout=exe_output_generated,
                     tolerance=tier2_tolerance,
                     n_safety_override=tolerance_safety_factor,
+                    buffer_classification=tier2_buffer_classification,
                 )
                 print(f"\n----- LASSI-Verify Tier 2: {tier2_verdict} -----")
                 if tier2_diagnostic.get("failures"):
@@ -2793,6 +3064,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         is_variant=True,
                         source_harness_reference=code_blocks[1] if len(code_blocks) > 1 else None,
                     )
+                    _zs_instr = _apply_witness_fallback_if_needed(_zs_instr, _witness_chain_use_fallback_design)
                     print(f"\n----- Zero-Shot Empirical Verify: witness-chain re-install status={_zs_cv_status} -----")
 
                 _zs_stdout = ""          # combined-binary stdout; T1+T2 verdicts parsed from here
@@ -2860,6 +3132,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                             generated_stdout=_zs_stdout,
                             tolerance=tier2_tolerance,
                             n_safety_override=tolerance_safety_factor,
+                            buffer_classification=tier2_buffer_classification,
                         )
                         zs_tier2_verdict = _zs_t2_verdict
                         print(f"\n----- Zero-Shot Empirical Verify: Tier 2 → {zs_tier2_verdict} -----")
@@ -3944,6 +4217,16 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     # Append collected data to experiment spreadsheet
     print("\nSave experimental data to file.")
+    _current_experiment_data_keys = frozenset(experiment_data.keys())
+    if _current_experiment_data_keys != _experiment_data_registered_keys:
+        _unregistered = sorted(_current_experiment_data_keys - _experiment_data_registered_keys)
+        _missing = sorted(_experiment_data_registered_keys - _current_experiment_data_keys)
+        raise RuntimeError(
+            "experiment_data's key set changed during this trial — writing the CSV row now "
+            "would silently misalign it against the header. "
+            f"New/unregistered keys (add to DATAFIELDNAMES in run_lassi.py): {_unregistered}. "
+            f"Missing keys (removed or never set): {_missing}."
+        )
     fieldnames = list(experiment_data.keys())
     with open(experiment_data_file_object, "a", newline="") as exp_file:
         writer = csv.DictWriter(exp_file, fieldnames=fieldnames)

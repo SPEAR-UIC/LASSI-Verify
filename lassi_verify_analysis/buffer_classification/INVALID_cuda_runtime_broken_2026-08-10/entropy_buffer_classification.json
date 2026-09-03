@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "kernel": "entropy",
+    "exp_dir": "KERNEL_EXP-SC26_ENTROPY_2__07-19-2026_t15_29_00",
+    "trial": 1,
+    "target_n": 149,
+    "runs_executed": 149,
+    "stop_reason": "target_n_reached",
+    "elapsed_seconds": 176.18
+  },
+  "buffers": {
+    "final_entropy_output": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 149,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "float",
+      "last_updated": null
+    },
+    "witness_chain_state": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "structural_exact",
+        "n_comparisons": null,
+        "observed_stable": null,
+        "max_observed_delta": null
+      },
+      "declared_type": null,
+      "last_updated": null
+    }
+  }
+}
