@@ -6,16 +6,6 @@
             "app_params": ["5000", "101"],
             "code_lines": 107
         },
-        "marchingCubes": {
-            "app_folder": "marchingCubes",
-            "app_params": ["100"],
-            "code_lines": 574
-        },
-        "stu-matrix-rotate": {
-            "app_folder": "stu-matrix-rotate",
-            "app_params": ["5000", "101"],
-            "code_lines": 67
-        },
         "all-pairs-distance": {
             "app_folder": "all-pairs-distance",
             "app_params": ["10000"],
@@ -115,27 +105,6 @@
             "app_folder": "marchingCubes",
             "app_params": ["100"],
             "code_lines": 574
-        }
-    },
-    "Altis": {
-        "xxx":"xxx"
-    },
-    "Miniapps": {
-        "source_folder": "Miniapps",
-        "miniMDock": {
-            "app_folder": "miniMDock",
-            "app_params": ["-lfile", "./input/7cpa/7cpa_ligand.pdbqt", "-nrun 250"],
-            "code_lines": 2394
-        },
-        "XSBench_hip": {
-            "app_folder": "XSBench/hip",
-            "app_params": ["-m", "event", "-l", "1700000000"],
-            "code_lines": 1472
-        },
-        "XSBench": {
-            "app_folder": "XSBench/cuda",
-            "app_params": ["-m", "event", "-l", "1700000000"],
-            "code_lines": 2200
         }
     }
 }
