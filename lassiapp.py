@@ -190,7 +190,7 @@ with col_llm:
         argo_uri = st.selectbox("Argo endpoint", ["local", "remote"],
                                 index=0 if _get(["llm", "argo_uri"], "local") == "local" else 1)
     with col_b:
-        argo_username = st.text_input("Argo username", value=_get(["llm", "argo_username"], "mdearing"))
+        argo_username = st.text_input("Argo username", value=_get(["llm", "argo_username"], "enter-your-Argonne-domain-username"))
 
 st.divider()
 
