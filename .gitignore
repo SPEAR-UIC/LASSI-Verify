@@ -27,6 +27,15 @@ source_codes/**/*-cuda_main_verify
 test_codes/**/*-cuda_main
 test_codes/**/*-cuda_main_verify
 
+# One-off compiled binaries without a shared naming pattern
+test_codes/jacobi/main
+test_codes/heat/heat
+test_codes/segment-reduce/main
+test_codes/lid/OriginalCode
+test_codes/stu/Stu
+test_codes/stu/Stu-o3-Mini-High
+test_codes/stu/stu2-outofplacekernel
+
 # Runtime-generated instrumented source files (created by pipeline_v4.py verify stage)
 *_verify.cu
 
@@ -44,3 +53,4 @@ LASSI_power_pipeline_v4.ipynb
 
 # Runtime-generated benchmark output data files
 source_codes/**/*.dat
+test_codes/**/*.dat
