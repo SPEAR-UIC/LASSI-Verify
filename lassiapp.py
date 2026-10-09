@@ -41,14 +41,12 @@ source_apps = load_source_apps()
 HECBENCH_APPS = [k for k in source_apps["HeCBench"].keys() if k != "source_folder"]
 MINIAPPS      = [k for k in source_apps["Miniapps"].keys()  if k != "source_folder"]
 
-# LLM option lists
-ARGO_MODELS     = ["gpt54", "gpt5", "gpt41", "gpt4olatest", "gpto4mini", "gpt4turbo", "gpt4o",
-                   "claudesonnet46", "claudesonnet4"]
-CEREBRAS_MODELS = ["gpt-oss-120b", "qwen-3-coder-480b"]
-OLLAMA_MODELS   = ["devstral:24b", "qwq:latest", "deepseek-r1:70b", "qwen2.5-coder:32b",
-                   "qwen3:latest", "qwen3-coder:30b", "codestral:22b", "llama3.3:latest",
-                   "deepseek-coder-v2:16b", "phi4", "granite3.2:8b-instruct-q8_0"]
-ALL_MODELS      = ARGO_MODELS + CEREBRAS_MODELS + OLLAMA_MODELS
+# LLM option lists, per backend
+ARGO_MODELS   = ["gpt54", "gpt5", "gpt41", "gpt4olatest", "gpto4mini", "gpt4turbo", "gpt4o",
+                 "claudesonnet46", "claudesonnet4"]
+OLLAMA_MODELS = ["devstral:24b", "qwq:latest", "deepseek-r1:70b", "qwen2.5-coder:32b",
+                 "qwen3:latest", "qwen3-coder:30b", "codestral:22b", "llama3.3:latest",
+                 "deepseek-coder-v2:16b", "phi4", "granite3.2:8b-instruct-q8_0"]
 
 # Load current config.yaml as defaults
 def load_config(path="config.yaml"):
@@ -168,9 +166,22 @@ with col_task:
 with col_llm:
     st.subheader("LLM")
 
+    BACKENDS = ["argo", "ollama", "openai_compatible"]
+    backend = st.selectbox(
+        "Backend",
+        BACKENDS,
+        index=BACKENDS.index(_get(["llm", "backend"], "argo")) if _get(["llm", "backend"], "argo") in BACKENDS else 0,
+        help="argo: Argonne National Laboratory internal only. ollama: local server. "
+             "openai_compatible: OpenAI or any OpenAI-compatible endpoint.",
+    )
+    backend_models = {"argo": ARGO_MODELS, "ollama": OLLAMA_MODELS}.get(backend)
+
     def model_selectbox(label, cfg_key, default):
         cur = _get(["llm", cfg_key], default)
-        options = ALL_MODELS
+        if backend_models is None:
+            # openai_compatible: model names are provider-specific and unbounded
+            return st.text_input(label, value=cur)
+        options = backend_models
         # If current value not in list (e.g. custom Ollama tag) prepend it
         if cur not in options:
             options = [cur] + options
@@ -185,12 +196,24 @@ with col_llm:
     num_ctx_coder = st.number_input("Context tokens (coder)", min_value=4096, max_value=1000000,
                                     value=int(_get(["llm", "num_ctx_coder"], 200000)), step=4096)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        argo_uri = st.selectbox("Argo endpoint", ["local", "remote"],
-                                index=0 if _get(["llm", "argo_uri"], "local") == "local" else 1)
-    with col_b:
-        argo_username = st.text_input("Argo username", value=_get(["llm", "argo_username"], "enter-your-Argonne-domain-username"))
+    # Preserve existing values for the fields not shown for the currently-selected
+    # backend, so switching backends in the form doesn't silently clear them.
+    argo_username   = _get(["llm", "argo_username"], "enter-your-Argonne-domain-username")
+    openai_base_url = _get(["llm", "openai_compatible", "base_url"], "https://api.openai.com/v1")
+    openai_api_key  = _get(["llm", "openai_compatible", "api_key"], "")
+
+    if backend == "argo":
+        st.caption("⚠️ Argo Gateway requires Argonne National Laboratory internal network access.")
+        argo_username = st.text_input("Argo username", value=argo_username)
+    elif backend == "ollama":
+        st.caption("Connects to a local `ollama serve` instance (localhost:11434). "
+                   "Make sure the selected model has been pulled.")
+    else:
+        st.caption("Works with OpenAI or any OpenAI-compatible server "
+                   "(vLLM, llama.cpp server, LM Studio, OpenRouter, ...).")
+        openai_base_url = st.text_input("Base URL", value=openai_base_url)
+        openai_api_key  = st.text_input("API key", value=openai_api_key, type="password",
+                                        help="Leave blank to use the OPENAI_API_KEY environment variable instead.")
 
 st.divider()
 
@@ -241,13 +264,17 @@ new_cfg = {
         "yes_power_feedback": yes_power_feedback,
     },
     "llm": {
+        "backend":        backend,
         "model":          model,
         "model_coder":    model_coder,
         "model_judge":    model_judge,
         "num_ctx":        int(num_ctx),
         "num_ctx_coder":  int(num_ctx_coder),
-        "argo_uri":       argo_uri,
         "argo_username":  argo_username,
+        "openai_compatible": {
+            "base_url": openai_base_url,
+            "api_key":  openai_api_key,
+        },
     },
     "verification": {
         "run_tier2":          run_tier2,

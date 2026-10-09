@@ -533,7 +533,7 @@ Configured by two notebook flags:
 | `lassi/verify.py` | Tier 1, 2, 3 + witness-chain instrumentation, checking, strip, and canonicalization functions |
 | `lassi/code_manager.py` | Compile, execute, GPU vendor detection, witness-chain seed |
 | `lassi/pipeline_methods.py` | Stage 0, code analysis, metrics helpers |
-| `lassi/llm_methods.py` | LLM API calls (Argo/Ollama/Cerebras) |
+| `lassi/llm_methods.py` | LLM API calls (Argo/Ollama/OpenAI-compatible) |
 | `lassi/prompt_dictionary.py` | All LLM prompt templates + catalog loading (`get_codeknowledge`) |
 | `lassi/context/Invariant_Assertions_Catalog.md` | Tier 1 assertion reference |
 | `lassi/context/Metamorphic_Relations_Catalog.md` | Tier 3 relation reference |

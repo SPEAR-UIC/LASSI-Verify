@@ -39,9 +39,25 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Copy the config template (config.yaml itself is gitignored; it's your
+# per-experiment working file)
+cp config.yaml.example config.yaml
 ```
 
 A Linux system with a CUDA-capable NVIDIA GPU and `nvcc` on `PATH` is required. The pipeline is not pinned to a specific architecture beyond the `-arch` flag passed to `nvcc` (set in `config.yaml`); the reported experiment used an NVIDIA RTX 5000 Ada (`sm_89`).
+
+### LLM Backend Setup
+
+LASSI-Verify's `llm.backend` config field selects which LLM backend the pipeline calls. Three options are supported:
+
+| Backend | Who can use it | Required config |
+|---|---|---|
+| `argo` | **Argonne National Laboratory personnel only** — Argo Gateway is reachable only from inside the ANL network | `llm.argo_username` |
+| `ollama` | Anyone running a local [Ollama](https://ollama.com) server | None — connects to `localhost:11434` by default; make sure the chosen model has been pulled (`ollama pull <model>`) |
+| `openai_compatible` | Anyone — works with OpenAI itself, or any self-hosted server implementing the same REST contract (vLLM, llama.cpp server, LM Studio, OpenRouter, etc.) | `llm.openai_compatible.base_url` and an API key (either `llm.openai_compatible.api_key` in `config.yaml`, or the `OPENAI_API_KEY` environment variable) |
+
+Non-Argonne users should use `ollama` or `openai_compatible` — `argo` will not work outside the ANL network. See `config.yaml.example` for the full field layout, and `lassiapp.py`'s GUI for an interactive way to configure this.
 
 ### Run via the CLI
 

@@ -1,0 +1,63 @@
+# ── LASSI-Verify Experiment Configuration (template) ──
+#
+# Copy this file to config.yaml before running the pipeline:
+#   cp config.yaml.example config.yaml
+#
+# config.yaml itself is gitignored (per-experiment, changes every run) — this
+# template is the tracked starting point for a fresh clone.
+
+app:
+  collection: HeCBench
+  name: atomicCost
+  make_script: false
+  build_script: false
+language:
+  source: CUDA
+  target: CUDA
+task:
+  power_measure: false
+  yes_power_feedback: true
+llm:
+  # Which LLM backend to use. One of: argo, ollama, openai_compatible
+  backend: openai_compatible
+
+  # Model names used for each pipeline role. Any string your chosen backend accepts.
+  model: gpt-4o
+  model_coder: gpt-4o
+  model_judge: gpt-4o
+  num_ctx: 200000
+  num_ctx_coder: 200000
+
+  # --- argo backend ---
+  # Argo Gateway is Argonne National Laboratory's internal LLM proxy.
+  # It is only reachable from within the ANL network and is NOT usable by
+  # non-Argonne users. Set your Argo domain username below if you use it.
+  argo_username: enter-your-Argonne-domain-username
+
+  # --- ollama backend ---
+  # Connects to a local `ollama serve` instance (default http://localhost:11434).
+  # No additional config needed here — just make sure Ollama is running and the
+  # model named above has been pulled (`ollama pull <model>`).
+
+  # --- openai_compatible backend ---
+  # Works with OpenAI itself, or any self-hosted server implementing the same
+  # REST contract (vLLM, llama.cpp server, LM Studio, OpenRouter, etc).
+  openai_compatible:
+    base_url: https://api.openai.com/v1
+    # Leave blank to read the key from the OPENAI_API_KEY environment variable
+    # instead of storing it in this file.
+    api_key: ""
+verification:
+  run_tier2: true
+  tier2_tolerance: 1.0e-06
+  run_tier3: true
+  tier3_tolerance: 1.0e-05
+  run_llm_judge: true
+  run_code_analysis: false
+pipeline:
+  vary_llm_temp: true
+  verifyprompt: true
+experiment:
+  trial_number: 1
+  total_trials: 1
+  label: ""

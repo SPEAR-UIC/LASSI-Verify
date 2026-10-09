@@ -6,7 +6,7 @@ import subprocess
 import shutil
 from lassi.format_colors import color
 from lassi.prompt_dictionary import PromptDictionary
-from lassi.llm_config import argo_llm, cerebras_llm, ollama_llm, ollama_llm_nostream
+from lassi.llm_config import call_llm
 
 # Load prompt dictionary (to capture recent manual changes to script, if any)
 prompts = PromptDictionary()
@@ -292,16 +292,7 @@ def code_insert_passthrough(source_code, llm_source, model, num_ctx, system_prom
     content_prompt = _feedback_prefix + content_prompt
 
     temp = 0.2
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    else:
-        print("Invalid LLM source")
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, temp, verifyprompt, stream=False)
 
     print("< BEGIN: LLM GENERATED CODE · Tier 2 passthrough >")
     print(response_text)
@@ -429,17 +420,7 @@ adapted to PROGRAM B's specific code structure.
     content_prompt += prompts.get_codeknowledge("passthrough_catalog")
 
     temp = 0.2
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    else:
-        print("Invalid LLM source")
-        response_text = ""
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, temp, verifyprompt, stream=False)
 
     print("< BEGIN: LLM GENERATED CODE · template instrumentation >")
     print(response_text)
@@ -1074,17 +1055,7 @@ def code_insert_witness_chain(source_code, llm_source, model, num_ctx, system_pr
     system_prompt = prompts.get_system_prompt("verify_insert")
 
     temp = 0.2
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    else:
-        print("Invalid LLM source")
-        response_text = ""
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, temp, verifyprompt, stream=False)
 
     print("< BEGIN: LLM GENERATED CODE · Witness Chain harness >")
     print(response_text)
@@ -1377,17 +1348,8 @@ def code_insert_asserts(source_code, llm_source, model, num_ctx, system_prompt, 
     content_prompt = _feedback_prefix + content_prompt
 
     temp = 0.2
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    else:
-        print("Invalid LLM source")
-        
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, temp, verifyprompt, stream=False)
+
     print("< BEGIN: LLM GENERATED CODE · Tier 1 assertions >")
     print(response_text)
     print("< END: LLM GENERATED CODE >")
@@ -2465,15 +2427,7 @@ def generate_metamorphic_contract(source_code, llm_source, model, num_ctx, syste
           "STARTING Tier 3: Generating Metamorphic Contract" + color.END + " -----\n")
 
     temp = 0.2
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    else:
-        print("Invalid LLM source for generate_metamorphic_contract")
-        return {}
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, temp, verifyprompt, stream=False)
 
     print("< BEGIN: LLM GENERATED CODE · Tier 3 metamorphic contract >")
     print(response_text)
@@ -3458,15 +3412,7 @@ def code_insert_metamorphic_variant(source_code, relation, llm_source, model, nu
                 f"Do not use '// ... rest unchanged', ellipsis, or any shorthand notation.\n\n"
             ) + content_prompt
 
-        if llm_source == "argo":
-            response_text = argo_llm(model, system_prompt, _prompt, temp, verifyprompt)
-        elif llm_source == "ollama":
-            response_text = ollama_llm_nostream(model, num_ctx, system_prompt, _prompt, temp, verifyprompt)
-        elif llm_source == "cerebras":
-            response_text = cerebras_llm(model, num_ctx, system_prompt, _prompt, temp, verifyprompt)
-        else:
-            print("Invalid LLM source for code_insert_metamorphic_variant")
-            return ""
+        response_text = call_llm(llm_source, model, num_ctx, system_prompt, _prompt, temp, verifyprompt, stream=False)
 
         print("< BEGIN: LLM GENERATED CODE · Tier 3 metamorphic variant >")
         print(response_text)

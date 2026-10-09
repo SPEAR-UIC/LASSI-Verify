@@ -51,12 +51,12 @@ def _curl_backoff_seconds(attempt):
 
 def argo_fetch_with_curl(data):
 
-    local = True
-
-    if local:
-        host_url = "apps.inside.anl.gov"
-    else:
-        host_url = "localhost:5000"
+    # The Argo Gateway production endpoint — reachable only from within the
+    # Argonne National Laboratory network. There used to be a couple of
+    # alternate hosts here (a dev gateway, an SSH-tunneled localhost:5000) from
+    # earlier experimentation, but this is the only one actually used for the
+    # paper's results, so it's hardcoded rather than left as dead config.
+    host_url = "apps.inside.anl.gov"
 
     url = f"https://{host_url}/argoapi/api/v1/resource/streamchat/"
 

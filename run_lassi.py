@@ -365,11 +365,6 @@ def experimental_setup(cfg):
     # model_coder = "gpt54"
     # model_judge = "gpt41"  # (max token = 200000)
 
-    # -- FROM CEREBRAS
-    # model = "gpt-oss-120b"
-    # model_judge = "gpt-oss-120b"
-    # model_coder = "qwen-3-coder-480b"
-
     # -- FROM OLLAMA
     # model = "devstral:24b" # (max token = 128000)
     # model_coder = "devstral:24b" # (max token = 128000)
@@ -412,20 +407,21 @@ def experimental_setup(cfg):
     num_ctx       = cfg["llm"]["num_ctx"]
     num_ctx_coder = cfg["llm"]["num_ctx_coder"]
 
-    # Needed only for Argo endpoints
-    uri = cfg["llm"]["argo_uri"]  # local  remote
+    # Needed only for the Argo backend (Argonne-internal only)
     lassi.llm_config.argo_username = cfg["llm"]["argo_username"]  # Argo Gateway username
 
-    # ASSIGN LLM API SOURCE:
-    if model in ["gpt54", "gpt5", "gpt35", "gpt35large", "gpt4", "gpt4large", "gpt4turbo", "gpt4o", "gpt4olatest", "gpt41",
-                 "gpto1preview", "gpto1mini", "gpto3mini", "gpto4mini", "claudesonnet4", "claudesonnet46"]:
-        llm_source = "argo"
-    elif model in ["gpt-oss-120b", "qwen-3-coder-480b"]:
-        llm_source = "cerebras"
-    elif ("GGUF" in model and "hf.co" not in model):
-        llm_source = "lmstudio"
-    else:
-        llm_source = "ollama"
+    # Needed only for the openai_compatible backend
+    _openai_cfg = cfg["llm"].get("openai_compatible", {}) or {}
+    if _openai_cfg.get("base_url"):
+        lassi.llm_config.openai_base_url = _openai_cfg["base_url"]
+    lassi.llm_config.openai_api_key = _openai_cfg.get("api_key", "")
+
+    # ASSIGN LLM API SOURCE (explicit config choice, not inferred from model name):
+    llm_source = cfg["llm"]["backend"]
+    if llm_source not in ("argo", "ollama", "openai_compatible"):
+        print(f"ERROR: config.yaml llm.backend must be one of 'argo', 'ollama', 'openai_compatible' "
+              f"(got {llm_source!r})")
+        sys.exit(1)
 
     """
     [4] SET ADDITIONAL PIPELINE PARAMETERS
