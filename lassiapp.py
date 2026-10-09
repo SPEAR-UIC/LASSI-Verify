@@ -39,7 +39,6 @@ def load_source_apps():
 source_apps = load_source_apps()
 
 HECBENCH_APPS = [k for k in source_apps["HeCBench"].keys() if k != "source_folder"]
-MINIAPPS      = [k for k in source_apps["Miniapps"].keys()  if k != "source_folder"]
 
 # LLM option lists, per backend
 ARGO_MODELS   = ["gpt54", "gpt5", "gpt41", "gpt4olatest", "gpto4mini", "gpt4turbo", "gpt4o",
@@ -91,19 +90,13 @@ col_app, col_task, col_llm = st.columns([1, 1, 1.4])
 # ── Column 1: App Selection ───────────────────────────────────────────────────
 with col_app:
     st.subheader("App")
-    collection = st.selectbox(
-        "Collection",
-        ["HeCBench", "Miniapps"],
-        index=0 if _get(["app", "collection"], "HeCBench") == "HeCBench" else 1,
-    )
-    if collection == "HeCBench":
-        app_list    = HECBENCH_APPS
-        make_script = False
-        build_script = False
-    else:
-        app_list     = MINIAPPS
-        make_script  = True
-        build_script = False
+    # Miniapps/Altis support was removed from source_apps.json when the repo was
+    # trimmed to the exact 21 HeCBench kernels reported in the paper — HeCBench
+    # is the only collection with data behind it today.
+    collection = "HeCBench"
+    app_list    = HECBENCH_APPS
+    make_script = False
+    build_script = False
 
     default_app = _get(["app", "name"], "jacobi")
     app_name = st.selectbox(
