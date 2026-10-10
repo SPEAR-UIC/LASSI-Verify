@@ -229,6 +229,24 @@ def argo_llm(model, system_prompt, content_prompt, temp=0.2, verifyprompt=False)
     return response
 
 
+# Models discovered (at runtime, via an actual 400 from the server — never
+# hardcoded) to reject a non-default "temperature". Some reasoning-class models
+# (OpenAI's o-series, and newer variants served through gateways like Argo) only
+# accept the default temperature and 400 on anything else; which model names fall
+# into that bucket changes over time as providers ship new ones, so we don't try
+# to maintain a static list. Instead, the first call to a given model pays for one
+# extra failed request to find out, and every call after that for the *same*
+# model (model/model_coder/model_judge can all differ) skips sending temperature
+# at all — this set is what makes that memory possible.
+#
+# Lifetime: process-local and unpersisted by design. Each `python run_lassi.py`
+# invocation is a fresh process, so this just needs to survive one pipeline run's
+# worth of calls (potentially hundreds across self-correction iterations) — it
+# does not need to survive across runs, and nothing here should be written to
+# config.yaml or disk.
+_models_without_temperature_support = set()
+
+
 def openai_compatible_llm(model, system_prompt, content_prompt, temp=0.2, verifyprompt=False):
     """
     Generic OpenAI-compatible chat-completions backend — works against OpenAI itself,
@@ -259,12 +277,37 @@ def openai_compatible_llm(model, system_prompt, content_prompt, temp=0.2, verify
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_prompt},
         ],
-        "temperature": round(temp, 1),
     }
+    # Note: `temp` is still computed and passed in by every caller exactly as
+    # before (pipeline_v4.py's vary_llm_temp logic is untouched) — we only decide
+    # here whether it's worth putting on the wire for this particular model.
+    if model not in _models_without_temperature_support:
+        payload["temperature"] = round(temp, 1)
 
     url = openai_base_url.rstrip("/") + "/chat/completions"
     resp = requests.post(url, headers=headers, json=payload, timeout=600)
-    resp.raise_for_status()
+
+    # First time we see this specific "model can't take a custom temperature" 400
+    # for this model: record it so every later call (this run only — see
+    # _models_without_temperature_support's docstring above) skips sending
+    # temperature up front instead of re-discovering the restriction every time.
+    # Detected by response content, not a hardcoded model-name list, since that
+    # list changes as providers ship new models.
+    if ("temperature" in payload and resp.status_code == 400
+            and "'param': 'temperature'" in resp.text and "unsupported_value" in resp.text):
+        print(f"\n[openai_compatible_llm] Model {model!r} rejected temperature="
+              f"{payload['temperature']} (reasoning-class model, default only) — "
+              f"retrying without it, and will skip temperature for all further "
+              f"{model!r} calls this run.")
+        _models_without_temperature_support.add(model)
+        payload.pop("temperature")
+        resp = requests.post(url, headers=headers, json=payload, timeout=600)
+
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        raise requests.exceptions.HTTPError(f"{e} — response body: {resp.text}", response=resp) from None
+
     response_text = resp.json()["choices"][0]["message"]["content"]
 
     print(response_text)
@@ -277,6 +320,36 @@ def openai_compatible_llm(model, system_prompt, content_prompt, temp=0.2, verify
         cleaned_response = response_text.strip()
 
     return cleaned_response
+
+
+def list_openai_compatible_models(base_url, api_key=""):
+    """
+    Query {base_url}/models (standard OpenAI-compatible model-list endpoint) and
+    return a sorted list of (usable_model_id, display_label) tuples. Raises on
+    failure (bad URL, bad key, network error, unexpected response shape) — callers
+    should catch and degrade gracefully (e.g. the GUI falls back to a free-text
+    model field).
+
+    Argo Gateway's OpenAI-compatible endpoint puts a human-readable display name in
+    the standard "id" field (e.g. "GPT-5.6 Luna") and the actual machine-usable
+    model slug in a non-standard "internal_id" field (e.g. "gpt56luna") — passing
+    "id" as the chat-completions "model" gets rejected with HTTP 400. Plain
+    OpenAI-compatible servers (real OpenAI, vLLM, ...) have no "internal_id", so
+    "id" IS the usable value there, and usable_id == display_label.
+    """
+    api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    url = base_url.rstrip("/") + "/models"
+    resp = requests.get(url, headers=headers, timeout=15)
+    resp.raise_for_status()
+    models = resp.json()["data"]
+    return sorted(
+        ((m.get("internal_id") or m["id"]), m["id"]) for m in models
+    )
 
 
 def call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, temp=0.2, verifyprompt=False, stream=True):

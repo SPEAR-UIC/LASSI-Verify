@@ -23,6 +23,8 @@ from pathlib import Path
 import streamlit as st
 import yaml
 
+import lassi.llm_config
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="LASSI-Verify Launcher",
@@ -40,12 +42,16 @@ source_apps = load_source_apps()
 
 HECBENCH_APPS = [k for k in source_apps["HeCBench"].keys() if k != "source_folder"]
 
-# LLM option lists, per backend
-ARGO_MODELS   = ["gpt54", "gpt5", "gpt41", "gpt4olatest", "gpto4mini", "gpt4turbo", "gpt4o",
-                 "claudesonnet46", "claudesonnet4"]
+# LLM option list for the ollama backend (openai_compatible is populated dynamically
+# from the endpoint's /models list instead — see fetch_openai_compatible_models()).
 OLLAMA_MODELS = ["devstral:24b", "qwq:latest", "deepseek-r1:70b", "qwen2.5-coder:32b",
                  "qwen3:latest", "qwen3-coder:30b", "codestral:22b", "llama3.3:latest",
                  "deepseek-coder-v2:16b", "phi4", "granite3.2:8b-instruct-q8_0"]
+
+
+@st.cache_data(show_spinner="Fetching available models...")
+def fetch_openai_compatible_models(base_url, api_key):
+    return lassi.llm_config.list_openai_compatible_models(base_url, api_key)
 
 # Load current config.yaml as defaults
 def load_config(path="config.yaml"):
@@ -159,26 +165,72 @@ with col_task:
 with col_llm:
     st.subheader("LLM")
 
-    BACKENDS = ["argo", "ollama", "openai_compatible"]
+    BACKENDS = ["ollama", "openai_compatible"]
+    BACKEND_LABELS = {"ollama": "Ollama", "openai_compatible": "OpenAI-compatible"}
+    _default_backend = _get(["llm", "backend"], "openai_compatible")
     backend = st.selectbox(
         "Backend",
         BACKENDS,
-        index=BACKENDS.index(_get(["llm", "backend"], "argo")) if _get(["llm", "backend"], "argo") in BACKENDS else 0,
-        help="argo: Argonne National Laboratory internal only. ollama: local server. "
-             "openai_compatible: OpenAI or any OpenAI-compatible endpoint.",
+        index=BACKENDS.index(_default_backend) if _default_backend in BACKENDS else 0,
+        format_func=lambda b: BACKEND_LABELS[b],
+        help="Ollama: local server. OpenAI-compatible: OpenAI, Argo Gateway's "
+             "OpenAI-compatible endpoint, or any other OpenAI-compatible server.",
     )
-    backend_models = {"argo": ARGO_MODELS, "ollama": OLLAMA_MODELS}.get(backend)
+
+    # argo_username is kept as a silent passthrough (no GUI field) because
+    # run_lassi.py reads cfg["llm"]["argo_username"] unconditionally. The "argo"
+    # backend (lassi/llm_config.py's argo_llm(), the old streamchat protocol) is
+    # no longer offered here but still works by hand-editing config.yaml.
+    argo_username   = _get(["llm", "argo_username"], "enter-your-Argonne-domain-username")
+    openai_base_url = _get(["llm", "openai_compatible", "base_url"], "https://api.openai.com/v1")
+    openai_api_key  = _get(["llm", "openai_compatible", "api_key"], "")
+
+    if backend == "ollama":
+        st.caption("Connects to a local `ollama serve` instance (localhost:11434). "
+                   "Make sure the selected model has been pulled.")
+    else:
+        st.caption("Works with OpenAI, Argo Gateway's OpenAI-compatible endpoint, or any "
+                   "other OpenAI-compatible server (vLLM, llama.cpp server, LM Studio, ...).")
+        col_url, col_refresh = st.columns([5, 1])
+        with col_url:
+            openai_base_url = st.text_input("Base URL", value=openai_base_url)
+        openai_api_key = st.text_input("API key", value=openai_api_key, type="password",
+                                       help="Leave blank to use the OPENAI_API_KEY environment variable instead.")
+        with col_refresh:
+            st.write("")  # vertical spacer to align the button with the Base URL field
+            if st.button("🔄", help="Force-refresh the model list (bypass cache)"):
+                fetch_openai_compatible_models.clear()
+                st.rerun()
+
+    openai_models = None
+    openai_models_error = None
+    if backend == "openai_compatible" and openai_base_url:
+        try:
+            openai_models = fetch_openai_compatible_models(openai_base_url, openai_api_key)
+        except Exception as e:
+            openai_models_error = str(e)
+
+    if openai_models_error:
+        st.warning(f"Could not fetch model list from {openai_base_url!r}: {openai_models_error}\n\n"
+                   "Falling back to free-text model fields.")
 
     def model_selectbox(label, cfg_key, default):
         cur = _get(["llm", cfg_key], default)
-        if backend_models is None:
-            # openai_compatible: model names are provider-specific and unbounded
+        if backend == "ollama":
+            options = [(m, m) for m in OLLAMA_MODELS]
+        elif backend == "openai_compatible" and openai_models is not None:
+            options = openai_models  # list of (usable_id, display_label) tuples
+        else:
+            # Model list unavailable (fetch failed, or URL not yet entered) — free text.
             return st.text_input(label, value=cur)
-        options = backend_models
         # If current value not in list (e.g. custom Ollama tag) prepend it
-        if cur not in options:
-            options = [cur] + options
-        return st.selectbox(label, options, index=options.index(cur))
+        values = [v for v, _ in options]
+        if cur not in values:
+            options = [(cur, cur)] + options
+            values = [cur] + values
+        display_labels = dict(options)
+        return st.selectbox(label, values, index=values.index(cur),
+                            format_func=lambda v: display_labels.get(v, v))
 
     model       = model_selectbox("Model (general)",  "model",       "gpt54")
     model_coder = model_selectbox("Model (coder)",     "model_coder", "gpt54")
@@ -188,25 +240,6 @@ with col_llm:
                                     value=int(_get(["llm", "num_ctx"], 200000)), step=4096)
     num_ctx_coder = st.number_input("Context tokens (coder)", min_value=4096, max_value=1000000,
                                     value=int(_get(["llm", "num_ctx_coder"], 200000)), step=4096)
-
-    # Preserve existing values for the fields not shown for the currently-selected
-    # backend, so switching backends in the form doesn't silently clear them.
-    argo_username   = _get(["llm", "argo_username"], "enter-your-Argonne-domain-username")
-    openai_base_url = _get(["llm", "openai_compatible", "base_url"], "https://api.openai.com/v1")
-    openai_api_key  = _get(["llm", "openai_compatible", "api_key"], "")
-
-    if backend == "argo":
-        st.caption("⚠️ Argo Gateway requires Argonne National Laboratory internal network access.")
-        argo_username = st.text_input("Argo username", value=argo_username)
-    elif backend == "ollama":
-        st.caption("Connects to a local `ollama serve` instance (localhost:11434). "
-                   "Make sure the selected model has been pulled.")
-    else:
-        st.caption("Works with OpenAI or any OpenAI-compatible server "
-                   "(vLLM, llama.cpp server, LM Studio, OpenRouter, ...).")
-        openai_base_url = st.text_input("Base URL", value=openai_base_url)
-        openai_api_key  = st.text_input("API key", value=openai_api_key, type="password",
-                                        help="Leave blank to use the OPENAI_API_KEY environment variable instead.")
 
 st.divider()
 
