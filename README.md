@@ -49,15 +49,14 @@ A Linux system with a CUDA-capable NVIDIA GPU and `nvcc` on `PATH` is required. 
 
 ### LLM Backend Setup
 
-LASSI-Verify's `llm.backend` config field selects which LLM backend the pipeline calls. Three options are supported:
+LASSI-Verify's `llm.backend` config field selects which LLM backend the pipeline calls. Two options are supported:
 
 | Backend | Who can use it | Required config |
 |---|---|---|
-| `argo` | **Argonne National Laboratory personnel only** — Argo Gateway is reachable only from inside the ANL network | `llm.argo_username` |
 | `ollama` | Anyone running a local [Ollama](https://ollama.com) server | None — connects to `localhost:11434` by default; make sure the chosen model has been pulled (`ollama pull <model>`) |
-| `openai_compatible` | Anyone — works with OpenAI itself, or any self-hosted server implementing the same REST contract (vLLM, llama.cpp server, LM Studio, OpenRouter, etc.) | `llm.openai_compatible.base_url` and an API key (either `llm.openai_compatible.api_key` in `config.yaml`, or the `OPENAI_API_KEY` environment variable) |
+| `openai_compatible` | Anyone — works with OpenAI itself, an institutional LLM gateway that exposes an OpenAI-compatible endpoint, or any self-hosted server implementing the same REST contract (vLLM, llama.cpp server, LM Studio, OpenRouter, etc.) | `llm.openai_compatible.base_url` and an API key (either `llm.openai_compatible.api_key` in `config.yaml`, or the `OPENAI_API_KEY` environment variable) |
 
-Non-Argonne users should use `ollama` or `openai_compatible` — `argo` will not work outside the ANL network. See `config.yaml.example` for the full field layout, and `lassiapp.py`'s GUI for an interactive way to configure this.
+See `config.yaml.example` for the full field layout, and `lassiapp.py`'s GUI for an interactive way to configure this — for `openai_compatible`, the GUI's model dropdowns are populated dynamically from the endpoint's `/models` list rather than typed by hand.
 
 ### Run via the CLI
 

@@ -18,7 +18,7 @@ task:
   power_measure: false
   yes_power_feedback: true
 llm:
-  # Which LLM backend to use. One of: argo, ollama, openai_compatible
+  # Which LLM backend to use. One of: ollama, openai_compatible
   backend: openai_compatible
 
   # Model names used for each pipeline role. Any string your chosen backend accepts.
@@ -28,19 +28,14 @@ llm:
   num_ctx: 200000
   num_ctx_coder: 200000
 
-  # --- argo backend ---
-  # Argo Gateway is Argonne National Laboratory's internal LLM proxy.
-  # It is only reachable from within the ANL network and is NOT usable by
-  # non-Argonne users. Set your Argo domain username below if you use it.
-  argo_username: enter-your-Argonne-domain-username
-
   # --- ollama backend ---
   # Connects to a local `ollama serve` instance (default http://localhost:11434).
   # No additional config needed here — just make sure Ollama is running and the
   # model named above has been pulled (`ollama pull <model>`).
 
   # --- openai_compatible backend ---
-  # Works with OpenAI itself, or any self-hosted server implementing the same
+  # Works with OpenAI itself, an institutional LLM gateway that exposes an
+  # OpenAI-compatible endpoint, or any self-hosted server implementing the same
   # REST contract (vLLM, llama.cpp server, LM Studio, OpenRouter, etc).
   openai_compatible:
     base_url: https://api.openai.com/v1

@@ -407,8 +407,11 @@ def experimental_setup(cfg):
     num_ctx       = cfg["llm"]["num_ctx"]
     num_ctx_coder = cfg["llm"]["num_ctx_coder"]
 
-    # Needed only for the Argo backend (Argonne-internal only)
-    lassi.llm_config.argo_username = cfg["llm"]["argo_username"]  # Argo Gateway username
+    # Needed only for the legacy "argo" backend (Argonne-internal only, no longer
+    # exposed in the GUI or config.yaml.example — kept working for anyone who sets
+    # llm.backend: argo by hand). Optional everywhere else, so config.yaml doesn't
+    # have to carry an ANL-specific field it'll never use.
+    lassi.llm_config.argo_username = cfg["llm"].get("argo_username", "")
 
     # Needed only for the openai_compatible backend
     _openai_cfg = cfg["llm"].get("openai_compatible", {}) or {}
