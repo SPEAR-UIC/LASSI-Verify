@@ -49,6 +49,11 @@ verification:
   tier3_tolerance: 1.0e-05
   run_llm_judge: true
   run_code_analysis: false
+  # Cheat-resistant loop-deletion detection harness. Defaults to true when omitted, and
+  # every reported trial ran with it enabled — it is a core, non-optional part of the
+  # verification scheme, not an ablation knob, so it is deliberately not exposed in the
+  # GUI. Uncomment and set to false only for a deliberate future ablation study.
+  # run_witness_chain: true
 pipeline:
   vary_llm_temp: true
   verifyprompt: true

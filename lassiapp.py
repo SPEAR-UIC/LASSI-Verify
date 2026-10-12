@@ -84,6 +84,11 @@ st.markdown(f"""
       Configure and launch the LASSI-Verify pipeline.
       Settings are saved to <code>config.yaml</code> then <code>run_lassi.py</code> is started.
     </p>
+    <p style="margin:6px 0 0 0; color:gray; font-size:0.85rem; font-style:italic;">
+      M. T. Dearing, X. Wu, V. Taylor, and Z. Lan, &ldquo;LASSI-Verify: Adaptive Empirical
+      Verification of LLM-Generated Parallel Scientific Code Transformations,&rdquo;
+      SC26 Workshops (Correctness 2026), Chicago, IL, USA, Nov. 2026.
+    </p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -128,31 +133,20 @@ with col_app:
 # ── Column 2: Task Mode ───────────────────────────────────────────────────────
 with col_task:
     st.subheader("Task Mode")
-    _power  = _get(["task", "power_measure"],    False)
-    _feedback = _get(["task", "yes_power_feedback"], True)
-    if _power and _feedback:
-        _default_mode = "Energy Efficiency (EE)"
-    elif not _power and _feedback:
-        _default_mode = "Runtime Performance"
-    else:
-        _default_mode = "Translation (one-shot)"
-
-    task_mode = st.radio(
-        "Mode",
-        ["Energy Efficiency (EE)", "Runtime Performance", "Translation (one-shot)"],
-        index=["Energy Efficiency (EE)", "Runtime Performance", "Translation (one-shot)"].index(_default_mode),
-        help="EE: optimise energy. Runtime: optimise wall-clock time. Translation: one-shot, no feedback loop.",
+    power_measure      = False
+    yes_power_feedback = True
+    st.checkbox(
+        "Runtime Performance", value=True, disabled=True,
+        help="The only mode used for the reported results.",
     )
-    if task_mode == "Energy Efficiency (EE)":
-        power_measure     = True
-        yes_power_feedback = True
-    elif task_mode == "Runtime Performance":
-        power_measure     = False
-        yes_power_feedback = True
-    else:
-        power_measure     = False
-        yes_power_feedback = False
-        st.warning("⚠️ Translation mode has a known infinite-loop-on-success issue.")
+    st.checkbox(
+        "Energy Efficiency (EE) — future work", value=False, disabled=True,
+        help="Not used for the reported results. Reserved for future work.",
+    )
+    st.checkbox(
+        "Translation (one-shot) — future work", value=False, disabled=True,
+        help="Not used for the reported results. Reserved for future work.",
+    )
 
     st.subheader("Experiment")
     trial_number = st.number_input("Starting trial #", min_value=1, value=int(_get(["experiment", "trial_number"], 1)))
@@ -248,21 +242,32 @@ col_ver, col_pipe = st.columns(2)
 
 with col_ver:
     st.subheader("LASSI-Verify Tiers")
-    run_tier2       = st.checkbox("Enable Tier 2 (empirical equivalence)",
-                                  value=bool(_get(["verification", "run_tier2"], True)))
+    run_tier2 = True
+    st.checkbox(
+        "Enable Tier 2 (empirical equivalence)", value=True, disabled=True,
+        help="Locked on — every reported trial ran all three tiers together "
+             "(three-tier all-or-nothing design). Per-tier toggles are reserved for "
+             "a future ablation study.",
+    )
     tier2_tolerance = st.number_input("Tier 2 tolerance",
                                       value=float(_get(["verification", "tier2_tolerance"], 1e-6)),
-                                      format="%.2e", step=1e-7, disabled=not run_tier2)
-    run_tier3       = st.checkbox("Enable Tier 3 (metamorphic testing)",
-                                  value=bool(_get(["verification", "run_tier3"], True)))
+                                      format="%.2e", step=1e-7)
+    run_tier3 = True
+    st.checkbox(
+        "Enable Tier 3 (metamorphic testing)", value=True, disabled=True,
+        help="Locked on — same as Tier 2, reserved for a future ablation study.",
+    )
     tier3_tolerance = st.number_input("Tier 3 tolerance",
                                       value=float(_get(["verification", "tier3_tolerance"], 1e-5)),
-                                      format="%.2e", step=1e-6, disabled=not run_tier3)
+                                      format="%.2e", step=1e-6)
     run_llm_judge   = st.checkbox("Enable LLM judge",
                                   value=bool(_get(["verification", "run_llm_judge"], True)),
                                   help="Disable for pure three-tier mode (Tier 1+2+3 only).")
     run_code_analysis = st.checkbox("Enable code analysis (pre-Tier-1 rubric)",
                                     value=bool(_get(["verification", "run_code_analysis"], False)))
+    st.caption("Witness chain (cheat-resistant loop-deletion detection) is always "
+               "enabled — a core, non-optional part of the verification scheme, not "
+               "an ablation knob in this launcher.")
 
 with col_pipe:
     st.subheader("Pipeline Options")
