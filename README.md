@@ -36,24 +36,29 @@ See the paper for the full design and preliminary results (citation below).
 The 16 HeCBench kernels used in the reported experiment (exec params are the positional
 arguments passed to each benchmark binary, from `source_apps.json`):
 
-| Kernel | Lines of Code | Exec Params |
-|---|---|---|
-| all-pairs-distance | 328 | `10000` |
-| atomicCost | 10 | `16 10` |
-| bsearch | 279 | `8388608 100` |
-| chacha20 | 130 | `300000` |
-| colorwheel | 154 | `10000 256 500000` |
-| entropy | 171 | `10000 1024 1` |
-| extrema | 349 | `750` |
-| floydwarshall | 295 | `2048 100 16` |
-| jaccard | 417 | `1024 512 1000` |
-| layout | 197 | `2500` |
-| lid-driven-cavity | 1079 | (none) |
-| murmurhash3 | 245 | `750000 500` |
-| pathfinder | 286 | `100000 10000 2500` |
-| randomaccess | 158 | `10` |
-| segment-reduce | 95 | `16384 100` |
-| threadfence | 139 | `100 250000000` |
+| Kernel | Lines of Code | Exec Params | Local Header |
+|---|---|---|---|
+| all-pairs-distance | 328 | `10000` | — |
+| atomicCost | 10 | `16 10` | — |
+| bsearch | 279 | `8388608 100` | — |
+| chacha20 | 130 | `300000` | `chacha20.h` |
+| colorwheel | 154 | `10000 256 500000` | — |
+| entropy | 171 | `10000 1024 1` | `reference.h` |
+| extrema | 349 | `750` | `kernels.h`, `reference.h` |
+| floydwarshall | 295 | `2048 100 16` | — |
+| jaccard | 417 | `1024 512 1000` | — |
+| layout | 197 | `2500` | — |
+| lid-driven-cavity | 1079 | (none) | — |
+| murmurhash3 | 245 | `750000 500` | — |
+| pathfinder | 286 | `100000 10000 2500` | — |
+| randomaccess | 158 | `10` | — |
+| segment-reduce | 95 | `16384 100` | — |
+| threadfence | 139 | `100 250000000` | — |
+
+Kernels with a local header compile correctly via the `-I` flag described in
+[Adding a New Kernel](#adding-a-new-kernel). The header's contents are not part of the
+LLM's refactoring prompt — only the `.cu` file's own text is sent, so the LLM sees the
+`#include` line but never the header's definitions.
 
 ## Getting Started
 
