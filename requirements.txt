@@ -7,7 +7,6 @@ pandas
 matplotlib
 tiktoken
 markdown
-numba
 pyyaml
 streamlit
 # jupyterlab

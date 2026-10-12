@@ -25,6 +25,10 @@ llm:
   model: gpt-4o
   model_coder: gpt-4o
   model_judge: gpt-4o
+
+  # Context window size, in tokens. Only used by the ollama backend (passed to the
+  # local Ollama server); ignored for openai_compatible, where the context window is
+  # fixed by the model itself.
   num_ctx: 200000
   num_ctx_coder: 200000
 

@@ -123,12 +123,24 @@ with col_app:
     st.caption(f"Exec params: `{app_params}`")
 
     st.subheader("Language")
-    source_lang = st.selectbox("Source", ["CUDA", "OMP", "HIP", "SYCL"],
-                               index=["CUDA", "OMP", "HIP", "SYCL"].index(
-                                   _get(["language", "source"], "CUDA")))
-    target_lang = st.selectbox("Target", ["CUDA", "OMP", "HIP", "SYCL"],
-                               index=["CUDA", "OMP", "HIP", "SYCL"].index(
-                                   _get(["language", "target"], "CUDA")))
+    LANG_OPTIONS = ["CUDA", "OMP", "HIP", "SYCL"]
+    source_lang = "CUDA"
+    target_lang = "CUDA"
+
+    def _lang_help(lang):
+        if lang == "CUDA":
+            return "The only language used for the reported results."
+        return "Not used for the reported results. Reserved for future work."
+
+    st.caption("Source")
+    for _lang in LANG_OPTIONS:
+        st.checkbox(_lang, value=(_lang == "CUDA"), disabled=True,
+                    help=_lang_help(_lang), key=f"source_lang_{_lang}")
+
+    st.caption("Target")
+    for _lang in LANG_OPTIONS:
+        st.checkbox(_lang, value=(_lang == "CUDA"), disabled=True,
+                    help=_lang_help(_lang), key=f"target_lang_{_lang}")
 
 # ── Column 2: Task Mode ───────────────────────────────────────────────────────
 with col_task:

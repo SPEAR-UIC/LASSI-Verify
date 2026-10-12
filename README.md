@@ -29,6 +29,7 @@ See the paper for the full design and preliminary results (citation below).
 - `source_codes/HeCBench/` — the vendored CUDA kernels used in the reported experiment (see `source_apps.json` for per-kernel build parameters)
 - `lassi_verify_analysis/` — post-hoc analysis package that computes the paper's tables/figures from raw per-trial logs
 - `scripts/` — standalone utility/validation scripts
+- `AGENTS.md` — background and architecture notes for AI coding assistants working in this repo; a good starting point if you're using one to help set up or run the pipeline
 
 ## Getting Started
 
@@ -74,6 +75,16 @@ streamlit run lassiapp.py
 
 Opens a browser-based form at `http://localhost:8501` for configuring and launching a run without editing `config.yaml` directly.
 
+## Related Projects
+
+LASSI-Verify is part of a small suite of tools from the same research group exploring LLM-based automated refactoring of parallel scientific GPU/HPC code:
+
+- **LASSI** — the original self-correcting pipeline for translating parallel scientific code between languages (e.g., CUDA to OpenMP) via an iterative LLM self-correction loop. LASSI-Verify's self-correction loop builds directly on this design.
+- **LASSI-EE** — re-targets the same self-correction loop at energy-efficiency refactoring, using runtime GPU power profiling and an LLM-as-judge screening step.
+- **LASSI-Verify** (this repository) — replaces human review / LLM-judge screening with a three-tier empirical verification framework plus a witness chain for cheat-resistant loop-deletion detection.
+
+See the Citation section below for references to all three.
+
 ## Citation
 
 If you use LASSI-Verify in your research, please cite:
@@ -81,6 +92,12 @@ If you use LASSI-Verify in your research, please cite:
 > M. T. Dearing, X. Wu, V. Taylor, and Z. Lan, "LASSI-Verify: Adaptive Empirical Verification of LLM-Generated Parallel Scientific Code Transformations," in *SC26 Workshops (Correctness 2026)*, Chicago, IL, USA, Nov. 2026.
 
 See [`CITATION.cff`](CITATION.cff) for a machine-readable version.
+
+### Related Publications
+
+> M. T. Dearing, Y. Tao, X. Wu, Z. Lan, and V. Taylor, "LASSI: An LLM-based Automated Self-Correcting Pipeline for Translating Parallel Scientific Codes," in *International Workshop on Large Language Models and HPC (LLMxHPC), IEEE International Conference on Cluster Computing (CLUSTER)*, 2024. DOI: [10.1109/CLUSTERWorkshops61563.2024.00029](https://doi.org/10.1109/CLUSTERWorkshops61563.2024.00029)
+
+> [Author list TBD], "LASSI-EE: LLM-based Automated Refactoring of Parallel Scientific Codes for Energy Efficiency," in *IEEE International Conference on Cluster Computing (CLUSTER) 2026 Workshops* (accepted).
 
 ## License
 
