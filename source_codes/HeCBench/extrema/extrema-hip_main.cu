@@ -15,9 +15,8 @@
 #include <stdlib.h>
 #include <chrono>
 #include <hip/hip_runtime.h>
-#include "/home/cc/lassi/LASSI-EE/source_codes/HeCBench/extrema/kernels.h"
-#include "/home/cc/lassi/LASSI-EE/source_codes/HeCBench/extrema/reference.h"
-
+#include "kernels.h"
+#include "reference.h"
 template <typename T>
 long test_1D (const int length, const int order, const bool clip,
               const int repeat, const char* type) 
