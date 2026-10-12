@@ -33,6 +33,23 @@ def set_witness_chain_seed(seed_hex):
     _witness_chain_seed_hex = seed_hex
 
 
+# --- Original kernel source directory (set once per run by run_lassi.py) ---
+# A few HeCBench kernels (chacha20, entropy, extrema, keogh, marchingCubes) #include a
+# header (e.g. "kernels.h") that lives only in the kernel's own source_codes/<collection>/
+# <app>/ folder and is never copied or modified. Every generated/instrumented variant is
+# written to a different directory (generated_codes/experiment/...), so compile_code()
+# passes this directory to the compiler via -I on every compile, letting the #include
+# resolve back to the one canonical header no matter where the compiled file lives. It's a
+# no-op for kernels with no local headers to include.
+_source_include_dir = None
+
+
+def set_source_include_dir(path):
+    """Called once per run by run_lassi.py with the original kernel source file's directory."""
+    global _source_include_dir
+    _source_include_dir = path
+
+
 def _build_witness_chain_env():
     """Return an env dict (copy of os.environ) with LASSI_VERIFY_SEED set if a seed is active."""
     env = os.environ.copy()
@@ -159,9 +176,14 @@ def build_script_code(folder, code_build_script):
 
 
 def compile_code(source_file, lang, code_compiler, code_compiler_kwds):
-       
+
     # Split the compile keywords into a list of arguments
     compile_kwds_list = shlex.split(code_compiler_kwds)
+
+    # Let the compiler also search the original kernel's own source directory for headers
+    # (see _source_include_dir above). Harmless no-op for kernels with no local headers.
+    if _source_include_dir:
+        compile_kwds_list += ['-I', _source_include_dir]
 
     # Strip the file extension to get the output binary path.
     # Using os.path.splitext handles any source extension (.cu, .cpp, .hip)

@@ -99,6 +99,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 # Import LASSI modules
+import lassi.code_manager
 import lassi.llm_config
 import lassi.pipeline_v4
 from lassi.format_colors import color
@@ -656,6 +657,12 @@ else:
     input_code_file_subdirectory = ""
     source_file_path = source_file_directory + input_code_filename + "." + input_code_extension
     source_file_path = os.path.abspath(source_file_path)
+
+# A few HeCBench kernels #include a header that only lives in this directory (see
+# code_manager.py's set_source_include_dir docstring) — every compile_code() call for the
+# rest of this run will pass it to the compiler via -I.
+lassi.code_manager.set_source_include_dir(os.path.dirname(source_file_path))
+
 with open(source_file_path, 'r') as file:
     input_code = file.read()
 file.close()

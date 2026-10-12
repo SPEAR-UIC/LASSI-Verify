@@ -29,7 +29,36 @@ See the paper for the full design and preliminary results (citation below).
 - `source_codes/HeCBench/` — the vendored CUDA kernels used in the reported experiment (see `source_apps.json` for per-kernel build parameters)
 - `lassi_verify_analysis/` — post-hoc analysis package that computes the paper's tables/figures from raw per-trial logs
 - `scripts/` — standalone utility/validation scripts
-- `AGENTS.md` — background and architecture notes for AI coding assistants working in this repo; a good starting point if you're using one to help set up or run the pipeline
+- `AGENTS.md` — background and architecture notes for AI coding assistants working in this repo
+
+## Benchmark Kernels
+
+The 16 HeCBench kernels used in the reported experiment (exec params are the positional
+arguments passed to each benchmark binary, from `source_apps.json`):
+
+| Kernel | Lines of Code | Exec Params | Local Header |
+|---|---|---|---|
+| all-pairs-distance | 328 | `10000` | — |
+| atomicCost | 10 | `16 10` | — |
+| bsearch | 279 | `8388608 100` | — |
+| chacha20 | 130 | `300000` | `chacha20.h` |
+| colorwheel | 154 | `10000 256 500000` | — |
+| entropy | 171 | `10000 1024 1` | `reference.h` |
+| extrema | 349 | `750` | `kernels.h`, `reference.h` |
+| floydwarshall | 295 | `2048 100 16` | — |
+| jaccard | 417 | `1024 512 1000` | — |
+| layout | 197 | `2500` | — |
+| lid-driven-cavity | 1079 | (none) | — |
+| murmurhash3 | 245 | `750000 500` | — |
+| pathfinder | 286 | `100000 10000 2500` | — |
+| randomaccess | 158 | `10` | — |
+| segment-reduce | 95 | `16384 100` | — |
+| threadfence | 139 | `100 250000000` | — |
+
+Kernels with a local header compile correctly via the `-I` flag described in
+[Adding a New Kernel](#adding-a-new-kernel). The header's contents are not part of the
+LLM's refactoring prompt — only the `.cu` file's own text is sent, so the LLM sees the
+`#include` line but never the header's definitions.
 
 ## Getting Started
 
@@ -75,9 +104,22 @@ streamlit run lassiapp.py
 
 Opens a browser-based form at `http://localhost:8501` for configuring and launching a run without editing `config.yaml` directly.
 
+## Adding a New Kernel
+
+No code changes required when adding a new kernel from the HeCBench collection not listed above. You only need to register details about the source code in a new `source_apps.json` entry.
+
+1. **Layout.** HeCBench nests kernels as `src/<kernel>-cuda/main.cu`. This pipeline requires a flat `source_codes/HeCBench/<kernel>/<kernel>-cuda_main.cu` (and `<kernel>-hip_main.cu` for HIP). Rename the main file accordingly.
+2. **Local headers.** Place any `#include`d header in the same kernel folder, referenced by filename only (no path). `code_manager.py` passes an `-I` flag for the kernel's source folder on every compile, so the include resolves regardless of where the generated/instrumented copy is compiled.
+3. **`source_apps.json` entry**, under `"HeCBench"`:
+   - `app_folder` — kernel folder name
+   - `app_params` — positional CLI arguments (see the kernel's `argv` parsing or README)
+   - `code_lines` — informational; shown in the GUI
+4. `lassiapp.py`'s kernel dropdown reads `source_apps.json` directly — no further changes needed.
+
+
 ## Related Projects
 
-LASSI-Verify is part of a small suite of tools from the same research group exploring LLM-based automated refactoring of parallel scientific GPU/HPC code:
+LASSI-Verify is part of a suite of tools from the SPEAR research group exploring LLM-based automated refactoring of parallel scientific GPU/HPC code:
 
 - **LASSI** — the original self-correcting pipeline for translating parallel scientific code between languages (e.g., CUDA to OpenMP) via an iterative LLM self-correction loop. LASSI-Verify's self-correction loop builds directly on this design.
 - **LASSI-EE** — re-targets the same self-correction loop at energy-efficiency refactoring, using runtime GPU power profiling and an LLM-as-judge screening step.

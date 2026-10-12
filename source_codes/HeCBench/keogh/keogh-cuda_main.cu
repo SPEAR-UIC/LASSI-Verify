@@ -3,8 +3,7 @@
 #include <math.h>
 #include <chrono>
 #include <cuda.h>
-#include "/home/mdearing/Research/LASSI/LASSI-Verify/source_codes/HeCBench/keogh/reference.h" 
-
+#include "reference.h"
 // calculate LB_Keogh
 __global__
 void lb_keogh(const float *__restrict__ subject,
