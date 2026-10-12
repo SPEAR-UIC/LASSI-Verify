@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "kernel": "floydwarshall",
+    "exp_dir": "KERNEL_EXP-SC26_FLOYDW_1__07-23-2026_t00_31_21",
+    "trial": 1,
+    "target_n": 3,
+    "runs_executed": 3,
+    "stop_reason": "target_n_reached",
+    "elapsed_seconds": 35.89
+  },
+  "buffers": {
+    "witness_chain_state": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "structural_exact",
+        "n_comparisons": null,
+        "observed_stable": null,
+        "max_observed_delta": null
+      },
+      "declared_type": null,
+      "last_updated": null
+    },
+    "final_path_distance_matrix": {
+      "comparison_mode": "exact",
+      "evidence": {
+        "method": "dedicated_stability_run",
+        "n_comparisons": 3,
+        "observed_stable": true,
+        "max_observed_delta": null,
+        "max_observed_relative_delta": null
+      },
+      "declared_type": "unsigned int",
+      "last_updated": null
+    }
+  }
+}

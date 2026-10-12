@@ -23,8 +23,14 @@ TIER_NOT_RUN: set[str] = {"SKIP", "NA"}           # tier was not meaningfully te
 # --- Judge verdict vocabulary ---
 JUDGE_VALID: str = "VALID"
 JUDGE_INVALID: str = "INVALID"
-# judge_verdict values that mean "no usable verdict was produced"
+# judge_baseline_verdict values that mean "no usable verdict was produced"
 JUDGE_NO_VERDICT: set = {"NONE", None}
+
+# Canonical attempt-log column name for the (raw, unmodified) LLM-judge verdict.
+# Renamed from "judge_verdict" (pre-judge-as-baseline schema). The data loader maps
+# the legacy name onto this canonical name when reading older CSVs.
+JUDGE_BASELINE_COLUMN: str = "judge_baseline_verdict"
+LEGACY_JUDGE_COLUMN: str = "judge_verdict"
 
 # --- Verdict columns to normalize (strip whitespace + uppercase) ---
 # Applied in data_loader to both df_trials and df_attempts where columns exist.
@@ -41,6 +47,11 @@ VERDICT_COLUMNS_TRIALS: list[str] = [
     "zeroshot_tier2_verdict",
     "zeroshot_tier3_verdict",
     "zeroshot_empirical_verdict",
+    # Status of the basellm_zs_verify compile+execute (combined T1+T2 instrumented
+    # basellm with the SOURCE_verify template — the single binary that produces
+    # both per-tier verdicts and instrumented runtime/energy). One of:
+    # "skipped" / "instrument_error" / "compile_error" / "execute_error" / "success".
+    "basellm_zs_verify_status",
 ]
 
 VERDICT_COLUMNS_ATTEMPTS: list[str] = [
@@ -49,7 +60,7 @@ VERDICT_COLUMNS_ATTEMPTS: list[str] = [
     "tier1_verdict",
     "tier2_verdict",
     "tier3_verdict",
-    "judge_verdict",
+    "judge_baseline_verdict",   # canonical (post-rename); legacy "judge_verdict" is mapped on load
     "final_verdict",
     "override_applied",
     "generation_type",
@@ -94,6 +105,12 @@ FLOAT_COLUMNS_TRIALS: list[str] = [
     "pipeline_runtime_min",
     "tier2_max_relative_error",
     "zeroshot_runtime_s",
+    # basellm_zs_verify: combined T1+T2 instrumented basellm runtime/energy
+    # (raw data only; no calculated diff vs source — the primary fairness
+    # comparison uses uninstrumented zeroshot_runtime_s vs uninstrumented
+    # lassiee_clean_runtime_s, both of which are already in this list).
+    "basellm_zs_verify_runtime_s",
+    "basellm_zs_verify_energy_J",
 ]
 
 # --- Float columns (Table 2) ---
@@ -123,6 +140,11 @@ INT_COLUMNS_TRIALS: list[str] = [
     "tier3_fail_total",
     "judge_false_positives",
     "judge_false_negatives",
+    # Stage 1 per-trial test counts (T1 assertions, T2 passthroughs, T3 active relations
+    # successfully instrumented for this trial). Captures Stage 1 LLM stochasticity.
+    "tier1_test_count",
+    "tier2_test_count",
+    "tier3_test_count",
 ]
 
 # --- Nullable int columns (Table 2) ---

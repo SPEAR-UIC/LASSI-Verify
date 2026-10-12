@@ -1,0 +1,949 @@
+{
+  "operator_id": "boundary-guard-corruption",
+  "family": "program-defect",
+  "detector": "tiers_1_3",
+  "observed_failure_class_generalized": "runtime-parametric bounds guard widened by one, causing an OOB read/write",
+  "evidence_pointer": "planning/LASSI_Verify_Phase2_Bridge.md 2026-08-23 design-proper entry, catalog entry 6",
+  "mechanism": "generic_rule",
+  "mechanism_description": "widen a runtime-parametric entry guard (if-guard or grid-stride loop bound) by one",
+  "applicability_rule": "a runtime/CLI-derived bound N gates an array access, and is not a compile-time #define",
+  "per_instance": [
+    {
+      "kernel": "colorwheel",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_COLORW_1__07-22-2026_t13_50_27",
+        "trial": 1,
+        "code_version": 9
+      },
+      "diff": "'if (y < size && x < size) {' -> 'if (y <= size && x <= size) {'",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_cpu_reference_image": "exact",
+          "final_gpu_image": "exact"
+        },
+        "per_label_results": {
+          "final_cpu_reference_image": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09",
+              "injected_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09",
+              "injected_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09",
+              "injected_md5": "dbb9d6ea1d80995ab2d4233aa19c0e09"
+            }
+          ],
+          "final_gpu_image": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd",
+              "injected_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd",
+              "injected_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd",
+              "injected_md5": "9c9f3ee1036ac3dc3975d9f01d1ca5bd"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_output_sensitivity_to_range__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_repeat_invariance_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_small_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_outlier_v9.cu": "PASS",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_small_v9.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_output_sensitivity_to_range__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_repeat_invariance_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_small_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_outlier_v9.cu": "PASS",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_small_v9.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_output_sensitivity_to_range__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_repeat_invariance_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_small_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_small_v9.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_output_sensitivity_to_range__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_repeat_invariance_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_outlier_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_size_sensitivity__p_small_v9.cu": "not_available",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_outlier_v9.cu": "PASS",
+            "colorwheel-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_COLORW_1_mt_truerange_sensitivity__p_small_v9.cu": "PASS"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "entropy",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_ENTROPY_2__07-19-2026_t15_29_00",
+        "trial": 1,
+        "code_version": 8
+      },
+      "diff": "'if (x >= width || y >= height) return;' -> 'if (x > width || y > height) return;'",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_entropy_output": "exact"
+        },
+        "per_label_results": {
+          "final_entropy_output": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "7c8b624e3300c704e502b4878080905d",
+              "injected_md5": "7c8b624e3300c704e502b4878080905d"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "7c8b624e3300c704e502b4878080905d",
+              "injected_md5": "7c8b624e3300c704e502b4878080905d"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "7c8b624e3300c704e502b4878080905d",
+              "injected_md5": "7c8b624e3300c704e502b4878080905d"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_attribute_negation_invariance_v8.cu": "PASS",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_outlier_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_small_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_uniform_value_shift_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_value_relabeling_invariance_v8.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_attribute_negation_invariance_v8.cu": "PASS",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_outlier_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_small_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_uniform_value_shift_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_value_relabeling_invariance_v8.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_attribute_negation_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_outlier_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_small_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_uniform_value_shift_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_value_relabeling_invariance_v8.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_attribute_negation_invariance_v8.cu": "PASS",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_outlier_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_small_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_uniform_value_shift_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_value_relabeling_invariance_v8.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "murmurhash3",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_MURMURH_1__07-23-2026_t19_45_45",
+        "trial": 1,
+        "code_version": 6
+      },
+      "diff": "'i < numKeys;' -> 'i <= numKeys;' (grid-stride loop bound, no standalone if-guard present)",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "verdict": "BEHAVIOR_CHANGING",
+        "note": "injected build crashes on run while base succeeds -- crash itself is the evidence of behavior change",
+        "error": "run failure on rep 0: CUDA error cudaStreamSynchronize(stream) at /tmp/step4_sweep/boundary-guard-corruption_murmurhash3/neutrality/injected_dumped.cu:275: an illegal memory access was encountered\n"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "not_available",
+          "witness": "not_available",
+          "t3": {},
+          "catching_observer": [
+            "crash"
+          ],
+          "reason": "RUN FAIL: CUDA error cudaGetLastError() at /tmp/step4_sweep/boundary-guard-corruption_murmurhash3/sweep/full_stack/inj_main.cu:439: an illegal memory access was encountered\n"
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "not_available",
+          "witness": "not_available",
+          "t3": {},
+          "catching_observer": [
+            "crash"
+          ],
+          "reason": "RUN FAIL: CUDA error cudaGetLastError() at /tmp/step4_sweep/boundary-guard-corruption_murmurhash3/sweep/minus_t1/inj_main.cu:340: an illegal memory access was encountered\n"
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "not_available",
+          "witness": "not_available",
+          "t3": {},
+          "catching_observer": [
+            "crash"
+          ],
+          "reason": "RUN FAIL: CUDA error cudaGetLastError() at /tmp/step4_sweep/boundary-guard-corruption_murmurhash3/sweep/minus_t2/inj_main.cu:439: an illegal memory access was encountered\n"
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "not_available",
+          "witness": "not_available",
+          "t3": {},
+          "catching_observer": [
+            "crash"
+          ],
+          "reason": "RUN FAIL: CUDA error cudaGetLastError() at /tmp/step4_sweep/boundary-guard-corruption_murmurhash3/sweep/minus_t3/inj_main.cu:439: an illegal memory access was encountered\n"
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "not_available",
+          "witness": "not_available",
+          "t3": {},
+          "catching_observer": [
+            "crash"
+          ],
+          "reason": "RUN FAIL: CUDA error cudaStreamSynchronize(stream) at /tmp/step4_sweep/boundary-guard-corruption_murmurhash3/sweep/minus_witness/inj_main.cu:374: an illegal memory access was encountered\n"
+        }
+      }
+    },
+    {
+      "kernel": "pathfinder",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_PATHFINDER_1__07-26-2026_t05_34_18",
+        "trial": 1,
+        "code_version": 6
+      },
+      "diff": "'if(IN_RANGE(xidx, 0, cols-1))' -> 'if(IN_RANGE(xidx, 0, cols))' (widens the read-bound macro by one; no literal if(idx<N){} form exists in this kernel)",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_path_costs": "exact"
+        },
+        "per_label_results": {
+          "final_path_costs": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "3ce4b001ef009c79081fedf3c5435d8b",
+              "injected_md5": "3ce4b001ef009c79081fedf3c5435d8b"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "3ce4b001ef009c79081fedf3c5435d8b",
+              "injected_md5": "3ce4b001ef009c79081fedf3c5435d8b"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "3ce4b001ef009c79081fedf3c5435d8b",
+              "injected_md5": "3ce4b001ef009c79081fedf3c5435d8b"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_outlier_v6.cu": "PASS",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_small_v6.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_outlier_v6.cu": "PASS",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_small_v6.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_small_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_outlier_v6.cu": "FAIL",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_small_v6.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier3"
+          ]
+        }
+      }
+    },
+    {
+      "kernel": "randomaccess",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_RANDA_1__07-21-2026_t21_03_54",
+        "trial": 1,
+        "code_version": 11
+      },
+      "diff": "widened initTable's loop bound i<TableSize -> i<=TableSize (update/validationReplay's guards excluded -- pre-masked index, widening there is a no-op)",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "post_validation_table": "exact",
+          "final_device_table": "exact"
+        },
+        "per_label_results": {
+          "post_validation_table": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "aa559b4e3523a6c931f08f4df52d58f2"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "aa559b4e3523a6c931f08f4df52d58f2"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "72501eddc76722414f976562d2a6c525",
+              "injected_md5": "aa559b4e3523a6c931f08f4df52d58f2"
+            }
+          ],
+          "final_device_table": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "aa559b4e3523a6c931f08f4df52d58f2"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "aa559b4e3523a6c931f08f4df52d58f2"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "5cecfc84dd721e91bd5130bd4fb2d902",
+              "injected_md5": "aa559b4e3523a6c931f08f4df52d58f2"
+            }
+          ]
+        },
+        "verdict": "BEHAVIOR_CHANGING"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "FAIL",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "PASS",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "FAIL"
+          },
+          "catching_observer": [
+            "tier2",
+            "witness",
+            "tier3"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "FAIL",
+          "witness": "FAIL",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "PASS",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "FAIL"
+          },
+          "catching_observer": [
+            "tier2",
+            "witness",
+            "tier3"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "not_available",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "tier2",
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "not_available",
+          "t3": {
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_table_entry_sensitivity__p_outlier_v11.cu": "PASS",
+            "randomaccess-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_RANDA_1_mt_uniform_xor_mask_invariance_v11.cu": "FAIL"
+          },
+          "catching_observer": [
+            "tier2",
+            "tier3"
+          ]
+        }
+      }
+    },
+    {
+      "kernel": "threadfence",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_THREADF_1__07-20-2026_t14_07_07",
+        "trial": 1,
+        "code_version": 5
+      },
+      "diff": "'idx < (unsigned int)N;' -> 'idx <= (unsigned int)N;' (grid-stride loop bound, no standalone if-guard present)",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_reduction_result": "exact"
+        },
+        "per_label_results": {
+          "final_reduction_result": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "ebc556ccc7efb14a2afc96adbeef8a68"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "ebc556ccc7efb14a2afc96adbeef8a68"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "ebc556ccc7efb14a2afc96adbeef8a68"
+            }
+          ]
+        },
+        "verdict": "BEHAVIOR_CHANGING"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "undetected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "not_available",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "not_available",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        }
+      }
+    },
+    {
+      "kernel": "matrix-rotate",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/KERNEL_WITNESS-TEST_matrixrotate_2__08-20-2026_t23_30_46",
+        "trial": 1,
+        "code_version": 3
+      },
+      "diff": "'if (row < n && col < n) {' -> 'if (row <= n && col <= n) {' (2 occurrence(s); catalog's assumed `layer<n/2` pattern is from pristine HeCBench source, not present in this variant -- corrected 2026-08-23)",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_rotated_matrix": "exact"
+        },
+        "per_label_results": {
+          "final_rotated_matrix": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "ee766e1d2d4dc8a6bab7ac36435627da",
+              "injected_md5": "9e3d99f4ec859b74e8f6665ea3ebcddf"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "ee766e1d2d4dc8a6bab7ac36435627da",
+              "injected_md5": "9e3d99f4ec859b74e8f6665ea3ebcddf"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "ee766e1d2d4dc8a6bab7ac36435627da",
+              "injected_md5": "9e3d99f4ec859b74e8f6665ea3ebcddf"
+            }
+          ]
+        },
+        "verdict": "BEHAVIOR_CHANGING"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "detected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "FAIL",
+          "t3": {
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_global_value_scaling_v3.cu": "PASS",
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_rotation_cycle_repeat_plus_four_v3.cu": "PASS",
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_uniform_value_shift_v3.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2",
+            "witness"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "FAIL",
+          "witness": "FAIL",
+          "t3": {
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_global_value_scaling_v3.cu": "PASS",
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_rotation_cycle_repeat_plus_four_v3.cu": "PASS",
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_uniform_value_shift_v3.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2",
+            "witness"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "FAIL",
+          "t3": {
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_global_value_scaling_v3.cu": "not_available",
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_rotation_cycle_repeat_plus_four_v3.cu": "not_available",
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_uniform_value_shift_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "witness"
+          ]
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "FAIL",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "tier2",
+            "witness"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "not_available",
+          "t3": {
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_global_value_scaling_v3.cu": "PASS",
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_rotation_cycle_repeat_plus_four_v3.cu": "PASS",
+            "matrix-rotate-cuda_main_ee_refactorcode_CUDA_expKERNEL_WITNESS-TEST_matrixrotate_2_mt_uniform_value_shift_v3.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        }
+      }
+    },
+    {
+      "kernel": "extrema",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_EXTREMA_1__07-19-2026_t21_47_11",
+        "trial": 2,
+        "code_version": 3
+      },
+      "diff": "kernels.h: 'if ( ( tx < in_y ) && ( ty < in_x ) ) {' -> 'if ( ( tx <= in_y ) && ( ty <= in_x ) ) {' (relextrema_2D guard, patched in a scratch copy at /tmp/step4_sweep/boundary-guard-corruption_extrema/kernels_patched.h, NOT the shared source_codes header); Trial file's #include rewritten to point at the scratch copy",
+      "neutrality_verdict": "UNRESOLVED",
+      "decisive_test_record": {
+        "verdict": "UNRESOLVED",
+        "error": "DumpSpecError: label 'final_2d_result': setup doesn't match the fixed lv_min/lv_N template (buf_m=False, cnt_m=True) -- do not guess, inspect this kernel's PASSTHROUGH block by hand before adding it to the neutrality check"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "undetected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_1d_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_2d_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_1d_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_2d_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_1d_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_2d_v3.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "not_available",
+          "t3": {
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_1d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_outlier_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_negation_sensitivity_2d__p_small_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_1d_v3.cu": "not_available",
+            "extrema-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_EXTREMA_1_mt_input_value_shift_invariance_2d_v3.cu": "not_available"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        }
+      }
+    }
+  ]
+}

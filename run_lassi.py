@@ -94,6 +94,7 @@ import csv
 import json
 import shutil
 import time
+import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -101,7 +102,7 @@ from zoneinfo import ZoneInfo
 import lassi.llm_config
 import lassi.pipeline_v4
 from lassi.format_colors import color
-from lassi.monitor import log_figure, start_monitor
+from lassi.monitor import log_figure, save_log, start_monitor
 from lassi.prompt_dictionary import PromptDictionary
 
 # ── Monitor (Cell 4) ──────────────────────────────────────────────────────────
@@ -259,6 +260,14 @@ def experimental_setup(cfg):
     # -----------------------------------------------------------------------
     run_llm_judge = cfg["verification"]["run_llm_judge"]  # True to enable LLM judge; False for pure three-tier LASSI-Verify mode
 
+    # CHAIN VERIFICATION CONFIGURATION
+    # run_witness_chain=True: install the witness-chain harness (cheat-resistant loop-deletion
+    # detection) via a SEPARATE Stage 0 insertion step + deterministic per-variant re-insertion.
+    # Requires run_tier2 (the witness chain state is compared via the [witness_chain_state] passthrough).
+    # Defaults True when absent from the config so existing config files keep working.
+    # -----------------------------------------------------------------------
+    run_witness_chain = cfg["verification"].get("run_witness_chain", True)
+
     # ASSIGN CODE COMPILE COMMAND
     code_build_script = ""
     code_compiler = ""
@@ -323,6 +332,13 @@ def experimental_setup(cfg):
     else:
         exe_input_parameters = [""]
 
+    # Optional per-kernel ULP safety-factor override for Tier 2 / Tier 3 numerical comparison.
+    # See planning/ulp_aware_tolerance_design.md for the design. When absent, the framework
+    # uses max(16, ceil(log2(buffer_size))) per the default formula. Override is a positive
+    # integer in source_apps.json under the kernel's entry, e.g.:
+    #   "keogh": { "app_folder": "keogh", ..., "tolerance_safety_factor": 16 }
+    tolerance_safety_factor = source_apps[source_collection][source_app].get("tolerance_safety_factor", None)
+
 
     """
     [3] SELECT THE LLM TO USE FOR THE CODE TRANSLATION EXPERIMENT
@@ -348,11 +364,6 @@ def experimental_setup(cfg):
     # model = "gpt54"
     # model_coder = "gpt54"
     # model_judge = "gpt41"  # (max token = 200000)
-
-    # -- FROM CEREBRAS
-    # model = "gpt-oss-120b"
-    # model_judge = "gpt-oss-120b"
-    # model_coder = "qwen-3-coder-480b"
 
     # -- FROM OLLAMA
     # model = "devstral:24b" # (max token = 128000)
@@ -396,20 +407,24 @@ def experimental_setup(cfg):
     num_ctx       = cfg["llm"]["num_ctx"]
     num_ctx_coder = cfg["llm"]["num_ctx_coder"]
 
-    # Needed only for Argo endpoints
-    uri = cfg["llm"]["argo_uri"]  # local  remote
-    lassi.llm_config.argo_username = cfg["llm"]["argo_username"]  # Argo Gateway username
+    # Needed only for the legacy "argo" backend (Argonne-internal only, no longer
+    # exposed in the GUI or config.yaml.example — kept working for anyone who sets
+    # llm.backend: argo by hand). Optional everywhere else, so config.yaml doesn't
+    # have to carry an ANL-specific field it'll never use.
+    lassi.llm_config.argo_username = cfg["llm"].get("argo_username", "")
 
-    # ASSIGN LLM API SOURCE:
-    if model in ["gpt54", "gpt5", "gpt35", "gpt35large", "gpt4", "gpt4large", "gpt4turbo", "gpt4o", "gpt4olatest", "gpt41",
-                 "gpto1preview", "gpto1mini", "gpto3mini", "gpto4mini", "claudesonnet4", "claudesonnet46"]:
-        llm_source = "argo"
-    elif model in ["gpt-oss-120b", "qwen-3-coder-480b"]:
-        llm_source = "cerebras"
-    elif ("GGUF" in model and "hf.co" not in model):
-        llm_source = "lmstudio"
-    else:
-        llm_source = "ollama"
+    # Needed only for the openai_compatible backend
+    _openai_cfg = cfg["llm"].get("openai_compatible", {}) or {}
+    if _openai_cfg.get("base_url"):
+        lassi.llm_config.openai_base_url = _openai_cfg["base_url"]
+    lassi.llm_config.openai_api_key = _openai_cfg.get("api_key", "")
+
+    # ASSIGN LLM API SOURCE (explicit config choice, not inferred from model name):
+    llm_source = cfg["llm"]["backend"]
+    if llm_source not in ("argo", "ollama", "openai_compatible"):
+        print(f"ERROR: config.yaml llm.backend must be one of 'argo', 'ollama', 'openai_compatible' "
+              f"(got {llm_source!r})")
+        sys.exit(1)
 
     """
     [4] SET ADDITIONAL PIPELINE PARAMETERS
@@ -492,10 +507,15 @@ def experimental_setup(cfg):
         "pipeline_runtime_min",
         "tier2_pass_count",
         "tier2_fail_total",
+        "tier2_tolerance_atol_max",  # ★ ULP-aware tolerance: largest atol across PASSTHROUGH blocks this trial
+        "tier2_tolerance_rtol_max",  # ★ ULP-aware tolerance: rtol applied (uniform for float types)
         "tier3_pass_count",
         "tier3_fail_total",
         "tier3_active_relations",
         "tier3_inactive_relations",  # ★
+        "tier1_test_count",          # ★ Stage 1 per-trial: # T1 assertions instrumented in SOURCE_verify
+        "tier2_test_count",          # ★ Stage 1 per-trial: # T2 passthrough blocks instrumented in SOURCE_verify
+        "tier3_test_count",          # ★ Stage 1 per-trial: # T3 relations active after source filter
         "judge_false_positives",
         "judge_false_negatives",
         "lassiee_clean_status",
@@ -503,10 +523,17 @@ def experimental_setup(cfg):
         "lassiee_clean_runtime_diff",
         "lassiee_clean_energy_J",
         "lassiee_clean_energy_diff",
+        "basellm_zs_verify_status",     # ★ combined T1+T2 instrumented basellm: instrument/compile/execute status
+        "basellm_zs_verify_runtime_s",  # ★ instrumented basellm runtime (raw data; no calculated diff)
+        "basellm_zs_verify_energy_J",   # ★ instrumented basellm energy, EE mode only (raw data; no calculated diff)
         "zeroshot_tier1_verdict",    # ★ T1 invariant assertion verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_tier2_verdict",    # ★ T2 empirical equivalence verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_tier3_verdict",    # ★ T3 metamorphic testing verdict for zero-shot code (PASS/FAIL/SKIP)
         "zeroshot_empirical_verdict", # ★ composite empirical verdict (PASS/FAIL/SKIP)
+        # ★ Witness Chain (cheat-resistant loop-deletion detection — see planning/chain_verify_design.md):
+        "witness_chain_status",       # ★ "applied_decision_tree_case_N" (N=1..8) | "applied_creative" | "soft_flag_no_safe_site"
+        "witness_chain_mismatches",   # ★ count of LASSI variants where witness_chain_state differed from source's (cheats detected)
+        "witness_chain_fallback_status", # ★ non-interference gate outcome: "not_applicable" | "not_needed" | "fallback_success" | "fallback_*_error" | "fallback_also_failed"
         "stage0_abort_reason"        # ★ set when Stage 0 aborts (None for completed trials)
     ]
 
@@ -515,7 +542,7 @@ def experimental_setup(cfg):
             experiment, display_response, test_with_error, generate_test_case, power_measure, yes_power_feedback, baseline_oneshot_goal, use_self_prompting, vary_llm_temp,
             verifyprompt, DATAFIELDNAMES, detected_vendor.upper(),
             run_tier2, tier2_tolerance, run_tier3, tier3_tolerance,
-            run_llm_judge)
+            run_llm_judge, run_witness_chain, tolerance_safety_factor)
 
 
 # EXPERIMENTAL DATA COLLECTION MANAGEMENT
@@ -552,7 +579,7 @@ original_home_directory = os.getcwd()
     display_response, test_with_error, generate_test_case, power_measure, yes_power_feedback, baseline_oneshot_goal,
     use_self_prompting, vary_llm_temp, verifyprompt, DATAFIELDNAMES, gpu_vendor,
     run_tier2, tier2_tolerance, run_tier3, tier3_tolerance,
-    run_llm_judge
+    run_llm_judge, run_witness_chain, tolerance_safety_factor
 ) = experimental_setup(_cfg)
 
 # IMPORT CONTEXT KNOWLEDGE FOR TARGET PROGRAMMING LANGUAGE
@@ -718,64 +745,94 @@ while trial_number <= total_trials:
     print("\n\n" + color.BLUE + color.BOLD + "***** BEGIN THE LASSI ENERGY EFFICIENCY PIPELINE (v4) *****" + color.END + " Trial #: " + str(trial_number) + "\n\n")
 
     # RUN LASSI-EE PIPELINE
-    complete = lassi.pipeline_v4.auto_code_llmgeneration_pipeline(
-        prompts,
-        this_llm_system_prompt,
-        this_llm_refactoredcode_prompt,
-        llm_source,
-        model,
-        model_coder,
-        model_judge,
-        num_ctx,
-        num_ctx_coder,
-        # arrayormatrix_size_range,
-        # thread_count_range,
-        use_context,
-        use_context_summaries_only,
-        few_shot_learning,
-        run_code_analysis,
-        input_context,
-        input_code_file_subdirectory,
-        input_code,
-        lines_of_code,
-        # target_code,
-        target_lang,
-        input_code_extension,
-        source_lang,
-        code_compiler,
-        code_compiler_kwds,
-        build_script,
-        make_script,
-        code_build_script,
-        output_code_directory,
-        output_code_file_name,
-        source_file_path,
-        display_response,
-        test_with_error,
-        generate_test_case,
-        yes_execute,
-        exe_input_parameters,
-        meta_data_file,
-        power_measure,
-        yes_power_feedback,
-        dt_string,
-        baseline_oneshot_goal,
-        use_self_prompting,
-        vary_llm_temp,
-        experiment,
-        verifyprompt,
-        trial_number,
-        experiment_data_directory,
-        experiment_data_file_object,
-        experiment_data,
-        app_name,
-        run_tier2=run_tier2,
-        tier2_tolerance=tier2_tolerance,
-        run_tier3=run_tier3,
-        tier3_tolerance=tier3_tolerance,
-        run_llm_judge=run_llm_judge,
-        attempt_log_file_path=attempt_log_file_path
-    )
+    # Wrapped in try/except so a mid-pipeline exception (post-Stage 0) saves the
+    # monitor log before propagating. Without this, the pipeline's stdout stream
+    # is the only crash record and is lost when the process dies. The trial is
+    # marked as failed (complete=False) but the trial loop continues so a single
+    # bad trial doesn't abort a long multi-trial / multi-day experiment run.
+    try:
+        complete = lassi.pipeline_v4.auto_code_llmgeneration_pipeline(
+            prompts,
+            this_llm_system_prompt,
+            this_llm_refactoredcode_prompt,
+            llm_source,
+            model,
+            model_coder,
+            model_judge,
+            num_ctx,
+            num_ctx_coder,
+            # arrayormatrix_size_range,
+            # thread_count_range,
+            use_context,
+            use_context_summaries_only,
+            few_shot_learning,
+            run_code_analysis,
+            input_context,
+            input_code_file_subdirectory,
+            input_code,
+            lines_of_code,
+            # target_code,
+            target_lang,
+            input_code_extension,
+            source_lang,
+            code_compiler,
+            code_compiler_kwds,
+            build_script,
+            make_script,
+            code_build_script,
+            output_code_directory,
+            output_code_file_name,
+            source_file_path,
+            display_response,
+            test_with_error,
+            generate_test_case,
+            yes_execute,
+            exe_input_parameters,
+            meta_data_file,
+            power_measure,
+            yes_power_feedback,
+            dt_string,
+            baseline_oneshot_goal,
+            use_self_prompting,
+            vary_llm_temp,
+            experiment,
+            verifyprompt,
+            trial_number,
+            experiment_data_directory,
+            experiment_data_file_object,
+            experiment_data,
+            app_name,
+            run_tier2=run_tier2,
+            tier2_tolerance=tier2_tolerance,
+            run_tier3=run_tier3,
+            tier3_tolerance=tier3_tolerance,
+            run_llm_judge=run_llm_judge,
+            run_witness_chain=run_witness_chain,
+            attempt_log_file_path=attempt_log_file_path,
+            tolerance_safety_factor=tolerance_safety_factor,
+        )
+    except Exception as _crash_exc:
+        print("\n\n" + color.RED + color.BOLD +
+              "***** LASSI PIPELINE CRASHED — see traceback below *****\n" + color.END)
+        print(f"[CRASH] {type(_crash_exc).__name__}: {_crash_exc}")
+        traceback.print_exc()
+        # Save monitor log with a _CRASH suffix so it sits next to other Trial
+        # artifacts but is clearly distinguished from successful completion logs.
+        try:
+            _crash_log_path = os.path.join(
+                experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string
+                + "_Trial" + str(trial_number) + "_CRASH.txt"
+            )
+            save_log(_crash_log_path)
+            print(f"[CRASH] Monitor log saved to: {_crash_log_path}")
+        except Exception as _save_exc:
+            print(f"[CRASH] Failed to save monitor log: {_save_exc}")
+        # Record the crash in experiment_data so the abort row written below
+        # carries a stage0_abort_reason field that names the exception type.
+        if isinstance(experiment_data, dict):
+            experiment_data["stage0_abort_reason"] = f"crash:{type(_crash_exc).__name__}"
+        complete = False
 
     # Reset to original working directory
     os.chdir(original_home_directory)

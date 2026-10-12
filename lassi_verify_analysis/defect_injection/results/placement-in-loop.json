@@ -1,0 +1,103 @@
+{
+  "operator_id": "placement-in-loop",
+  "family": "instrumentation-defect",
+  "detector": "noninterference_gate_and_repair",
+  "observed_failure_class_generalized": "primary witness sentinel design installed where the live pipeline would select the fallback, on an in-place-with-no-full-reinit kernel",
+  "evidence_pointer": "planning/LASSI_Verify_Phase2_Bridge.md 2026-08-23 design-proper entry, catalog entry 7; Step 3 hand-off doc Sections 12/20",
+  "mechanism": "generic_rule",
+  "mechanism_description": "install lassi.verify._canonical_witness_device_body (primary) where _snapshot_witness_device_body (fallback) would normally be selected",
+  "applicability_rule": "kernel confirmed or characterized as in-place-with-no-full-reinit, with an active repeat/timing-loop witness-chain target",
+  "per_instance": [
+    {
+      "kernel": "matrix-rotate",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/KERNEL_WITNESS-TEST_matrixrotate_2__08-20-2026_t23_30_46",
+        "trial": 1,
+        "code_version": 3
+      },
+      "diff": "(no change -- primary design already installed as archived; _enforce_canonical_witness_device_fns is a no-op on this file)",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "non_interference_gate",
+        "verdict": "PASS",
+        "note": "canonical base is out-of-place/double-buffered for this specific winning variant -- never reads back the sentinel-corrupted buffer. Does NOT reproduce the 'confirmed fatal' characterization, which applies to SOURCE_verify's structure or a different variant, not this campaign's actual winner."
+      },
+      "in_place_kernel_metadata": {
+        "active_witness_design": "primary",
+        "gate_version": "static+dynamic (dynamic gate only, static check deferred permanently)"
+      },
+      "tier_configuration_results": {
+        "full_stack": null,
+        "minus_t1": null,
+        "minus_t2": null,
+        "minus_t3": null,
+        "minus_witness": null,
+        "catching_observer": null
+      },
+      "gate_verdict": "PASS",
+      "outcome": "neutral_excluded"
+    },
+    {
+      "kernel": "atomicCost",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_ATOMIC_1__07-20-2026_t08_52_15",
+        "trial": 1,
+        "code_version": 4
+      },
+      "diff": "(no change -- primary design already installed as archived)",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "non_interference_gate",
+        "verdict": "FAIL",
+        "note": "matches 'confirmed plausible' characterization; massive corruption on comparison."
+      },
+      "in_place_kernel_metadata": {
+        "active_witness_design": "primary",
+        "gate_version": "static+dynamic (dynamic gate only)"
+      },
+      "tier_configuration_results": {
+        "full_stack": null,
+        "minus_t1": null,
+        "minus_t2": null,
+        "minus_t3": null,
+        "minus_witness": null,
+        "catching_observer": [
+          "noninterference_gate"
+        ]
+      },
+      "gate_verdict": "FAIL",
+      "outcome": "detected"
+    },
+    {
+      "kernel": "pathfinder",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_PATHFINDER_1__07-26-2026_t05_34_18",
+        "trial": 1,
+        "code_version": 6
+      },
+      "diff": "(no change -- primary design already installed as archived)",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "non_interference_gate",
+        "verdict": "FAIL",
+        "note": "matches 'confirmed present' characterization."
+      },
+      "in_place_kernel_metadata": {
+        "active_witness_design": "primary",
+        "gate_version": "static+dynamic (dynamic gate only)"
+      },
+      "tier_configuration_results": {
+        "full_stack": null,
+        "minus_t1": null,
+        "minus_t2": null,
+        "minus_t3": null,
+        "minus_witness": null,
+        "catching_observer": [
+          "noninterference_gate"
+        ]
+      },
+      "gate_verdict": "FAIL",
+      "outcome": "detected"
+    }
+  ]
+}

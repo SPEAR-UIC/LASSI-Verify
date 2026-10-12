@@ -21,6 +21,8 @@ import os
 import sys
 
 from .data_loader import get_kernels, load_data
+from . import basellm_comparison
+from . import judge_baseline
 from . import pass_at_k
 from . import verification_analysis
 from . import verification_evidence
@@ -102,6 +104,22 @@ def main() -> int:
     ve_results = verification_evidence.compute(df_trials, df_attempts)
     verification_evidence.report(ve_results, output_dir=output_dir)
     log.info("Verification evidence complete.")
+
+    # --- Judge-baseline vs. framework agreement (per-attempt) ---
+    # Reads judge_discrepancies arrays from each per-trial verification_log JSON
+    # sidecar and exports a flat per-attempt CSV. Uses data_dir directly because
+    # sidecars are JSON, not CSV (data_loader handles only the two CSV tables).
+    log.info("Loading per-attempt judge discrepancies from JSON sidecars ...")
+    df_disc = judge_baseline.load_discrepancies(args.data_dir)
+    if not df_disc.empty:
+        judge_baseline.report(df_disc, output_dir=output_dir)
+    log.info("Judge-baseline export complete.")
+
+    # --- basellm vs LASSI runtime comparison (apples-to-apples) ---
+    log.info("Computing basellm vs LASSI runtime comparison ...")
+    bc_results = basellm_comparison.compute(df_trials)
+    basellm_comparison.report(bc_results, output_dir=output_dir)
+    log.info("basellm comparison complete.")
 
     log.info("All metrics complete. Outputs written to: %s", output_dir)
     return 0

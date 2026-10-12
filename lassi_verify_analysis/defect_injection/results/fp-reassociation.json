@@ -1,0 +1,393 @@
+{
+  "operator_id": "fp-reassociation",
+  "family": "program-defect",
+  "detector": "tiers_1_3",
+  "observed_failure_class_generalized": "floating-point accumulation reordered beyond the buffer's measured stability",
+  "evidence_pointer": "planning/LASSI_Verify_Phase2_Bridge.md 2026-08-23 design-proper entry, catalog entry 4",
+  "mechanism": "generic_rule",
+  "mechanism_description": "split a serial FP accumulation loop into two partial sums combined at the end",
+  "applicability_rule": "a genuine T sum=0; sum+=expr; (or -=) accumulation loop feeding an output buffer, with a staticaly analyzable trip range",
+  "per_instance": [
+    {
+      "kernel": "entropy",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_ENTROPY_2__07-19-2026_t15_29_00",
+        "trial": 1,
+        "code_version": 8
+      },
+      "diff": "split entropy's 16-iteration accumulation into two 8-iteration partial sums (k<8, k>=8) combined at the end",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_entropy_output": "exact"
+        },
+        "per_label_results": {
+          "final_entropy_output": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "7c8b624e3300c704e502b4878080905d",
+              "injected_md5": "7c8b624e3300c704e502b4878080905d"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "7c8b624e3300c704e502b4878080905d",
+              "injected_md5": "7c8b624e3300c704e502b4878080905d"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "7c8b624e3300c704e502b4878080905d",
+              "injected_md5": "7c8b624e3300c704e502b4878080905d"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_attribute_negation_invariance_v8.cu": "PASS",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_outlier_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_small_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_uniform_value_shift_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_value_relabeling_invariance_v8.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_attribute_negation_invariance_v8.cu": "PASS",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_outlier_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_small_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_uniform_value_shift_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_value_relabeling_invariance_v8.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_attribute_negation_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_outlier_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_small_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_uniform_value_shift_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_value_relabeling_invariance_v8.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_attribute_negation_invariance_v8.cu": "PASS",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_outlier_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_input_symbol_sensitivity__p_small_v8.cu": "SKIP",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_uniform_value_shift_invariance_v8.cu": "not_available",
+            "entropy-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ENTROPY_2_mt_value_relabeling_invariance_v8.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "threadfence",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_THREADF_1__07-20-2026_t14_07_07",
+        "trial": 1,
+        "code_version": 5
+      },
+      "diff": "split threadSum's strided accumulation into even/odd-iteration partial sums (pairwise-style), combined at the end",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_reduction_result": "exact"
+        },
+        "per_label_results": {
+          "final_reduction_result": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "a60cd2e7f8612abf22a7720ca7e788e5"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "a60cd2e7f8612abf22a7720ca7e788e5"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "a60cd2e7f8612abf22a7720ca7e788e5"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "not_available",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "PASS",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "PASS"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "atomicCost",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_ATOMIC_1__07-20-2026_t08_52_15",
+        "trial": 1,
+        "code_version": 4
+      },
+      "diff": "split woAtomicOnGlobalMem<T>'s [begin,end) accumulation at the midpoint into two partial sums added back to the residual acc",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_atomic_output": "exact",
+          "final_nonatomic_output": "exact"
+        },
+        "per_label_results": {
+          "final_atomic_output": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "b5a8fb2c9d05cd26eb157296c5eea391",
+              "injected_md5": "b5a8fb2c9d05cd26eb157296c5eea391"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "b5a8fb2c9d05cd26eb157296c5eea391",
+              "injected_md5": "b5a8fb2c9d05cd26eb157296c5eea391"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "b5a8fb2c9d05cd26eb157296c5eea391",
+              "injected_md5": "b5a8fb2c9d05cd26eb157296c5eea391"
+            }
+          ],
+          "final_nonatomic_output": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "b5a8fb2c9d05cd26eb157296c5eea391",
+              "injected_md5": "b5a8fb2c9d05cd26eb157296c5eea391"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "b5a8fb2c9d05cd26eb157296c5eea391",
+              "injected_md5": "b5a8fb2c9d05cd26eb157296c5eea391"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "b5a8fb2c9d05cd26eb157296c5eea391",
+              "injected_md5": "b5a8fb2c9d05cd26eb157296c5eea391"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_atomic__p_outlier_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_nonatomic__p_outlier_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_nonatomic__p_small_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_atomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_non_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_non_atomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_atomic_output__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_atomic_output__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_non_atomic_output__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_non_atomic_output__p_small_v4.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_atomic__p_outlier_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_nonatomic__p_outlier_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_nonatomic__p_small_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_atomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_non_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_non_atomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_atomic_output__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_atomic_output__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_non_atomic_output__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_non_atomic_output__p_small_v4.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_nonatomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_nonatomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_atomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_non_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_non_atomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_atomic_output__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_atomic_output__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_non_atomic_output__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_non_atomic_output__p_small_v4.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_atomic__p_outlier_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_nonatomic__p_outlier_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_single_input_size_perturbation_sensitivity_nonatomic__p_small_v4.cu": "PASS",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_atomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_non_atomic__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_input_sensitivity_non_atomic__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_atomic_output__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_atomic_output__p_small_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_non_atomic_output__p_outlier_v4.cu": "not_available",
+            "atomicCost-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_ATOMIC_1_mt_size_sensitivity_non_atomic_output__p_small_v4.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    }
+  ]
+}

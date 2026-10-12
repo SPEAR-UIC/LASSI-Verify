@@ -11,6 +11,8 @@ import sys
 import csv
 import json
 import re
+import math
+import secrets
 import time
 import gc
 from datetime import datetime
@@ -23,6 +25,7 @@ import lassi.get_power
 import lassi.pipeline_methods
 import lassi.verify
 import lassi.monitor
+import lassi.gpu_health
 from lassi.get_power import report_gpu_memory, query_gpu_state
 from lassi.format_colors import color
 from lassi.prompt_dictionary import PromptDictionary
@@ -52,6 +55,22 @@ def _strip_lassi_verify_stdout(stdout_text):
     return stripped.strip()
 
 
+def _apply_witness_fallback_if_needed(code, use_fallback_design):
+    """After code_insert_witness_chain() re-installs a variant's harness (which always
+    canonicalizes to the PRIMARY sentinel device-function design internally), override its
+    device-function bodies with the snapshot-based FALLBACK design when the source-level
+    non-interference gate determined this kernel needs it. Propagates the one Stage-0 decision
+    to every later variant/zero-shot re-insertion in the trial rather than re-running the
+    (expensive) gate per attempt — source is treated as the specification for which design this
+    kernel needs (see planning/LASSI_Verify_Phase2_Bridge.md Step 3). No-op when the flag is
+    False, or when the expected two device functions aren't found (leaves the already-inserted
+    primary design in place rather than risking a partial/corrupting edit)."""
+    if not use_fallback_design:
+        return code
+    _fb_code, _n_replaced = lassi.verify._enforce_fallback_witness_device_fns(code)
+    return _fb_code if _n_replaced == 2 else code
+
+
 def _build_attempt_record(app_name, trial_number, code_block_index, attempt_number,
                           is_final_attempt, generation_type, sc_trigger,
                           llm_temperature, compile_status, execute_status,
@@ -59,7 +78,8 @@ def _build_attempt_record(app_name, trial_number, code_block_index, attempt_numb
                           tier1_verdict, tier1_instrumented_labels, tier1_diagnostic,
                           tier2_verdict, tier2_instrumented_labels, tier2_diagnostic,
                           tier3_verdict, tier3_diagnostic,
-                          judge_verdict, final_verdict, override_applied,
+                          judge_baseline_verdict, final_verdict, override_applied,
+                          judge_response_text="",
                           is_best_code=False):
     """Build one Table 2 (per-attempt) row dict for the attempt log CSV.
     Called at each self-correction overwrite (intermediate attempt) and after the
@@ -122,8 +142,20 @@ def _build_attempt_record(app_name, trial_number, code_block_index, attempt_numb
         "tier3_relations_failed": t3d.get("relations_failed", 0),
         "tier3_failed_relation": t3d.get("relation_name") or None,
         "tier3_failed_type": t3d.get("relation_type") or None,
-        # --- Judge + combined verdict (final attempt only; None for intermediate) ---
-        "judge_verdict": judge_verdict,
+        # --- Judge baseline + framework verdict (judge-as-baseline design) ---
+        # judge_baseline_verdict: raw LLM judge output captured PRE-tier; never overridden.
+        #   Populated on every attempt that reached the judge (compile+execute success);
+        #   None on rows where the judge was not invoked (compile/execute SC failures).
+        # final_verdict: framework verdict derived from tier verdicts alone (LASSI codes)
+        #   or from the empirical verdict / judge baseline (zero-shot codes). Judge baseline
+        #   does NOT participate in deciding this for LASSI codes.
+        "judge_baseline_verdict": judge_baseline_verdict,
+        # Full LLM judge prose (verbatim) for this attempt's judge call. Empty string
+        # when the judge wasn't invoked (compile/execute failed before the judge stage,
+        # or run_llm_judge=False and not zero-shot). Persisted on every attempt that
+        # reached the judge, including SC intermediates, so cross-attempt verdict
+        # shifts can be inspected. Multi-line prose; CSV writers quote it with QUOTE_MINIMAL.
+        "judge_response_text": judge_response_text,
         "final_verdict": final_verdict,
         "override_applied": override_applied,
         "is_best_code": is_best_code,
@@ -149,10 +181,40 @@ ATTEMPT_LOG_FIELDNAMES = [
     "tier3_verdict", "tier3_tested_relation_names",
     "tier3_relations_tested", "tier3_relations_passed", "tier3_relations_failed",
     "tier3_failed_relation", "tier3_failed_type",
-    # Judge + combined verdict
-    "judge_verdict", "final_verdict", "override_applied", "is_best_code",
+    # Judge baseline + framework verdict
+    "judge_baseline_verdict", "judge_response_text",
+    "final_verdict", "override_applied", "is_best_code",
 ]
 
+
+def _condense_t3_filter_reason(result_entry):
+    """Condense one run_metamorphic_variants() result entry into a short (<=2 line)
+    OBSERVED reason string, for feeding into the Tier 3 contract-regeneration retry.
+
+    This surfaces what the deterministic source filter actually measured — the same
+    nature as the T1/T2 retry feedback — so the LLM can infer the computation's
+    structure (e.g. "output did not scale" -> nonlinear) rather than re-guessing
+    blindly. It reports observations only; it never tells the LLM what to propose.
+
+    - Checked relations (verdict PASS/FAIL) carry a "diagnostic" dict whose "summary"
+      is a human-readable multi-line string (headline + concrete numeric example).
+      We keep the first two non-empty lines.
+    - SKIP entries (variant insertion/compile/execute failure) have no diagnostic;
+      we use the "reason" field.
+    Returns "source_status=..." only as a last resort so behaviour never regresses.
+    """
+    if not isinstance(result_entry, dict):
+        return "source_status=unknown"
+    diag = result_entry.get("diagnostic")
+    if isinstance(diag, dict) and diag.get("summary"):
+        lines = [ln.strip() for ln in str(diag["summary"]).splitlines() if ln.strip()]
+        if lines:
+            return " | ".join(lines[:2])
+    reason = result_entry.get("reason")
+    if reason:
+        return f"not applied: {reason}"
+    verdict = result_entry.get("verdict", "unknown")
+    return f"source_status={verdict}"
 
 
 def auto_code_llmgeneration_pipeline(prompts,
@@ -212,8 +274,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                                      run_llm_judge=True,     # Enable LLM-as-a-judge functional equivalence check (pre-Tier-1/2 stop-gap; disable for pure three-tier mode)
                                      run_tier3=False,        # Enable Tier 3 metamorphic testing
                                      tier3_tolerance=1e-5,   # Default relative tolerance for metamorphic relation checks (slightly looser than Tier 2 to account for two independently-accumulated FP runs)
+                                     run_witness_chain=True,  # Enable witness-chain harness (cheat-resistant loop-deletion detection) via a SEPARATE Stage 0 insertion step + deterministic per-variant re-insertion; requires run_tier2 (uses the [witness_chain_state] passthrough comparison)
                                      verify_zeroshot=True,   # Enable empirical Tier 1/2/3 verification of the zero-shot code (single attempt, fail-fast, no retries; results recorded separately from LLM judge)
-                                     attempt_log_file_path=None  # Path to per-attempt CSV (Table 2 ★); None = skip writing
+                                     attempt_log_file_path=None,  # Path to per-attempt CSV (Table 2 ★); None = skip writing
+                                     tolerance_safety_factor=None  # Optional per-kernel override of the ULP safety factor N for Tier 2 / Tier 3 numerical comparison; when None, framework uses max(16, ceil(log2(buffer_size))) per planning/ulp_aware_tolerance_design.md
                                     ):
 
     # -----------------
@@ -226,10 +290,28 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["experiment"] = experiment
     experiment_data["app_name"] = file_name
     experiment_data["code_line_count"] = lines_of_code
+
+    # Per-kernel buffer classification (planning/LASSI_Verify_Phase2_Bridge.md Step 1):
+    # {label: record} dict from lassi_verify_analysis/buffer_classification/{app_name}_
+    # buffer_classification.json if this kernel has been through the offline stability
+    # classification pass, else None. Loaded once per trial and passed into the Tier-2
+    # verdict call sites that actually gate variant acceptance (compare_passthrough_outputs()
+    # falls back to its default type-derived tolerance when this is None — most kernels,
+    # not yet classified, are completely unaffected).
+    tier2_buffer_classification = lassi.verify.load_buffer_classification(app_name)
     experiment_data["llm"] = model
     experiment_data["llm_coder"] = model_coder
     experiment_data["llm_judge"] = model_judge
-    
+
+    # Schema-registration safeguard (added 2026-08-21, after a writing-agent review caught the
+    # witness_chain_fallback_status field silently producing a CSV header/row misalignment —
+    # experiment_data.keys() is fixed at dict.fromkeys(DATAFIELDNAMES, None) in run_lassi.py
+    # before this function runs; any NEW key added anywhere below without a matching
+    # DATAFIELDNAMES registration would silently append an unlabeled trailing CSV column
+    # instead of erroring). Snapshot the registered key set now; asserted unchanged right
+    # before the CSV write at the end of this function.
+    _experiment_data_registered_keys = frozenset(experiment_data.keys())
+
     actual_energy = 0
     actual_ave_power = 0
     idle_energy_joules = 0
@@ -262,6 +344,9 @@ def auto_code_llmgeneration_pipeline(prompts,
     tier1_exhausted = False                    # Set when T1 per-code budget exhausted; reset each iteration
     tier1_verdict = "SKIP"          # Most recent Tier 1 verdict for the current code
     tier1_diagnostic = {}           # Most recent Tier 1 assertion diagnostic
+    _last_failing_t1_instr = ""    # T1 instrumented labels of the most recently popped T1-failing code; consumed
+                                   # by the top-of-loop exhaustion safety-net handler (the failing code itself
+                                   # has been popped from code_blocks by then, so labels cannot be re-extracted).
     force_new_plan = False          # Set when any per-code tier exhaustion requires a new refactoring plan
     exe_output_source = ""
     source_orig_stdout = ""    # stdout from SOURCE_orig execution (Stage 0)
@@ -293,6 +378,25 @@ def auto_code_llmgeneration_pipeline(prompts,
                                     # complementary/orthogonal strategies rather than re-proposing applied ones.
     iteration_log = {}  # initiate the iteration log for each code version
     verification_log = {}  # iniiate a dict log for code verifications
+    # GPU health timeline — populated by lassi.gpu_health.snapshot() at pipeline start,
+    # before vanilla LLM, and before each LASSI version. Snapshots with health_verdict
+    # != 'OK' at gating points (pipeline_start, pre_vanilla_llm) abort the trial early.
+    # Mid-pipeline non-OK snapshots are recorded but do not abort — they let downstream
+    # data analysis filter out trials whose environment degraded during execution.
+    verification_log["gpu_health_timeline"] = []
+
+    # --- Chain verification seed (per-trial, runtime-injected via env var) ---
+    # Generate a fresh 64-bit random seed at the top of each trial. This seed is unknown to
+    # the LLM at code-generation time, which is the property that makes the witness-chain
+    # mechanism cheat-resistant against loop-deletion attacks (chacha20 v5-style). The seed
+    # is injected into every subprocess that executes an instrumented binary (SOURCE_verify,
+    # basellm_zs_verify, each LASSI variant, each T3 metamorphic variant) via the
+    # LASSI_VERIFY_SEED environment variable. See planning/chain_verify_design.md for full
+    # design and lassi/context/Invariant_Assertions_Catalog.md "Chain Verification" section
+    # for the catalog-side instrumentation pattern.
+    _trial_witness_chain_seed_hex = f"0x{secrets.randbits(64):016x}"
+    lassi.code_manager.set_witness_chain_seed(_trial_witness_chain_seed_hex)
+    verification_log["witness_chain_seed"] = _trial_witness_chain_seed_hex
     # iteration_log[version] = {"self_correction": 0, "energy_refactor": 0, "LLM_temperature": 0}
     # --- Table 2 per-attempt log state variables ---
     attempt_number = 0              # Attempt counter within the current code_block_index; resets on fresh generation
@@ -343,9 +447,29 @@ def auto_code_llmgeneration_pipeline(prompts,
         print(f"🔍 Detected GPU vendor: {detected_vendor.upper()}")
 
     report_gpu_memory()
-        
-    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END) 
-    
+
+    # --- GPU health pre-flight (gating) ---
+    # Capture baseline GPU state + run a known-answer compute probe BEFORE any
+    # trial work. Catches a GPU already in a bad state (Xid fault, ECC errors,
+    # producing wrong arithmetic) so we don't waste a 30-60 min trial on
+    # corrupted output. KERNEL_TEST5_CHACHA_2 (06-20-2026) was a trial where
+    # this gate would have caught — or at least flagged — the transient.
+    _gpu_health_start = lassi.gpu_health.snapshot('pipeline_start', run_compute_test=True)
+    verification_log["gpu_health_timeline"].append(_gpu_health_start)
+    if _gpu_health_start['health_verdict'].startswith('FAIL'):
+        print(color.RED + color.BOLD +
+              f"\n[PIPELINE ABORT] GPU health check failed at pipeline start: "
+              f"{_gpu_health_start['health_verdict']}. "
+              f"Trial cannot proceed — fix the GPU state and re-run." + color.END)
+        experiment_data["stage0_abort_reason"] = "gpu_health_pipeline_start"
+        _abort_monitor_log_path = os.path.join(experiment_data_directory,
+            "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+        sys.stdout.flush()
+        lassi.monitor.save_log(_abort_monitor_log_path)
+        return False
+
+    print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
+
     # --------------------------------
     # ----- STAGE 0: TEST SOURCE -----
     # --------------------------------
@@ -489,8 +613,14 @@ def auto_code_llmgeneration_pipeline(prompts,
     verification_log["tier2_spec_output"] = ""          # populated after Stage 1 execution
     verification_log["tier2_results"] = []              # per-iteration list of {code_version, verdict, diagnostic}
     verification_log["tier2_pass_count"] = 0             # count of iterations where Tier 2 PASS (key matches CSV column and experiment_data field)
-    verification_log["judge_discrepancies"] = []        # cases where LLM judge and three-tier verdict disagree
-    # judge_discrepancy entry schema: {code_version, zero_shot, type ("false_positive"|"false_negative"), judge_verdict, tier2_verdict, final_verdict}
+    verification_log["judge_discrepancies"] = []        # per-attempt log of (judge baseline vs framework verdict)
+    # judge_discrepancy entry schema (judge-as-baseline design):
+    #   {code_version, zero_shot, judge_baseline_verdict, judge_response_text,
+    #    tier1_verdict, tier2_verdict, tier3_verdict, final_verdict}
+    # One entry per final attempt that reached the judge. No `type` tag — downstream analysis
+    # computes false positives (judge VALID + final INVALID) and false negatives (judge INVALID
+    # + final VALID) directly from the raw verdict pair. judge_response_text is the verbatim
+    # LLM judge prose for the attempt, persisted so the WHY behind each verdict is inspectable.
     # Tier 3 verification log fields (initialized here; populated after Stage 0 contract generation)
     verification_log["tier3_enabled"] = run_tier3
     verification_log["tier3_tolerance"] = tier3_tolerance
@@ -509,6 +639,37 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["zeroshot_tier3_verdict"] = "SKIP"
     experiment_data["zeroshot_empirical_verdict"] = "SKIP"
 
+    # basellm_zs_verify: the single combined T1+T2 instrumented compile+execute of
+    # the zero-shot (vanilla LLM) code. This binary serves both purposes — its stdout
+    # is parsed for per-tier verdicts (T1 → T2 → T3 with fail-fast gating) AND its
+    # runtime/energy is captured as raw instrumented data. No calculated diff vs
+    # source — the primary fairness comparison is uninstrumented zs (zeroshot_runtime_s)
+    # vs uninstrumented LASSI best (lassiee_clean_runtime_s). Populated inside the
+    # verify_zeroshot block (one LLM call + one compile+execute per trial).
+    experiment_data["basellm_zs_verify_status"] = "skipped"
+    experiment_data["basellm_zs_verify_runtime_s"] = "NA"
+    experiment_data["basellm_zs_verify_energy_J"] = "NA"
+
+    # Chain Verification — per-trial fields populated by the framework as the trial
+    # progresses. witness_chain_status records which decision-tree case the Stage 1 LLM
+    # matched (or "applied_creative" / "soft_flag_no_safe_site"); witness_chain_mismatches
+    # counts LASSI variants whose witness_chain_state diverged from source's value
+    # (cheat-detection signal). Default values cover trials where the witness-chain never
+    # activates (e.g., source has no benchmark timing loop).
+    experiment_data["witness_chain_status"] = "not_applied_no_timing_loop"
+    experiment_data["witness_chain_mismatches"] = 0
+
+    # Stage 1 per-trial test counts: how many tests of each tier were successfully
+    # instrumented in SOURCE_verify and made active for THIS trial. Captures the
+    # stochastic Stage 1 LLM behavior (insertion + contract generation + source filter)
+    # so cross-trial drift in test coverage is visible in the data — supports
+    # per-trial verify-pass@k as the framework's correctness metric. Defaults to 0;
+    # each value is populated as its Stage 1 step succeeds. Trials that abort before
+    # a step keep the 0 default for the unreached tier.
+    experiment_data["tier1_test_count"] = 0
+    experiment_data["tier2_test_count"] = 0
+    experiment_data["tier3_test_count"] = 0
+
 
     # -----------------------------------------------------------
     # ----- STAGE 1: INSERT VERIFY INSTRUMENTATION -----
@@ -521,123 +682,705 @@ def auto_code_llmgeneration_pipeline(prompts,
     #  receives the unaltered source code (not the assertion-instrumented version).
     # original_input_code is now accessible as code_blocks[0] (SOURCE_orig).
     original_input_code = input_code
-
-    input_code = lassi.verify.code_insert_asserts(
-        input_content_llmjudge_dict["source_code"],
-        llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt,
-        code_description=llm_code_description_response
-    )
-
-    input_content_llmjudge_dict["source_code"] = input_code
-
-    # Abort if Tier 1 produced no assertion labels — cannot verify without Tier 1 coverage.
-    _t1_labels = re.findall(r'LASSI-VERIFY ASSERTION', input_code)
-    if not _t1_labels:
-        print(color.RED + color.BOLD +
-              "\n[ABORT] Tier 1: code_insert_asserts() produced no assertion blocks in SOURCE_verify. "
-              "Cannot run LASSI-Verify without Tier 1 coverage. Exiting pipeline." + color.END)
-        experiment_data["stage0_abort_reason"] = "no_t1_assertions"
-        return False
-
-    # --- Tier 2: Insert passthrough data dump blocks into the already-asserted code ---
-    # code_insert_passthrough() is called on the Tier-1-instrumented code so both assertion
-    # blocks and passthrough blocks appear in SOURCE_verify and are carried through all
-    # subsequent LLM-generated transformations unaltered.
-    # The passthrough prompt explicitly preserves existing LASSI-VERIFY ASSERTIONS blocks.
-    if run_tier2:
-        passthrough_code = lassi.verify.code_insert_passthrough(
-            input_code,  # already has Tier 1 assertions
-            llm_source, model, num_ctx, system_prompt, code_analysis, display_response, verifyprompt=verifyprompt,
-            code_description=llm_code_description_response
-        )
-        if passthrough_code != "":
-            input_code = passthrough_code
-            input_content_llmjudge_dict["source_code"] = input_code
-            print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify -----")
-        else:
-            print(color.RED + color.BOLD +
-                  "\n[ABORT] Tier 2: code_insert_passthrough() returned empty — cannot run "
-                  "LASSI-Verify without Tier 2 coverage. Exiting pipeline." + color.END)
-            experiment_data["stage0_abort_reason"] = "no_t2_passthrough"
-            return False
-
-    # Write the instrumented source to disk so test_source_code compiles and runs it —
-    # not the original .cu file. This gives true SOURCE_verify metrics that include
-    # any overhead from the inserted invariant assertion checks (and passthrough blocks if Tier 2 enabled).
-    # Saved to the experiment folder (not alongside the original source) — it is an experiment artifact,
-    # not a permanent modification of the benchmark source. After this point, the pipeline always uses
-    # code_blocks[1] (in-memory) and never reads this file again.
+    _original_source_for_judge = input_content_llmjudge_dict.get("source_code", input_code)
     _, source_ext = os.path.splitext(source_file_path)
     verify_source_file_path = os.path.join(experiment_data_directory, file_name + "_verify_Trial" + str(trial_number) + source_ext)
-    with open(verify_source_file_path, 'w') as _vf:
-        _vf.write(input_code)
-    print(f"\n----- LASSI-Verify: instrumented source written to {verify_source_file_path} -----")
 
-    """Run the instrumented source code to capture SOURCE_verify baseline metrics.
-    Compiles and executes verify_source_file_path (the assertion-instrumented .cu file),
-    so history[1] reflects the true overhead of the invariant assertion instrumentation."""
-    _source_verify_result = lassi.pipeline_methods.test_source_code(app_name, experiment_data_directory, code_version, trial_number, verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
-                                                                                            exe_input_parameters, code_compiler, code_compiler_kwds,
-                                                                                            yes_execute, power_measure, input_content_llmjudge_dict,
-                                                                                            energy_history, power_history, runtime_history, valid_code_history
-                                                                                           )
-    if _source_verify_result in ("COMPILE_ERROR", "EXECUTE_ERROR"):
-        _abort_reason = _source_verify_result
-        if _abort_reason == "COMPILE_ERROR":
-            _abort_msg = ("SOURCE_verify failed to compile — Tier 1/2 instrumentation "
-                          "introduced a syntax error.")
-        else:
-            _abort_msg = ("SOURCE_verify failed to execute (runtime error / segfault) — "
-                          "Tier 1/2 instrumentation caused a crash.")
-        print(color.RED + color.BOLD + "\n[STAGE 0 ABORT] " + _abort_msg +
-              " Aborting trial." + color.END)
-        verification_log["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
-        experiment_data["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
-        _abort_monitor_log_path = os.path.join(experiment_data_directory,
-            "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
-        sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
-        lassi.monitor.save_log(_abort_monitor_log_path)
-        return False
-    (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict, sourcecode_total_energy_joules, sourcecode_ave_power, duration,
-     energy_history, power_history, runtime_history, valid_code_history,
-     source_verify_stdout) = _source_verify_result
-    valid_code_history[-1] = "SOURCE_verify"  # Override "SOURCE" label from test_source_code
-    experiment_data["source_verify_runtime_s"] = runtime_history[1]   # Wall-clock time of instrumented source (Table 1 ★)
+    # --- Stage 0 T1 instrumentation retry loop ---
+    # The Stage 1 LLM occasionally selects T1 assertions that fire FAIL on SOURCE itself
+    # (e.g., `*_unchanged` on a kernel output buffer the source legitimately mutates).
+    # Rather than aborting the trial on the first such miss, give the LLM up to
+    # STAGE0_T1_RETRY_MAX attempts: on each FAIL, re-prompt code_insert_asserts() with
+    # explicit feedback identifying the failing labels so it can revise its selection.
+    # This is the structural symmetry counterpart to the per-tier self-correction loops
+    # used everywhere else in the framework — Stage 0 was the only tier-evaluation point
+    # without one. Pass@k=1 robustness for real-world use depends on this.
+    STAGE0_T1_RETRY_MAX = 3
+    _t1_retry_feedback = None
+    _stage0_t1_success = False
+    _stage0_history_appended_this_attempt = False
+    # Variables that need to persist past the loop on success:
+    idle_energy_joules = 0
+    idle_ave_power = 0
+    sourcecode_total_energy_joules = 0
+    sourcecode_ave_power = 0
+    duration = 0
+    source_verify_stdout = ""
+    # Witness-chain status for SOURCE_verify (set by the witness-chain insertion step each attempt;
+    # the final-attempt value persists). Default covers run_witness_chain/run_tier2 disabled.
+    _witness_chain_status = "not_applied_no_timing_loop"
+    # Default covers witness chain disabled/not-applied (non-interference gate never runs);
+    # overwritten inside the gate to "not_needed" (primary passed) or a fallback outcome.
+    experiment_data["witness_chain_fallback_status"] = "not_applicable"
+    # T1+T2-only code (no witness chain), captured just before witness-chain insertion each
+    # attempt, so the final-attempt value survives past the loop for the non-interference gate.
+    _t1t2_only_code = None
+    # Set True inside the gate when SOURCE_verify needed the snapshot-based fallback design.
+    # Propagated to every later per-variant/zero-shot witness-chain re-insertion in this trial
+    # (see _apply_witness_fallback_if_needed below) instead of re-running the non-interference
+    # gate per attempt — source is treated as the specification for which design this kernel
+    # needs, per planning/LASSI_Verify_Phase2_Bridge.md Step 3. Known, accepted residual gap:
+    # a variant that regresses from a safe source into an in-place pattern would inherit the
+    # primary design undetected — not re-verified per attempt, propagated only.
+    _witness_chain_use_fallback_design = False
 
+    for _stage0_attempt in range(1, STAGE0_T1_RETRY_MAX + 1):
+        if _stage0_attempt > 1:
+            print(color.BOLD + color.YELLOW +
+                  f"\n----- [STAGE 0 RETRY {_stage0_attempt - 1}/{STAGE0_T1_RETRY_MAX - 1}] "
+                  f"Re-attempting T1 instrumentation with feedback -----" + color.END)
+            # Pop the history rows appended by the previous (failed) test_source_code call
+            # so the retry's appends overwrite cleanly rather than stacking.
+            if _stage0_history_appended_this_attempt:
+                for _hist in (energy_history, power_history, runtime_history, valid_code_history):
+                    if _hist:
+                        _hist.pop()
+                _stage0_history_appended_this_attempt = False
+            # Reset the judge-dict source so each retry re-instruments from the original.
+            input_content_llmjudge_dict["source_code"] = _original_source_for_judge
+
+        # --- T1 insertion (with retry feedback if applicable) ---
+        input_code = lassi.verify.code_insert_asserts(
+            input_content_llmjudge_dict["source_code"],
+            llm_source, model, num_ctx, system_prompt, code_analysis, display_response,
+            verifyprompt=verifyprompt,
+            code_description=llm_code_description_response,
+            feedback=_t1_retry_feedback,
+        )
+        input_content_llmjudge_dict["source_code"] = input_code
+
+        # Abort path: code_insert_asserts produced no assertion blocks at all. Try retry first.
+        _t1_labels = re.findall(r'LASSI-VERIFY ASSERTION', input_code)
+        if not _t1_labels:
+            if _stage0_attempt < STAGE0_T1_RETRY_MAX:
+                _t1_retry_feedback = (
+                    "The previous Stage 1 attempt produced NO Tier 1 assertion blocks at all. "
+                    "You MUST insert at least one LASSI-VERIFY ASSERTIONS block plus the "
+                    "[tier1_complete] sentinel. Re-read the catalog Step 2 (Select Minimal "
+                    "Relevant Assertions) and ensure at least one Layer 1 universal assertion "
+                    "is inserted on a safe target (e.g., output pointer non-null after D->H copy)."
+                )
+                continue
+            print(color.RED + color.BOLD +
+                  "\n[ABORT] Tier 1: code_insert_asserts() produced no assertion blocks "
+                  "after exhausting retries. Cannot run LASSI-Verify without Tier 1 coverage."
+                  + color.END)
+            experiment_data["stage0_abort_reason"] = "no_t1_assertions"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+
+        # Per-trial T1 test count (overwritten each retry; final-attempt value sticks)
+        _t1_labels_str = lassi.verify.extract_tier1_labels(input_code)
+        experiment_data["tier1_test_count"] = len(
+            [s for s in _t1_labels_str.split(",") if s.strip()]) if _t1_labels_str else 0
+
+        # --- T2 passthrough insertion (if enabled), with inner retry loop ---
+        # Applied to the T1-instrumented code so both block types appear in SOURCE_verify and
+        # are carried through subsequent LLM transformations. Passthrough prompt preserves
+        # existing LASSI-VERIFY ASSERTIONS blocks.
+        #
+        # The T2 LLM call can return empty for two reasons:
+        #   (a) Response had no ``` code fence → extraction failed (LLM produced prose only,
+        #       refused, or got cut by a token limit before opening a fence)
+        #   (b) Line-count guard rejected a truncated output (LLM used "// ... rest unchanged"
+        #       placeholders instead of emitting the complete instrumented source)
+        # Both are recoverable with feedback-driven re-prompting. This inner loop gives T2
+        # its own retry budget within the current T1 attempt — matching the structural
+        # symmetry argument that motivated the T1 retry. Pass@k=1 robustness depends on it.
+        # T2 retry exhaustion aborts the trial (the outer T1 loop will not "rescue" T2 by
+        # retrying T1, since T1 already succeeded in this iteration — burning T1 retries on
+        # T2 problems would just waste LLM calls).
+        if run_tier2:
+            STAGE0_T2_RETRY_MAX = 3
+            _t2_retry_feedback = None
+            passthrough_code = ""
+            for _t2_attempt in range(1, STAGE0_T2_RETRY_MAX + 1):
+                if _t2_attempt > 1:
+                    print(color.BOLD + color.YELLOW +
+                          f"\n----- [STAGE 0 T2 RETRY {_t2_attempt - 1}/{STAGE0_T2_RETRY_MAX - 1}] "
+                          f"Re-attempting passthrough insertion with feedback -----" + color.END)
+                passthrough_code = lassi.verify.code_insert_passthrough(
+                    input_code,  # T1-instrumented code from this iteration's T1 call
+                    llm_source, model, num_ctx, system_prompt, code_analysis, display_response,
+                    verifyprompt=verifyprompt,
+                    code_description=llm_code_description_response,
+                    feedback=_t2_retry_feedback,
+                )
+                if passthrough_code != "":
+                    break  # T2 insertion succeeded
+                # Empty — build feedback for next T2 attempt
+                if _t2_attempt < STAGE0_T2_RETRY_MAX:
+                    _t2_retry_feedback = (
+                        "The previous Tier 2 passthrough instrumentation attempt returned EMPTY "
+                        "— your output did not yield a complete instrumented source code block "
+                        "that the pipeline's extractor could read.\n\n"
+                        "Possible causes:\n"
+                        "  1. The response did not include any ``` code fences. The extractor "
+                        "needs the complete output wrapped in ```...``` (or ```cpp ... ```) "
+                        "fences to recover the instrumented source.\n"
+                        "  2. The response truncated the source using placeholder comments "
+                        "(e.g. \"// ... [other kernels unchanged] ...\", \"// rest of code "
+                        "unchanged\", \"// same as before\"). The line-count guard rejects any "
+                        "output shorter than the input — instrumentation only ADDS lines.\n"
+                        "  3. The response output explanation prose only without an actual "
+                        "code block. The Stage 1 contract requires the complete instrumented "
+                        "source as the output.\n\n"
+                        "For this re-attempt:\n"
+                        "  - Output the COMPLETE source code from the first #include line "
+                        "through the final closing brace, with passthrough blocks ADDED in "
+                        "addition to all existing code.\n"
+                        "  - Wrap the entire output in ``` fences (```cpp ... ``` is fine).\n"
+                        "  - Do NOT use ellipsis, \"rest unchanged\", or any shorthand notation.\n"
+                        "  - Preserve every existing LASSI-VERIFY ASSERTIONS block unchanged.\n"
+                        "  - Add LASSI-VERIFY PASSTHROUGH blocks at observation points per the "
+                        "catalog guidance — at minimum one block capturing the kernel-written "
+                        "output buffer after its D->H copy."
+                    )
+
+            if passthrough_code != "":
+                input_code = passthrough_code
+                input_content_llmjudge_dict["source_code"] = input_code
+                _t2_success_attempt_msg = (f" (succeeded on T2 attempt {_t2_attempt}/{STAGE0_T2_RETRY_MAX})"
+                                            if _t2_attempt > 1 else "")
+                print(f"\n----- LASSI-Verify Tier 2: passthrough blocks inserted into SOURCE_verify{_t2_success_attempt_msg} -----")
+                _t2_labels_str = lassi.verify.extract_tier2_labels(input_code)
+                experiment_data["tier2_test_count"] = len(
+                    [s for s in _t2_labels_str.split(",") if s.strip()]) if _t2_labels_str else 0
+            else:
+                # T2 retries exhausted within this T1 attempt — abort the trial. Do NOT fall
+                # back to retrying T1 (T1 succeeded; further T1 retries won't fix T2 quality).
+                print(color.RED + color.BOLD +
+                      f"\n[ABORT] Tier 2: code_insert_passthrough() returned empty after "
+                      f"{STAGE0_T2_RETRY_MAX} attempts — cannot run LASSI-Verify without Tier 2 "
+                      f"coverage. Exiting pipeline." + color.END)
+                experiment_data["stage0_abort_reason"] = "no_t2_passthrough"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+        # --- Chain verification harness insertion (SEPARATE Stage 1 step — Option D) ---
+        # Installed via its own focused LLM call (only the Witness_Chain_Harness.md catalog is
+        # loaded) so it does not compete with regular Tier 1 assertion selection. Applies only
+        # when a benchmark timing/repeat loop is present; otherwise returns the code unchanged.
+        # Requires run_tier2 because the chain state is compared via the [witness_chain_state]
+        # passthrough block. Runs inside the Stage 0 retry loop so a broken harness is caught and
+        # re-instrumented by the existing SOURCE_verify compile/execute retry below.
+        if run_witness_chain and run_tier2:
+            # Snapshot the T1+T2-only code (pre-witness-chain) for the non-interference gate
+            # below — the only reference build that could never carry witness-chain-induced
+            # corruption, since the chain hasn't been inserted into it yet.
+            _t1t2_only_code = input_code
+            _cv_code, _witness_chain_status = lassi.verify.code_insert_witness_chain(
+                input_code, llm_source, model, num_ctx, system_prompt, display_response,
+                verifyprompt=verifyprompt, code_description=llm_code_description_response,
+                is_variant=False,
+            )
+            input_code = _cv_code
+            input_content_llmjudge_dict["source_code"] = input_code
+            print(f"\n----- LASSI-Verify Chain Verification: status={_witness_chain_status} -----")
+            # Persist the status NOW (not just at the end-of-Stage-0 finalization at
+            # ~line 907) so that if Stage 0 aborts later (compile error, execute timeout,
+            # T1 self-check failure on the instrumented source), the CSV/JSON still
+            # reflect the actual witness-chain status from this attempt rather than
+            # the stale "not_applied_no_timing_loop" default initialized at ~line 568.
+            # Idempotent: the post-Stage-0 finalization overwrites with the same final
+            # value on the happy path; on a retry the value here gets overwritten by
+            # the next iteration's insertion. Either way, the most recent applied
+            # status survives a trial abort.
+            experiment_data["witness_chain_status"] = _witness_chain_status
+            verification_log["witness_chain_status"] = _witness_chain_status
+
+        # --- Write SOURCE_verify and run it ---
+        # Instrumented source is an experiment artifact, not a permanent modification of the
+        # benchmark source. After this point, the pipeline always uses code_blocks[1] (in-memory).
+        with open(verify_source_file_path, 'w') as _vf:
+            _vf.write(input_code)
+        print(f"\n----- LASSI-Verify: instrumented source written to {verify_source_file_path} (attempt {_stage0_attempt}/{STAGE0_T1_RETRY_MAX}) -----")
+
+        _source_verify_result = lassi.pipeline_methods.test_source_code(
+            app_name, experiment_data_directory, code_version, trial_number,
+            verify_source_file_path, build_script, make_script, directory, source_lang, target_lang,
+            exe_input_parameters, code_compiler, code_compiler_kwds,
+            yes_execute, power_measure, input_content_llmjudge_dict,
+            energy_history, power_history, runtime_history, valid_code_history,
+        )
+        if _source_verify_result in ("COMPILE_ERROR", "EXECUTE_ERROR"):
+            # Compile/execute failure of SOURCE_verify itself: retry with targeted feedback.
+            # Different failure mode than T1-assertion-FAIL but same retry budget.
+            _abort_reason = _source_verify_result
+            if _stage0_attempt < STAGE0_T1_RETRY_MAX:
+                if _abort_reason == "COMPILE_ERROR":
+                    _t1_retry_feedback = (
+                        "The previous Stage 1 attempt produced T1/T2 instrumentation that "
+                        "introduced a SYNTAX ERROR — the instrumented source failed to compile. "
+                        "Re-inspect every inserted block: check matched braces, valid printf "
+                        "format strings, all referenced variables in scope, all required headers "
+                        "included, and that no LASSI-VERIFY block accidentally truncated or "
+                        "overwrote surrounding source code."
+                    )
+                else:
+                    _t1_retry_feedback = (
+                        "The previous Stage 1 attempt produced T1/T2 instrumentation that "
+                        "compiled but CAUSED A RUNTIME CRASH (segfault / illegal memory access). "
+                        "Common causes: an assertion dereferences a pointer before the "
+                        "corresponding allocation/copy, accesses an array index out of bounds, "
+                        "or runs in a kernel context. Re-inspect inserted assertions and ensure "
+                        "each only reads data that is provably valid at its insertion point."
+                    )
+                continue
+            # Exhausted retries — original abort path.
+            if _abort_reason == "COMPILE_ERROR":
+                _abort_msg = ("SOURCE_verify failed to compile after exhausting retries — "
+                              "Tier 1/2 instrumentation repeatedly introduced a syntax error.")
+            else:
+                _abort_msg = ("SOURCE_verify failed to execute (runtime error / segfault) after "
+                              "exhausting retries — Tier 1/2 instrumentation repeatedly caused a crash.")
+            print(color.RED + color.BOLD + "\n[STAGE 0 ABORT] " + _abort_msg + " Aborting trial." + color.END)
+            verification_log["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
+            experiment_data["stage0_abort_reason"] = "source_verify_" + _abort_reason.lower()
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+
+        # SOURCE_verify compiled + executed. Unpack the result.
+        (idle_energy_joules, idle_ave_power, input_content_llmjudge_dict,
+         sourcecode_total_energy_joules, sourcecode_ave_power, duration,
+         energy_history, power_history, runtime_history, valid_code_history,
+         source_verify_stdout) = _source_verify_result
+        valid_code_history[-1] = "SOURCE_verify"  # Override "SOURCE" label from test_source_code
+        experiment_data["source_verify_runtime_s"] = runtime_history[1]
+        _stage0_history_appended_this_attempt = True
+
+        # --- T1 assertion self-check on SOURCE_verify ---
+        # If T1 assertions fire FAIL on SOURCE itself, the instrumentation is broken (the LLM
+        # asserted invariants that the source legitimately violates). Retry with targeted
+        # feedback listing the failing labels; the LLM should revise its selection.
+        if run_tier2:
+            _t1_verdict, _t1_diagnostic = lassi.verify.check_tier1_assertions(source_verify_stdout)
+            if _t1_verdict == "FAIL":
+                _failing_labels = _t1_diagnostic.get("failing_labels", []) or []
+                print(color.YELLOW + color.BOLD +
+                      f"\n[STAGE 0 T1 FAIL on attempt {_stage0_attempt}/{STAGE0_T1_RETRY_MAX}] "
+                      f"Failing assertions: {_failing_labels}" + color.END)
+                if _stage0_attempt < STAGE0_T1_RETRY_MAX:
+                    _label_list = ", ".join(f"[{lbl}]" for lbl in _failing_labels)
+                    _t1_retry_feedback = (
+                        "The previous Stage 1 instrumentation attempt inserted Tier 1 assertions "
+                        "that fired FAIL when the SOURCE_verify executable was compiled and "
+                        "executed. The assertions you selected do NOT actually hold for the "
+                        "source code's real behavior — they assert invariants that the source "
+                        "legitimately violates.\n\n"
+                        f"Failing assertions: {_label_list}\n\n"
+                        "The most common cause is applying `*_unchanged` assertions to buffers "
+                        "or variables that the source code legitimately mutates (kernel outputs, "
+                        "scratch buffers, accumulators). See the catalog anti-pattern "
+                        "\"*_unchanged Assertions on Mutable Buffers or Mutated Variables\".\n\n"
+                        "For this re-instrumentation:\n"
+                        "  1. Remove or replace the failing assertion(s) listed above.\n"
+                        "  2. Do NOT re-introduce the same failing assertion in the same form.\n"
+                        "  3. If the assertion targeted an output buffer, use output_finite or "
+                        "output_ptr_valid instead of *_unchanged.\n"
+                        "  4. If the assertion targeted a mutable input buffer, choose a different "
+                        "invariant or remove that assertion entirely.\n"
+                        "  5. Keep all OTHER (passing) assertions from your previous attempt — "
+                        "only revise the failing ones."
+                    )
+                    continue
+                # Exhausted retries — original abort path.
+                print(color.RED + color.BOLD +
+                      "\n[STAGE 0 ABORT] SOURCE_verify FAILED its own Tier 1 invariant assertions "
+                      "after exhausting retries — instrumentation cannot be made consistent with "
+                      "the source's actual behavior. Aborting trial." + color.END)
+                print("Failing assertions:", _t1_diagnostic)
+                verification_log["stage0_abort_reason"] = f"tier1_fail: {_t1_diagnostic}"
+                experiment_data["stage0_abort_reason"] = "tier1_assertion_fail"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+        # T1 PASS (or run_tier2 disabled). Done.
+        _stage0_t1_success = True
+        if _stage0_attempt > 1:
+            print(color.BOLD + color.GREEN +
+                  f"\n----- [STAGE 0 RETRY SUCCESS] T1 instrumentation passed on attempt "
+                  f"{_stage0_attempt}/{STAGE0_T1_RETRY_MAX} -----" + color.END)
+        break
+
+    # --- After the retry loop: set up Tier 2 spec / passthrough_outputs (success path) ---
     # Tier 2 source-as-specification reference: stdout from SOURCE_verify execution.
     # Per the source-as-specification premise, SOURCE_verify's observable behavior is the
     # sole correctness criterion. Any LASSI-generated transformation must preserve this behavior.
     passthrough_spec_output = source_verify_stdout
     verification_log["tier2_spec_output"] = passthrough_spec_output
 
+    # --- SOURCE_verify self-consistency / determinism gate ---
+    # Re-execute the already-compiled SOURCE_verify binary once more and compare its
+    # PASSTHROUGH block contents against the first run. The point is to catch
+    # non-deterministic spec generation: if the same binary with the same seed produces
+    # different PASSTHROUGH values across runs, the trial environment is unstable and
+    # every downstream Tier 2 comparison will be against an unreliable baseline.
+    #
+    # Pure framework-internal check — does not depend on any source-code internal
+    # PASS/FAIL print (those are benchmark-specific and we deliberately do not gate on
+    # them). The LASSI_VERIFY_SEED env var is held in code_manager module state, so the
+    # re-execute uses the same seed automatically. Determinism here means "reproducible
+    # within the same ULP-aware tolerance that Tier 2 applies downstream" — NOT byte-for-byte
+    # identical — so legitimate floating-point reduction noise (e.g. an atomically-reduced
+    # residual scalar whose last digits wander run-to-run but sit inside rtol) does not
+    # spuriously abort the trial. The witness_chain_state block stays byte-exact.
+    # Skips power monitoring on the re-run (power_measure=False, short settle) so the
+    # added cost is one extra binary invocation (~8s for chacha; scales with kernel
+    # cost). Catches the chacha20 KERNEL_TEST6 class of failures where the first
+    # SOURCE_verify run produced corrupted output that subsequent runs do not reproduce.
+    if run_tier2 and passthrough_spec_output:
+        _sv_executable = os.path.splitext(verify_source_file_path)[0]
+        print(f"\n----- SOURCE_verify self-consistency check: re-executing binary for determinism comparison -----")
+        try:
+            (_sv2_result, _sv2_stdout, _, _, _, _, _) = lassi.code_manager.execute_code_selectvendor(
+                experiment_data_directory, code_version, False, trial_number,
+                directory, _sv_executable, exe_input_parameters,
+                False,  # power_measure=False — determinism check doesn't need power data
+                "source", target_lang, build_script, make_script,
+                gpu_vendor="auto", wait=1,
+            )
+        except Exception as _sv2_err:
+            print(color.RED + color.BOLD +
+                  f"\n[SOURCE_verify self-consistency] re-execute raised {type(_sv2_err).__name__}: "
+                  f"{str(_sv2_err)[:120]} — treating as non-deterministic and aborting." + color.END)
+            _sv2_result = "EXCEPTION"
+            _sv2_stdout = ""
+
+        # Compare the two runs' PASSTHROUGH output using the SAME tolerance-aware
+        # comparison Tier 2 applies downstream (compare_passthrough_outputs), rather than
+        # a byte-exact string diff. The gate exists to catch specs that are unreliable
+        # *relative to the tolerance Tier 2 will use* — a byte-exact diff is stricter than
+        # that and spuriously aborts on legitimate floating-point reduction noise (e.g. an
+        # atomically-reduced residual scalar whose last ~7 digits wander run-to-run but sit
+        # well inside rtol). compare_passthrough_outputs still compares the
+        # witness_chain_state block byte-exact, so a genuinely wandering witness chain
+        # (real output-poisoning corruption) is still caught here. run1 is treated as the
+        # "spec" and run2 as the "generated" output — the comparison is symmetric in
+        # practice for the same binary re-run.
+        _consistency_verdict, _consistency_diag = lassi.verify.compare_passthrough_outputs(
+            passthrough_spec_output,
+            _sv2_stdout,
+            tolerance=tier2_tolerance,
+            n_safety_override=tolerance_safety_factor,
+        )
+        _consistency_mismatches = _consistency_diag.get("failures", [])
+        verification_log["source_verify_consistency_verdict"] = _consistency_verdict
+        verification_log["source_verify_consistency_mismatches"] = _consistency_mismatches
+        verification_log["source_verify_consistency_run2_status"] = _sv2_result
+
+        # Abort on a hard re-execute failure or a tolerance-exceeding mismatch. A "SKIP"
+        # verdict (no comparable blocks) is not treated as non-determinism — we only got
+        # here because passthrough_spec_output was non-empty, so a SKIP would itself be a
+        # blocks-missing anomaly surfaced as a FAIL by the count check above.
+        if _sv2_result != "0" or _consistency_verdict == "FAIL":
+            print(color.RED + color.BOLD +
+                  f"\n[PIPELINE ABORT] SOURCE_verify self-consistency check failed: "
+                  f"re-execute_status={_sv2_result}, tolerance_verdict={_consistency_verdict}, "
+                  f"mismatches={len(_consistency_mismatches)}. The spec captured during "
+                  f"SOURCE_verify is non-deterministic across runs *beyond the Tier 2 "
+                  f"tolerance* — every Tier 2 comparison would be against an unreliable "
+                  f"baseline. Common causes: GPU/driver transient, instrumentation race "
+                  f"condition, or witness chain insertion order corrupting the kernel output "
+                  f"(see lassi/context/Witness_Chain_Harness.md)." + color.END)
+            for _mm in _consistency_mismatches[:3]:
+                print(f"    mismatch: {_mm}")
+            experiment_data["stage0_abort_reason"] = "source_verify_nondeterministic"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+        else:
+            print(f"----- SOURCE_verify self-consistency check: PASS (PASSTHROUGH blocks "
+                  f"reproducible within Tier 2 tolerance across two runs; "
+                  f"tolerance_verdict={_consistency_verdict}) -----")
+
+    # --- Witness-chain non-interference gate ---
+    # The witness chain is the only instrumentation category that WRITES into the program's
+    # own live output buffer (the pre-kernel sentinel) before the kernel-under-test runs. On
+    # an out-of-place kernel this is a safe no-op; on an in-place (read-modify-write) kernel
+    # whose buffer's pre-launch content is legitimate input, the sentinel corrupts that input
+    # before the real kernel ever reads it — confirmed on matrix-rotate (2026-07-23): the
+    # kernel computes on poisoned data and produces a genuinely wrong answer. Because the
+    # per-trial LASSI_VERIFY_SEED is shared by SOURCE_verify and every generated variant, this
+    # corruption is DETERMINISTIC and SYMMETRIC across whatever is being compared — Tier 2's
+    # own comparison (however exhaustive) cannot detect it, since source and variant corrupt
+    # identically and still agree with each other (confirmed by a direct byte-for-byte diff of
+    # two independently-generated matrix-rotate variants run under a fixed seed, 2026-08-20:
+    # identical wrong output, both individually failing the benchmark's own internal oracle).
+    # The only way to detect it is to compare against a build that was never subject to the
+    # witness chain at all.
+    #
+    # Reuses existing machinery only: `_t1t2_only_code` is the T1+T2-instrumented code from
+    # immediately before witness-chain insertion (this attempt); compiling and running it,
+    # then comparing its PASSTHROUGH output against SOURCE_verify's via the SAME
+    # compare_passthrough_outputs() Tier 2 already uses downstream, isolates exactly the
+    # witness chain's effect — no new comparator, and no dependence on the benchmark's own
+    # stdout conventions (some kernels have a rich embedded oracle, some have none at all;
+    # this check needs neither, only the framework's own standardized PASSTHROUGH format).
+    #
+    # SOURCE-level only for now: this covers SOURCE_verify, not each per-variant witness-chain
+    # re-insertion later in the pipeline (a variant restructuring buffer layout could in
+    # principle introduce or remove the same failure mode independently) — that is a separate,
+    # costed follow-on (one extra compile+run per variant attempt) tracked in
+    # planning/LASSI_Verify_Phase2_Bridge.md Step 3, not bundled in here.
+    _witness_chain_applied_this_attempt = (
+        run_witness_chain and run_tier2 and str(_witness_chain_status).startswith("applied"))
+    if _witness_chain_applied_this_attempt and _t1t2_only_code is not None:
+        print(f"\n----- Witness-chain non-interference check: compiling T1+T2-only reference "
+              f"build (no witness chain) -----")
+        _ni_ext = os.path.splitext(verify_source_file_path)[1]
+        _ni_source_path = os.path.splitext(verify_source_file_path)[0] + "_t1t2only" + _ni_ext
+        with open(_ni_source_path, 'w') as _nf:
+            _nf.write(_t1t2_only_code)
+
+        _ni_compile_result, _ni_executable = lassi.code_manager.compile_code(
+            _ni_source_path, source_lang, code_compiler, code_compiler_kwds)
+
+        if _ni_compile_result != "":
+            print(color.RED + color.BOLD +
+                  f"\n[PIPELINE ABORT] Witness-chain non-interference check: the T1+T2-only "
+                  f"reference build failed to compile — cannot verify the witness chain is "
+                  f"side-effect-free on this kernel. This indicates a bug in the harness's own "
+                  f"block-stripping logic (_strip_witness_chain_blocks), not the kernel or the "
+                  f"LLM's instrumentation choices." + color.END)
+            experiment_data["stage0_abort_reason"] = "witness_noninterference_reference_compile_error"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+
+        try:
+            (_ni_result, _ni_stdout, _, _, _, _, _) = lassi.code_manager.execute_code_selectvendor(
+                experiment_data_directory, code_version, False, trial_number,
+                directory, _ni_executable, exe_input_parameters,
+                False,  # power_measure=False — non-interference check doesn't need power data
+                "source", target_lang, build_script, make_script,
+                gpu_vendor="auto", wait=1,
+            )
+        except Exception as _ni_err:
+            print(color.RED + color.BOLD +
+                  f"\n[Witness-chain non-interference check] reference build raised "
+                  f"{type(_ni_err).__name__}: {str(_ni_err)[:120]} — treating as unverifiable "
+                  f"and aborting." + color.END)
+            _ni_result = "EXCEPTION"
+            _ni_stdout = ""
+
+        if _ni_result != "0":
+            print(color.RED + color.BOLD +
+                  f"\n[PIPELINE ABORT] Witness-chain non-interference check: the T1+T2-only "
+                  f"reference build failed to execute (status={_ni_result}) — cannot verify "
+                  f"the witness chain is side-effect-free on this kernel." + color.END)
+            experiment_data["stage0_abort_reason"] = "witness_noninterference_reference_execute_error"
+            _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+            sys.stdout.flush()
+            lassi.monitor.save_log(_abort_monitor_log_path)
+            return False
+
+        _ni_verdict, _ni_diag = lassi.verify.compare_passthrough_outputs(
+            _ni_stdout,             # T1+T2-only reference (no witness chain) = the "spec"
+            source_verify_stdout,   # T1+T2+witness (actual SOURCE_verify) = "generated"
+            tolerance=tier2_tolerance,
+            n_safety_override=tolerance_safety_factor,
+        )
+        _ni_mismatches = _ni_diag.get("failures", [])
+        verification_log["witness_chain_noninterference_primary_verdict"] = _ni_verdict
+        verification_log["witness_chain_noninterference_primary_mismatches"] = _ni_mismatches
+        experiment_data["witness_chain_fallback_status"] = "not_needed"
+
+        if _ni_verdict == "FAIL":
+            # Primary (sentinel) design corrupts this kernel's real computation — try the
+            # snapshot-based FALLBACK design instead of aborting immediately. The fallback never
+            # writes to the buffer (see _enforce_fallback_witness_device_fns in lassi/verify.py),
+            # so it structurally can't cause this specific failure mode; only trigger it here,
+            # reactively, on a detected primary failure — the vast majority of kernels never take
+            # this path and see no behavior change at all.
+            print(color.YELLOW + color.BOLD +
+                  f"\n[Witness-chain non-interference check] Primary sentinel design FAILED — "
+                  f"inserting the witness chain changed SOURCE_verify's observable PASSTHROUGH "
+                  f"output beyond Tier 2 tolerance relative to the T1+T2-only reference build "
+                  f"(the classic case: an in-place/read-modify-write buffer whose pre-launch "
+                  f"content is legitimate input). Retrying with the snapshot-based fallback "
+                  f"design before giving up." + color.END)
+            for _mm in _ni_mismatches[:3]:
+                print(f"    mismatch: {_mm}")
+
+            _fallback_code, _n_fallback_replaced = lassi.verify._enforce_fallback_witness_device_fns(input_code)
+            if _n_fallback_replaced != 2:
+                print(color.RED + color.BOLD +
+                      f"\n[PIPELINE ABORT] Witness-chain non-interference check: fallback device "
+                      f"functions not found (replaced {_n_fallback_replaced}/2) — harness structure "
+                      f"unexpected. Cannot attempt the fallback design." + color.END)
+                experiment_data["witness_chain_fallback_status"] = "fallback_functions_not_found"
+                experiment_data["stage0_abort_reason"] = "witness_chain_noninterference_violation"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+            with open(verify_source_file_path, 'w') as _vf:
+                _vf.write(_fallback_code)
+            _fb_compile_result, _fb_executable = lassi.code_manager.compile_code(
+                verify_source_file_path, source_lang, code_compiler, code_compiler_kwds)
+
+            if _fb_compile_result != "":
+                print(color.RED + color.BOLD +
+                      f"\n[PIPELINE ABORT] Witness-chain non-interference check: the fallback "
+                      f"rebuild failed to compile." + color.END)
+                experiment_data["witness_chain_fallback_status"] = "fallback_compile_error"
+                experiment_data["stage0_abort_reason"] = "witness_chain_noninterference_violation"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+            try:
+                (_fb_result, _fb_stdout, _, _, _, _, _) = lassi.code_manager.execute_code_selectvendor(
+                    experiment_data_directory, code_version, False, trial_number,
+                    directory, _fb_executable, exe_input_parameters,
+                    False,  # power_measure=False — fallback rebuild doesn't need power data
+                    "source", target_lang, build_script, make_script,
+                    gpu_vendor="auto", wait=1,
+                )
+            except Exception as _fb_err:
+                print(color.RED + color.BOLD +
+                      f"\n[Witness-chain non-interference check] fallback rebuild raised "
+                      f"{type(_fb_err).__name__}: {str(_fb_err)[:120]} — treating as unverifiable "
+                      f"and aborting." + color.END)
+                _fb_result = "EXCEPTION"
+                _fb_stdout = ""
+
+            if _fb_result != "0":
+                print(color.RED + color.BOLD +
+                      f"\n[PIPELINE ABORT] Witness-chain non-interference check: the fallback "
+                      f"rebuild failed to execute (status={_fb_result})." + color.END)
+                experiment_data["witness_chain_fallback_status"] = "fallback_execute_error"
+                experiment_data["stage0_abort_reason"] = "witness_chain_noninterference_violation"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+            # Re-run the SAME non-interference check against the fallback rebuild. _ni_stdout
+            # (the T1+T2-only reference) is unaffected by which witness design is used, so it does
+            # not need to be recompiled — it's still the correct ground truth to compare against.
+            _fb_verdict, _fb_diag = lassi.verify.compare_passthrough_outputs(
+                _ni_stdout, _fb_stdout,
+                tolerance=tier2_tolerance, n_safety_override=tolerance_safety_factor,
+            )
+            _fb_mismatches = _fb_diag.get("failures", [])
+            verification_log["witness_chain_noninterference_fallback_verdict"] = _fb_verdict
+            verification_log["witness_chain_noninterference_fallback_mismatches"] = _fb_mismatches
+
+            if _fb_verdict == "FAIL":
+                print(color.RED + color.BOLD +
+                      f"\n[PIPELINE ABORT] Witness-chain non-interference check: the fallback "
+                      f"design ALSO failed to reproduce the T1+T2-only reference — both witness "
+                      f"designs corrupt this kernel's computation. Unexpected; needs its own "
+                      f"investigation rather than a further fallback." + color.END)
+                for _mm in _fb_mismatches[:3]:
+                    print(f"    mismatch: {_mm}")
+                experiment_data["witness_chain_fallback_status"] = "fallback_also_failed"
+                experiment_data["stage0_abort_reason"] = "witness_chain_noninterference_violation_fallback_also_failed"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()
+                lassi.monitor.save_log(_abort_monitor_log_path)
+                return False
+
+            # Fallback succeeded — adopt it as the real SOURCE_verify going forward. Everything
+            # downstream (Tier 2 spec, judge context, per-variant witness-chain re-insertion
+            # reference) must see the fallback code/output, not the corrupted primary one.
+            print(color.GREEN + color.BOLD +
+                  f"\n----- Witness-chain non-interference check: fallback design PASS — "
+                  f"adopting it as SOURCE_verify for this trial -----" + color.END)
+            input_code = _fallback_code
+            input_content_llmjudge_dict["source_code"] = _fallback_code
+            source_verify_stdout = _fb_stdout
+            passthrough_spec_output = _fb_stdout
+            verification_log["tier2_spec_output"] = _fb_stdout
+            experiment_data["witness_chain_fallback_status"] = "fallback_success"
+            _witness_chain_use_fallback_design = True
+        else:
+            print(f"----- Witness-chain non-interference check: PASS (SOURCE_verify's "
+                  f"PASSTHROUGH output matches the T1+T2-only reference within Tier 2 "
+                  f"tolerance — the witness chain has no observable side effect on this "
+                  f"kernel's computation) -----")
+
+    # ULP-aware tolerance derivation: parse SOURCE_verify's PASSTHROUGH blocks once and
+    # record the per-block tolerance (atol, rtol, type, max_magnitude, buffer_size, N) in
+    # the verification log. This is deterministic for a given source — the same tolerance
+    # is re-derived per comparison by compare_passthrough_outputs / check_metamorphic_relation,
+    # but capturing it here at the trial level makes it auditable without having to dig
+    # through every per-iteration tier2 result. See planning/ulp_aware_tolerance_design.md.
+    _spec_block_pattern = re.compile(
+        r'=== BEGIN LASSI-VERIFY PASSTHROUGH \[([^\]]+)\] ===\n(.*?)\n=== END LASSI-VERIFY PASSTHROUGH \[[^\]]+\] ===',
+        re.DOTALL
+    )
+    _trial_per_block_tolerance = {}
+    _tier2_atol_max = 0.0
+    _tier2_rtol_max = 0.0
+    for _m in _spec_block_pattern.finditer(passthrough_spec_output):
+        _label = _m.group(1)
+        # Skip the witness_chain_state block — it's compared with exact-string equality,
+        # not numerical tolerance, so ULP tolerance is not meaningful for it.
+        if _label == "witness_chain_state":
+            continue
+        _block_body = _m.group(2)
+        _tol = lassi.verify._compute_fp_tolerance(_block_body, n_safety_override=tolerance_safety_factor)
+        _trial_per_block_tolerance[_label] = _tol['metadata']
+        if _tol['atol'] > _tier2_atol_max:
+            _tier2_atol_max = _tol['atol']
+        if _tol['rtol'] > _tier2_rtol_max:
+            _tier2_rtol_max = _tol['rtol']
+    verification_log["tier2_per_block_tolerance"] = _trial_per_block_tolerance
+    verification_log["tier2_tolerance_atol_max"] = _tier2_atol_max
+    verification_log["tier2_tolerance_rtol_max"] = _tier2_rtol_max
+    verification_log["tolerance_safety_factor"] = tolerance_safety_factor  # None if not overridden in source_apps.json
+    # CSV summary columns — surface the trial's atol/rtol in pipeline_data.csv so the
+    # tolerance applied per trial is at-a-glance auditable without opening the JSON log.
+    experiment_data["tier2_tolerance_atol_max"] = round(_tier2_atol_max, 12) if _tier2_atol_max > 0 else 0
+    experiment_data["tier2_tolerance_rtol_max"] = _tier2_rtol_max
+    print(f"\n----- Tier 2 ULP-aware tolerance (per planning/ulp_aware_tolerance_design.md): "
+          f"atol_max={_tier2_atol_max:.3e}, rtol_max={_tier2_rtol_max:.3e}, "
+          f"N_override={tolerance_safety_factor or '(default log2-derived)'} -----")
+
+    # Record the chain-verification status SOURCE_verify settled on (set inside the Stage 0 loop).
+    # _witness_chain_applied gates per-variant re-insertion in the main loop below. Same
+    # condition as _witness_chain_applied_this_attempt (computed earlier, at the
+    # non-interference gate) — reused here rather than recomputed, so the two can't drift.
+    experiment_data["witness_chain_status"] = _witness_chain_status
+    verification_log["witness_chain_status"] = _witness_chain_status
+    _witness_chain_applied = _witness_chain_applied_this_attempt
+
     # Initialize per-code-block stdout list (indexed like code_blocks):
     #   [0] = SOURCE_orig stdout (no passthrough instrumentation)
     #   [1] = SOURCE_verify stdout (Tier 2 reference)
     passthrough_outputs = [source_orig_stdout, source_verify_stdout]
 
-    # --- Stage 0 SOURCE_verify self-check ---
-    # LASSI-Verify uses SOURCE_verify as the correctness specification: generated codes must
-    # match its observable behavior. If SOURCE_verify *itself* fails its own verification
-    # blocks, the specification is corrupted and every generated code will fail against it.
-    # Terminating early prevents wasting the entire trial budget on an invalid spec.
-    # SKIP results (e.g., Tier 3 relations filtered inactive) are acceptable — only FAIL is fatal.
+    # --- Stage 0 SOURCE_verify NaN/Inf self-check (Tier 2 only) ---
+    # Tier 1 was already checked inside the retry loop above. The Tier 2 NaN check below
+    # catches the case where code_insert_passthrough placed a block before the GPU kernel
+    # wrote to the device buffer (every generated code would then FAIL Tier 2 with inf error).
     if run_tier2:
-        # Tier 1: check that SOURCE_verify's own assertion blocks all PASS.
-        _t1_verdict, _t1_diagnostic = lassi.verify.check_tier1_assertions(source_verify_stdout)
-        if _t1_verdict == "FAIL":
-            print(color.RED + color.BOLD +
-                  "\n[STAGE 0 ABORT] SOURCE_verify FAILED its own Tier 1 invariant assertions — "
-                  "instrumentation error; the trial specification is invalid. Aborting trial." +
-                  color.END)
-            print("Failing assertions:", _t1_diagnostic)
-            verification_log["stage0_abort_reason"] = f"tier1_fail: {_t1_diagnostic}"
-            experiment_data["stage0_abort_reason"] = "tier1_assertion_fail"
-            _abort_monitor_log_path = os.path.join(experiment_data_directory,
-                "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
-            sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
-            lassi.monitor.save_log(_abort_monitor_log_path)
-            return False
-        # Tier 2: check that SOURCE_verify's passthrough blocks contain no NaN/Inf statistics.
         # NaN occurs when code_insert_passthrough placed a block before the GPU kernel wrote
         # to the device buffer. Every generated code would then fail Tier 2 with inf error.
         _block_pattern = re.compile(
@@ -699,13 +1442,17 @@ def auto_code_llmgeneration_pipeline(prompts,
                           f"\n[ABORT] Tier 3 contract generation failed after {TIER3_CONTRACT_MAX_ATTEMPTS} attempts. "
                           f"Cannot run LASSI-Verify without Tier 3 coverage. Exiting pipeline." + color.END)
                     experiment_data["stage0_abort_reason"] = "no_t3_contract"
+                    _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                        "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                    sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
+                    lassi.monitor.save_log(_abort_monitor_log_path)
                     return False
                 continue  # retry without feedback (no relations to report)
 
             print(f"\n----- LASSI-Verify Tier 3: running SOURCE_verify metamorphic variants "
                   f"(filter, attempt {_t3_attempt}/{TIER3_CONTRACT_MAX_ATTEMPTS}) -----")
             _, filter_results, _ = lassi.verify.run_metamorphic_variants(
-                input_code,                 # SOURCE_verify code
+                lassi.verify._strip_witness_chain_blocks(input_code),  # SOURCE_verify (witness-chain harness stripped: Tier 3 does not compare chain state)
                 tier3_contract["relations"],
                 tier3_contract,
                 passthrough_spec_output,    # SOURCE_verify's own Tier 2 passthrough output (Tier 3 baseline)
@@ -715,7 +1462,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                 build_script, make_script, code_build_script,
                 exe_input_parameters,
                 experiment_data_directory=experiment_data_directory,
-                verifyprompt=verifyprompt
+                verifyprompt=verifyprompt,
+                n_safety_override=tolerance_safety_factor,
             )
 
             # Partition relations into active/inactive based on source filter.
@@ -738,15 +1486,26 @@ def auto_code_llmgeneration_pipeline(prompts,
             if n_active > 0:
                 break  # success — at least one active relation
 
-            # All relations failed — build feedback for next attempt
+            # All relations failed — build feedback for next attempt.
+            # Surface the OBSERVED reason the source filter measured for each relation
+            # (not just source_status), so the LLM can infer the computation's structure
+            # and choose a categorically different relation next attempt. Reasons come
+            # from filter_results (matched by relation name); see _condense_t3_filter_reason.
             if _t3_attempt < TIER3_CONTRACT_MAX_ATTEMPTS:
+                _t3_reason_by_name = {
+                    e.get("name"): _condense_t3_filter_reason(e)
+                    for e in (filter_results or [])
+                    if isinstance(e, dict) and e.get("name")
+                }
                 tier3_feedback = [
                     (r["name"],
                      r.get("description", "(no description)"),
-                     f"source_status={r.get('source_status', 'unknown')}")
+                     _t3_reason_by_name.get(
+                         r["name"],
+                         f"source_status={r.get('source_status', 'unknown')}"))
                     for r in tier3_contract["relations"]
                 ]
-                print(f"      All {n_total} relation(s) failed source filter — retrying with failure feedback.")
+                print(f"      All {n_total} relation(s) failed source filter — retrying with observed-reason feedback.")
             else:
                 # Final attempt also produced zero active relations — abort
                 print(color.RED + color.BOLD +
@@ -755,10 +1514,17 @@ def auto_code_llmgeneration_pipeline(prompts,
                 verification_log["tier3_contract"] = tier3_contract
                 verification_log["tier3_active_relations"] = []
                 experiment_data["stage0_abort_reason"] = "no_t3_active_relations"
+                _abort_monitor_log_path = os.path.join(experiment_data_directory,
+                    "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+                sys.stdout.flush()  # Flush TeeStream so abort message lands in _history before snapshot
+                lassi.monitor.save_log(_abort_monitor_log_path)
                 return False
 
         verification_log["tier3_contract"] = tier3_contract
         verification_log["tier3_active_relations"] = [r["name"] for r in tier3_active_relations]
+        # Per-trial T3 test count: how many metamorphic relations made it through
+        # Stage 0's source filter and are active for this trial.
+        experiment_data["tier3_test_count"] = len(tier3_active_relations)
     elif run_tier3 and not run_tier2:
         print(f"\n----- LASSI-Verify Tier 3: Tier 2 is disabled — Tier 3 requires Tier 2 passthrough baseline; Tier 3 disabled -----")
         run_tier3 = False
@@ -766,9 +1532,31 @@ def auto_code_llmgeneration_pipeline(prompts,
     # Append instrumented source code as code_blocks[1] = SOURCE_verify.
     # LASSI pipeline refactors from this baseline; the LASSI judge compares against it.
     code_blocks.append(input_code)
-    
-    
-    
+
+    # --- GPU health gate after ALL source-code work is complete ---
+    # Stage 0 (SOURCE_orig test) + Stage 1 (SOURCE_verify build + execute + Tier 2/3
+    # filter runs) are fully done at this point. Capture GPU state and run a fresh
+    # compute probe before the LASSI iteration loop begins. KERNEL_TEST5_CHACHA_2 and
+    # KERNEL_TEST6_CHACHA_1 both had transient SOURCE_verify failures that this gate
+    # would have detected — by the time we reach here, the corrupted spec is already
+    # in passthrough_spec_output, so a re-probe + compute check at this point catches
+    # the residual bad state before we commit 60+ minutes of LASSI iterations to a
+    # downstream comparison against bad spec.
+    _gpu_health_post_source = lassi.gpu_health.snapshot('post_source_pre_lassi', run_compute_test=True)
+    verification_log["gpu_health_timeline"].append(_gpu_health_post_source)
+    if _gpu_health_post_source['health_verdict'].startswith('FAIL'):
+        print(color.RED + color.BOLD +
+              f"\n[PIPELINE ABORT] GPU health check failed after Stage 0/1 source work: "
+              f"{_gpu_health_post_source['health_verdict']}. "
+              f"Source-code execution may have triggered a GPU fault — the spec "
+              f"captured during SOURCE_verify cannot be trusted." + color.END)
+        experiment_data["stage0_abort_reason"] = "gpu_health_post_source"
+        _abort_monitor_log_path = os.path.join(experiment_data_directory,
+            "result_monitor_log_" + file_name + "_" + dt_string + "_Trial" + str(trial_number) + ".txt")
+        sys.stdout.flush()
+        lassi.monitor.save_log(_abort_monitor_log_path)
+        return False
+
     # --------------------------------------------------------
     # INITIATE LASSI LLM CODE GENERATION ITERATIVE PIPELINE
     while (
@@ -777,6 +1565,15 @@ def auto_code_llmgeneration_pipeline(prompts,
         and self_correction_power_counter <= self_correction_power_counter_max
         and self_correction_verify_counter <= self_correction_verify_counter_max
     ):
+        # --- GPU health per-version snapshot (non-gating) ---
+        # Diagnostic only — records GPU state at the top of each LASSI iteration so that
+        # downstream data analysis can filter out trials whose environment degraded
+        # mid-pipeline. Uses the next-to-be-created code_version index as the label
+        # (len(code_blocks) is the slot the upcoming generation will fill).
+        _gpu_health_iter = lassi.gpu_health.snapshot(
+            f'pre_lassi_v{len(code_blocks)}', run_compute_test=False)
+        verification_log["gpu_health_timeline"].append(_gpu_health_iter)
+
         # Save compile_result at the start of this iteration before compile/execute can modify it.
         # Used later to detect whether we're entering a Tier 2 self-correction retry vs. a fresh code.
         compile_result_before_generation = compile_result
@@ -935,12 +1732,15 @@ def auto_code_llmgeneration_pipeline(prompts,
                   + " (global: " + str(self_correction_verify_counter) + ")" + color.END + " -----")
             print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
 
-            # Increment per-code T1 counter and check exhaustion BEFORE generating another SC attempt.
-            self_correction_tier1_counter_code += 1
-            tier1_sc_count += 1  # Table 1 ★ per-type SC counter (count even on exhaustion — it IS a SC event)
-            iteration_log.setdefault("v" + str(len(code_blocks) - 1), {"self_correction_count": 0, "energy_refactor_count": 0, "LLM_temperature": round(code_gen_temp, 1)})
-            iteration_log["v" + str(len(code_blocks) - 1)]["self_correction_count"] += 1
-
+            # NOTE: self_correction_tier1_counter_code, tier1_sc_count, and iteration_log are
+            # incremented in the mid-loop T1 FAIL detection branch (the site of the actual failure
+            # event). Incrementing again here on SC entry produced a double-count that halved the
+            # effective per-code T1 budget and caused exhaustion to fall through to this branch
+            # rather than the mid-loop exhaustion branch below — which in turn made cb-index
+            # attribution wrong (the failing code had already been popped by mid-loop).
+            # This branch is now a defensive safety net: it should never normally trigger because
+            # mid-loop handles exhaustion correctly. The cb-index recovery code below still uses
+            # `len(code_blocks)` (not -1) so any safety-net firing is also attributed correctly.
             if self_correction_tier1_counter_code > self_correction_tier1_counter_code_max:
                 # Per-code T1 budget exhausted: this code cannot satisfy invariant assertions.
                 # Keep code in code_blocks as a research artifact (it ran — T1 assertions detected a flaw).
@@ -951,9 +1751,14 @@ def auto_code_llmgeneration_pipeline(prompts,
                 energy_efficiency_refactor_success = False  # ensure EE SC branch fires on next iteration
                 force_new_plan = True                       # force new refactoring plan
                 bad_refactor_plans.append(refactoring_plan) # record so plan LLM avoids repeating this strategy
-                # Write final attempt record for the exhausted T1-failing code before continuing
-                _cb_idx = len(code_blocks) - 1
-                _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
+                # Write final attempt record for the exhausted T1-failing code before continuing.
+                # IMPORTANT: the failing code was already popped by the mid-loop T1 FAIL branch on
+                # the prior iteration, so `len(code_blocks) - 1` here points to the previous
+                # surviving keeper — NOT the failing code. The correct cb-index for the failing
+                # code is the next-append slot, i.e. `len(code_blocks)`. Labels cannot be re-
+                # extracted (code is gone); reuse `_last_failing_t1_instr` saved by mid-loop.
+                _cb_idx = len(code_blocks)
+                _t1_instr = _last_failing_t1_instr
                 _rec = _build_attempt_record(
                     app_name=file_name, trial_number=trial_number,
                     code_block_index=_cb_idx, attempt_number=attempt_number,
@@ -966,7 +1771,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier1_diagnostic=tier1_diagnostic,
                     tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                     tier3_verdict="SKIP", tier3_diagnostic={},
-                    judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_t1_sc_budget",
+                    judge_baseline_verdict=None, final_verdict="INVALID", override_applied="exhausted_t1_sc_budget",
                 )
                 attempt_log_buffer.append(_rec)
                 continue  # Skip remainder of loop body (T2, T3, judge, metrics, stagnation)
@@ -1091,16 +1896,31 @@ def auto_code_llmgeneration_pipeline(prompts,
                     _table_lines.append(f"{label:<22} | {f.get('stat','?'):<10} | {_sv} | {_gv} | {rel_pct}")
                 _failure_table_str = "\n".join(_table_lines)
 
-                # Add pattern hint if relative error is consistent across failures
+                # Add pattern hint if relative error is consistent across failures.
+                # Guards against extreme/non-finite values: a generated code that produces
+                # garbage (uninitialized memory reads, NaN, Inf, ~1e+300) yields rel_errs
+                # large enough to overflow when squared in the variance computation. Skip
+                # any non-finite spec/generated/rel_err so the pattern detector sees only
+                # numerically tractable inputs — and if too few remain, just skip the hint.
                 _rel_errs = []
                 for f in _failures[:12]:
                     s, g = f.get("spec", 0.0), f.get("generated", 0.0)
-                    if isinstance(s, float) and abs(s) > 1e-10:
-                        _rel_errs.append(abs(s - g) / abs(s))
+                    if not (isinstance(s, float) and isinstance(g, (int, float))
+                            and math.isfinite(s) and math.isfinite(g)
+                            and abs(s) > 1e-10):
+                        continue
+                    _re = abs(s - g) / abs(s)
+                    # Cap at 1e6 (i.e. 100,000,000% error): anything beyond this is already
+                    # "totally wrong"; including it adds no signal and risks overflow.
+                    if math.isfinite(_re) and _re < 1e6:
+                        _rel_errs.append(_re)
                 if len(_rel_errs) >= 3:
                     avg_rel = sum(_rel_errs) / len(_rel_errs)
-                    std_rel = (sum((r - avg_rel) ** 2 for r in _rel_errs) / len(_rel_errs)) ** 0.5
-                    if std_rel < 0.005:  # consistent within 0.5% — likely a systematic factor
+                    try:
+                        std_rel = (sum((r - avg_rel) ** 2 for r in _rel_errs) / len(_rel_errs)) ** 0.5
+                    except OverflowError:
+                        std_rel = float('inf')  # defensive: skip the hint if math still blows up
+                    if math.isfinite(std_rel) and std_rel < 0.005:  # consistent within 0.5% — likely a systematic factor
                         _failure_table_str += (
                             f"\n\nPattern: All failing statistics show a consistent ~{avg_rel * 100:.1f}% relative error. "
                             "This strongly suggests a systematic factor difference — e.g., a wrong constant, "
@@ -1114,6 +1934,46 @@ def auto_code_llmgeneration_pipeline(prompts,
                 + tier2_diag_summary
             )
 
+            # --- Special-case: witness_chain_state failure gets cheat-detection-specific feedback ---
+            # The generic "fix the passthrough" guidance isn't actionable for [witness_chain_state]
+            # because the chain state can only match source's value if the timed kernel is actually
+            # invoked `repeat` times with the per-iteration perturbation applied. There is no
+            # analytical shortcut. Detect this label and substitute targeted wording so the LLM
+            # gets a direct diagnosis ("you skipped iterations / batched the work / removed the
+            # harness") rather than generic "values don't match" guidance.
+            _chain_failure_present = any(
+                str(f.get("label", "")).startswith("witness_chain_state") for f in _failures
+            )
+
+            if _chain_failure_present:
+                _closing_guidance = (
+                    "The `[witness_chain_state]` passthrough captures a chain hash that depends on "
+                    "each iteration's actual kernel output combined with a runtime-injected seed. "
+                    "A mismatch here indicates the variant did not run the timed kernel the full "
+                    "`repeat` number of times, OR skipped iterations via batching, precomputation, "
+                    "or analytical shortcuts. THERE IS NO SHORTCUT: the chain state can only match "
+                    "the source's value if the timed kernel is actually invoked `repeat` times with "
+                    "the per-iteration witness-chain harness (sentinel-write → kernel → chain_update) "
+                    "applied as specified by the catalog's Witness Chain section. Restructure the "
+                    "refactor so the timed kernel is invoked exactly `repeat` times in the timed "
+                    "region, with the harness blocks preserved verbatim around each invocation. "
+                    "CUDA Graph batching IS acceptable (the graph still executes `repeat` actual "
+                    "kernel invocations on the GPU); replacing the loop with a single kernel call "
+                    "that ignores `repeat`, batching the chain updates analytically, or pre-computing "
+                    "the chain state from the seed is NOT acceptable and will continue to fail this "
+                    "check. Do NOT remove or modify any LASSI-VERIFY ASSERTIONS, PASSTHROUGH, or "
+                    "WITNESS_CHAIN blocks."
+                )
+            else:
+                _closing_guidance = (
+                    "Fix the generated code so that its passthrough observation point output matches "
+                    "the source-as-specification reference within floating-point tolerance. "
+                    "Focus your fix on the specific block(s) and statistics listed in the failure table above. "
+                    "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
+                    "The issue likely involves incorrect computation, wrong algorithm, or wrong data "
+                    "transformation in the section of code that produces the failing passthrough block output."
+                )
+
             error_correction_prompt_intro = (
                 "\n\nThe above code compiled and executed successfully but FAILED LASSI-Verify "
                 "Tier 2 empirical equivalence checking. Its passthrough observation point output "
@@ -1124,12 +1984,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 "\n\n=== GENERATED CODE PASSTHROUGH OUTPUT ===\n"
                 + gen_output_excerpt +
                 "\n\n=== END TIER 2 DIAGNOSTIC ===\n\n"
-                "Fix the generated code so that its passthrough observation point output matches "
-                "the source-as-specification reference within floating-point tolerance. "
-                "Focus your fix on the specific block(s) and statistics listed in the failure table above. "
-                "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
-                "The issue likely involves incorrect computation, wrong algorithm, or wrong data "
-                "transformation in the section of code that produces the failing passthrough block output."
+                + _closing_guidance
             )
 
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
@@ -1152,18 +2007,39 @@ def auto_code_llmgeneration_pipeline(prompts,
 
             tier3_diag_summary  = tier3_diagnostic.get("summary", "(no diagnostic available)")
             tier3_relation_name = tier3_diagnostic.get("relation_name", "(unknown)")
+            tier3_diag_reason   = tier3_diagnostic.get("reason", "")
 
-            error_correction_prompt_intro = (
-                "\n\nThe above code passed Tier 2 empirical equivalence checking but FAILED "
-                "LASSI-Verify Tier 3 metamorphic testing.\n\n"
-                "The metamorphic relation that failed: " + tier3_relation_name + "\n\n"
-                "=== TIER 3 DIAGNOSTIC ===\n"
-                + tier3_diag_summary +
-                "\n=== END TIER 3 DIAGNOSTIC ===\n\n"
-                "Fix the generated code so that it satisfies this mathematical property. "
-                "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
-                "The issue is a structural property of the computation, not a single output value difference."
-            )
+            if tier3_diag_reason == "instrument_error":
+                # The MT variant itself failed to compile or execute after all repair attempts —
+                # this is an instrumentation failure, NOT a mathematical property violation.
+                # A fresh code generation gives the variant insertion a clean shot at success.
+                error_correction_prompt_intro = (
+                    "\n\nThe above code could not be verified by LASSI-Verify Tier 3 metamorphic "
+                    "testing due to an instrumentation failure (the metamorphic variant could not "
+                    "be compiled or executed after repeated repair attempts).\n\n"
+                    "Metamorphic relation that could not be instrumented: " + tier3_relation_name + "\n\n"
+                    "=== TIER 3 DIAGNOSTIC ===\n"
+                    + tier3_diag_summary +
+                    "\n=== END TIER 3 DIAGNOSTIC ===\n\n"
+                    "This is NOT a mathematical correctness failure in your code — the optimization "
+                    "logic itself may be correct. However, verification cannot be confirmed without "
+                    "a working metamorphic variant. Please regenerate the optimized code. "
+                    "A structurally simpler optimization may allow the metamorphic variant to "
+                    "instrument correctly. "
+                    "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks."
+                )
+            else:
+                error_correction_prompt_intro = (
+                    "\n\nThe above code passed Tier 2 empirical equivalence checking but FAILED "
+                    "LASSI-Verify Tier 3 metamorphic testing.\n\n"
+                    "The metamorphic relation that failed: " + tier3_relation_name + "\n\n"
+                    "=== TIER 3 DIAGNOSTIC ===\n"
+                    + tier3_diag_summary +
+                    "\n=== END TIER 3 DIAGNOSTIC ===\n\n"
+                    "Fix the generated code so that it satisfies this mathematical property. "
+                    "Do NOT remove or modify any LASSI-VERIFY ASSERTIONS or LASSI-VERIFY PASSTHROUGH blocks. "
+                    "The issue is a structural property of the computation, not a single output value difference."
+                )
 
             error_correction_prompt = prompts.get_code_error_correction_prompt(source_lang + "_error")
             error_prompt = error_correction_prompt + "\n\n" + "[START OF CODE TO FIX] " + code_block + "\n\n" + "[/END OF CODE TO FIX] " + "\n\n" + error_correction_prompt_intro
@@ -1443,8 +2319,37 @@ def auto_code_llmgeneration_pipeline(prompts,
         if code_block.startswith('c++') or code_block.startswith('cpp'):
             code_block = code_block[3:]
         if code_block.startswith('c'):
-            code_block = code_block[1:]    
-    
+            code_block = code_block[1:]
+
+        # --- Chain verification harness: deterministic re-insertion into this variant ---
+        # The optimizing transform may have restructured or removed the timed loop, so we do NOT
+        # rely on the refactoring LLM to preserve the harness blocks. We strip any (possibly
+        # mangled) harness and re-install a fresh one around the variant's CURRENT structure via a
+        # dedicated, focused call. This is the deterministic step that fixes the false-positive
+        # Tier 2 failures: the optimizer is free to transform the loop, and the framework
+        # guarantees the harness is present and computed identically — so a [witness_chain_state]
+        # mismatch after re-insertion genuinely means the variant performed fewer real kernel
+        # invocations than the source (a dropped-work cheat), not that it disturbed the harness.
+        #
+        # Skipped on raw compile/execute-error correction passes: those are fixing the already-
+        # harnessed code, and re-stripping+reinserting could undo the fix or loop. Tier-failure
+        # self-corrections (tier1/2/3) and fresh/improvement generations DO get re-inserted.
+        if (_witness_chain_applied and not zero_shot
+                and compile_result_before_generation in
+                    ("", "energy_efficiency", "tier1_failure", "tier2_failure", "tier3_failure")):
+            _cv_var_code, _cv_var_status = lassi.verify.code_insert_witness_chain(
+                code_block, llm_source, model, num_ctx, system_prompt, display_response,
+                verifyprompt=verifyprompt, code_description=llm_code_description_response,
+                is_variant=True,
+                # Show the instrumented SOURCE_verify (code_blocks[1]) as a reference so the
+                # variant's harness matches the source's init placement + per-launch coverage
+                # (fixes re-insertion inconsistency, e.g. segment-reduce nested-loop placement).
+                source_harness_reference=code_blocks[1] if len(code_blocks) > 1 else None,
+            )
+            code_block = _apply_witness_fallback_if_needed(_cv_var_code, _witness_chain_use_fallback_design)
+            print(f"\n----- LASSI-Verify Chain Verification (variant re-install): "
+                  f"status={_cv_var_status} -----")
+
         print("\n\n----- " + color.BOLD + color.BLUE + "POST-PROCESSING of GENERATED CODE" + color.END + " -----\n")
         print(color.BOLD + color.DARKORANGE + "\n*** DEBUG: code_version: " + str(code_version) + " | tracking_best_version: " + str(tracking_best_version) + " | code_blocks len: " + str(len(code_blocks)) + " (next idx: " + str(len(code_blocks)) + ") ***" + color.END)
         
@@ -1518,7 +2423,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 tier1_verdict="SKIP", tier1_instrumented_labels="", tier1_diagnostic={},
                 tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                 tier3_verdict="SKIP", tier3_diagnostic={},
-                judge_verdict=None, final_verdict=None, override_applied=None,
+                judge_baseline_verdict=None, final_verdict=None, override_applied=None,
             )
             attempt_log_buffer.append(_rec)
             current_sc_trigger = "compile_error"  # Table 2 ★ carry into next iteration's record
@@ -1561,7 +2466,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier1_verdict="SKIP", tier1_instrumented_labels="", tier1_diagnostic={},
                         tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                         tier3_verdict="SKIP", tier3_diagnostic={},
-                        judge_verdict=None, final_verdict=None, override_applied=None,
+                        judge_baseline_verdict=None, final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
                     current_sc_trigger = "execute_error"  # Table 2 ★ carry into next iteration's record
@@ -1609,7 +2514,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 tier1_verdict="SKIP", tier1_instrumented_labels="", tier1_diagnostic={},
                 tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                 tier3_verdict="SKIP", tier3_diagnostic={},
-                judge_verdict=None, final_verdict="INVALID", override_applied="exhausted_sc_budget",
+                judge_baseline_verdict=None, final_verdict="INVALID", override_applied="exhausted_sc_budget",
             )
             attempt_log_buffer.append(_rec)
 
@@ -1641,6 +2546,35 @@ def auto_code_llmgeneration_pipeline(prompts,
             experiment_data["zeroshot_compile_status"] = zeroshot_compile_status
             experiment_data["zeroshot_execute_status"] = zeroshot_execute_status
             experiment_data["zeroshot_runtime_s"] = "NA"
+
+            # Emit a Table 2 attempt row for the failed zero-shot. The LLM judge was never
+            # called (code didn't even reach the judge stage), so the judge baseline verdict
+            # for this code is recorded as INVALID — a vanilla LLM that produces uncompilable
+            # or unexecutable code IS invalid by any reasonable definition, and the absence
+            # of a judge call should not leave the row blank in downstream analysis. The
+            # final_verdict matches (the framework cannot validate a code that doesn't run).
+            # override_applied names the specific failure mode for downstream filtering.
+            _zs_override = ("baseline_compile_failed"
+                            if zeroshot_compile_status == "compile_error"
+                            else "baseline_execute_failed")
+            _zs_rec = _build_attempt_record(
+                app_name=file_name, trial_number=trial_number,
+                code_block_index=len(code_blocks) - 1, attempt_number=1,
+                is_final_attempt=True, generation_type="zeroshot",
+                sc_trigger=None, llm_temperature=code_gen_temp,
+                compile_status=zeroshot_compile_status,
+                execute_status=zeroshot_execute_status,
+                runtime_s=None, energy_J=None, ave_power_W=None,
+                tier1_verdict="SKIP", tier1_instrumented_labels="", tier1_diagnostic={},
+                tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
+                tier3_verdict="SKIP", tier3_diagnostic={},
+                judge_baseline_verdict="INVALID",
+                judge_response_text="",
+                final_verdict="INVALID",
+                override_applied=_zs_override,
+            )
+            attempt_log_buffer.append(_zs_rec)
+
             # Reset flag because this should be a one-time action.
             force_save_baseline_llm = False
                     
@@ -1660,7 +2594,83 @@ def auto_code_llmgeneration_pipeline(prompts,
             # else:
             # Do not enable feedback iteration in baseline mode
             #self_correction_power_counter = self_correction_power_counter_max + 1
-            
+
+            # --- LLM JUDGE: PRE-TIER BASELINE MEASUREMENT ---
+            # The judge is a *baseline comparator* representing current LLM-only practice; it is NOT a
+            # framework tier. It runs here, before Tier 1/2/3, so it sees only what the executed code
+            # produced (the generated code and its stdout) and nothing from tier analysis. The judge's
+            # verdict is recorded as `judge_raw_verdict` for downstream discrepancy logging; the tier
+            # verdicts alone decide `valid_code_flag` (the framework verdict) further below.
+            #
+            # Judge runs only on candidate code generations — i.e., when compile AND execute succeed.
+            # Compile/execute failures are routed back into the existing self-correction loop without
+            # ever invoking the judge (those code paths use the earlier `continue` branches).
+            #
+            # For zero_shot codes, the judge compares the vanilla LLM output against the uninstrumented
+            # original source (SOURCE_orig) — matching the "what vanilla-LLM-workflow practice would
+            # see" baseline measurement intent.
+            # For LASSI codes, the judge sees the LASSI pipeline's actual output: the generated code
+            # with its LASSI-VERIFY instrumentation, run-time stdout including passthrough blocks, and
+            # runtime/energy metrics, compared against SOURCE_orig. Pipeline-applied stdout/code strips
+            # for instrumentation noise are preserved so the judge focuses on the algorithmic change.
+            judge_raw_verdict = "SKIP"
+            judge_response_text = ""
+            # judge_raw_response captures the verbatim LLM judge prose for this attempt
+            # and is NEVER overwritten by downstream tier-exhaustion descriptive strings
+            # (judge_response_text gets reused for those messages). Persisted into the
+            # attempt log + sidecar discrepancy entries for grep-able post-hoc inspection
+            # of WHY the judge issued whatever verdict it did. See planning/fix_judge_ordering_plan.md.
+            judge_raw_response = ""
+            code_analysis = "None"
+            if run_llm_judge or zero_shot:
+                if zero_shot:
+                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy to avoid mutating the shared dict
+                    judge_dict["source_code"] = code_blocks[0]      # compare vanilla LLM against original (uninstrumented) source
+                    judge_dict["source_stdout"] = source_orig_stdout  # use uninstrumented stdout; source_verify_stdout has passthrough dump noise
+                else:
+                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy so strip below does not mutate the shared dict
+                    judge_dict["source_code"] = code_blocks[0]      # compare LASSI code against SOURCE_orig (uninstrumented)
+                    judge_dict["source_stdout"] = source_orig_stdout  # uninstrumented baseline; source_verify_stdout has Tier 2 passthrough noise
+                    # Strip T1 + T2 LASSI-VERIFY blocks from the generated code body so the judge sees
+                    # only the algorithmic transformation — instrumentation is pipeline noise, not the
+                    # vanilla-practice signal the baseline judge is meant to measure.
+                    judge_dict["refactored_code"] = lassi.verify._strip_t2_blocks(
+                        lassi.verify._strip_t1_blocks(judge_dict.get("refactored_code", ""))
+                    )
+                # Strip Tier 1 + Tier 2 LASSI-VERIFY instrumentation from refactored stdout so the
+                # judge sees only the benchmark's primary output — matches the original (pre-LASSI)
+                # judge design and prevents context-window overflow from loop-inserted passthrough blocks.
+                judge_dict["refactored_stdout"] = _strip_lassi_verify_stdout(judge_dict.get("refactored_stdout", ""))
+                judge_raw_verdict, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(
+                    target_lang, llm_source, model_judge, num_ctx, system_prompt, judge_dict,
+                    power_measure, run_code_analysis, verification_log["sourcecode_analysis"],
+                    display_response, verifyprompt
+                )
+                # Snapshot the raw judge prose immediately, before downstream code paths
+                # (tier-exhaustion blocks) reuse `judge_response_text` for their own messages.
+                judge_raw_response = judge_response_text
+                # Normalize: judge prompt only allows "VALID" or "INVALID". Anything else is treated
+                # as INVALID and counted against the 3-strike judge_api_error safety net (preserved
+                # from the prior pre-rework design — still applies under judge-as-baseline).
+                if judge_raw_verdict != "VALID":
+                    if judge_raw_verdict != "INVALID":
+                        judge_api_error_count += 1
+                        print(f"\n----- LLM judge returned unexpected verdict '{judge_raw_verdict}' — normalizing to INVALID (judge API error count: {judge_api_error_count}/3) -----")
+                        if judge_api_error_count >= 3:
+                            raise RuntimeError(
+                                f"LLM judge returned a non-verdict ('{judge_raw_verdict}') 3 times in a row. "
+                                "This likely indicates a persistent API error (e.g. context-window overflow, "
+                                "network timeout). Stopping pipeline to prevent further wasted iterations. "
+                                "Check the monitor log for the error details, fix the root cause "
+                                "(e.g. reduce prompt size), then restart."
+                            )
+                    judge_raw_verdict = "INVALID"
+            else:
+                # Pure three-tier mode (LASSI only): judge is disabled for LASSI codes; tier verdicts
+                # decide validity exclusively. Discrepancy entry is skipped (no judge baseline exists).
+                judge_response_text = "LLM judge disabled (run_llm_judge=False)"
+                print("\n----- LLM judge disabled: LASSI code validity decided by Tier 1 + Tier 2 + Tier 3 alone -----")
+
             # --- TIER 1: Invariant Assertion Check (fail-fast before Tier 2) ---
             # Parses stdout for LASSI-VERIFY ASSERTIONS [label]: FAIL lines.
             # All assertions are checked before deciding (code runs to completion), giving the
@@ -1700,6 +2710,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                         # Table 2 ★ intermediate attempt row — log before pop overwrites this code_block_index
                         _cb_idx = len(code_blocks) - 1
                         _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
+                        _last_failing_t1_instr = _t1_instr  # cache for top-of-loop exhaustion safety net
                         _rec = _build_attempt_record(
                             app_name=file_name, trial_number=trial_number,
                             code_block_index=_cb_idx, attempt_number=attempt_number,
@@ -1712,7 +2723,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier1_diagnostic=tier1_diagnostic,
                             tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                             tier3_verdict="SKIP", tier3_diagnostic={},
-                            judge_verdict=None, final_verdict=None, override_applied=None,
+                            judge_baseline_verdict=judge_raw_verdict,
+                            judge_response_text=judge_raw_response,
+                            final_verdict=None, override_applied=None,
                         )
                         attempt_log_buffer.append(_rec)
                         current_sc_trigger = ("tier1_skip:sentinel_missing" if tier1_verdict == "SKIP"
@@ -1745,12 +2758,32 @@ def auto_code_llmgeneration_pipeline(prompts,
                             tier1_diagnostic=tier1_diagnostic,
                             tier2_verdict="SKIP", tier2_instrumented_labels="", tier2_diagnostic={},
                             tier3_verdict="SKIP", tier3_diagnostic={},
-                            judge_verdict=None, final_verdict="INVALID", override_applied="tier1_exhausted",
+                            judge_baseline_verdict=judge_raw_verdict,
+                            judge_response_text=judge_raw_response,
+                            final_verdict="INVALID", override_applied="tier1_exhausted",
                         )
                         attempt_log_buffer.append(_rec)
+                        # Judge-as-baseline discrepancy record for this final attempt: judge ran on the
+                        # executed code; framework verdict is INVALID due to T1 exhaustion. Skipped if
+                        # the judge was disabled (no baseline to compare against).
+                        if run_llm_judge or zero_shot:
+                            verification_log["judge_discrepancies"].append({
+                                "code_version": code_version, "zero_shot": zero_shot,
+                                "judge_baseline_verdict": judge_raw_verdict,
+                                "judge_response_text": judge_raw_response,
+                                "tier1_verdict": tier1_verdict,
+                                "tier2_verdict": "SKIP",
+                                "tier3_verdict": "SKIP",
+                                "final_verdict": "INVALID",
+                            })
                         current_sc_trigger = None  # exhausted → next iteration is fresh
                         valid_code_flag = "INVALID"
                         compile_result = "energy_efficiency"  # drive fresh generation next iteration
+                        # Match T2 (line 1873-1874) and T3 (line 1973-1974) exhaustion paths:
+                        # the refactoring strategy has structurally failed under T1, so force a
+                        # new plan and record this one as bad so the plan LLM avoids repeating it.
+                        force_new_plan = True
+                        bad_refactor_plans.append(refactoring_plan)
                         # CRITICAL: must append to all history arrays before continuing.
                         # code_blocks.append() ran at the keeper block (above); if we continue
                         # without appending here, code_blocks grows but history arrays do not —
@@ -1781,6 +2814,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     spec_stdout=passthrough_spec_output,
                     generated_stdout=exe_output_generated,
                     tolerance=tier2_tolerance,
+                    n_safety_override=tolerance_safety_factor,
+                    buffer_classification=tier2_buffer_classification,
                 )
                 print(f"\n----- LASSI-Verify Tier 2: {tier2_verdict} -----")
                 if tier2_diagnostic.get("failures"):
@@ -1792,6 +2827,13 @@ def auto_code_llmgeneration_pipeline(prompts,
                         "verdict": tier2_verdict,
                         "diagnostic": tier2_diagnostic,
                     })
+                # Witness-chain mismatch (cheat-detection signal): a [witness_chain_state] failure
+                # means this variant's chain hash diverged from SOURCE_verify's — it performed
+                # fewer real kernel invocations than the source (dropped-work cheat).
+                if any(str(f.get("label", "")).startswith("witness_chain_state")
+                       for f in tier2_diagnostic.get("failures", [])):
+                    experiment_data["witness_chain_mismatches"] = \
+                        experiment_data.get("witness_chain_mismatches", 0) + 1
 
             passthrough_outputs.append(exe_output_generated)  # record stdout for every generated attempt
 
@@ -1826,7 +2868,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                         tier2_diagnostic=tier2_diagnostic,
                         tier3_verdict="SKIP", tier3_diagnostic={},
-                        judge_verdict=None, final_verdict=None, override_applied=None,
+                        judge_baseline_verdict=judge_raw_verdict,
+                        judge_response_text=judge_raw_response,
+                        final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
                     _t2_fail_label = (tier2_diagnostic.get("failures", [{}])[0].get("label", "unknown")
@@ -1870,7 +2914,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # passthrough_outputs[-1] is the stdout just appended above (this iteration's run).
                 generated_passthrough_stdout = passthrough_outputs[-1] if passthrough_outputs else ""
                 tier3_verdict, tier3_results_this_iter, tier3_diagnostic = lassi.verify.run_metamorphic_variants(
-                    code_blocks[-1],             # generated code source
+                    lassi.verify._strip_witness_chain_blocks(code_blocks[-1]),  # generated code (witness-chain harness stripped: Tier 3 does not compare chain state)
                     tier3_active_relations,
                     tier3_contract,
                     generated_passthrough_stdout,  # generated code's own output as Tier 3 baseline (Y)
@@ -1881,7 +2925,8 @@ def auto_code_llmgeneration_pipeline(prompts,
                     exe_input_parameters,
                     experiment_data_directory=experiment_data_directory,
                     code_version=code_version,
-                    verifyprompt=verifyprompt
+                    verifyprompt=verifyprompt,
+                    n_safety_override=tolerance_safety_factor,
                 )
                 # Enrich tier3_diagnostic with per-relation aggregates for Table 2 ★
                 _t3_names = [r["name"] for r in tier3_results_this_iter]
@@ -1931,7 +2976,9 @@ def auto_code_llmgeneration_pipeline(prompts,
                         tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                         tier2_diagnostic=tier2_diagnostic,
                         tier3_verdict=tier3_verdict, tier3_diagnostic=tier3_diagnostic,
-                        judge_verdict=None, final_verdict=None, override_applied=None,
+                        judge_baseline_verdict=judge_raw_verdict,
+                        judge_response_text=judge_raw_response,
+                        final_verdict=None, override_applied=None,
                     )
                     attempt_log_buffer.append(_rec)
                     current_sc_trigger = f"tier3_fail:{tier3_diagnostic.get('relation_name', 'unknown')}"
@@ -1955,73 +3002,40 @@ def auto_code_llmgeneration_pipeline(prompts,
             if run_tier3 and not zero_shot and "tier3_pass_count" in verification_log and tier3_verdict == "PASS":
                 verification_log["tier3_pass_count"] += 1
 
-            # Call LLM-as-a-judge to review SOURCE CODE and REFACTORED CODE to evaluate if likely valid.
-            # Judge always runs for zero_shot (vanilla LLM has no Tier 1/2 instrumentation — the judge
-            # is its only correctness gate). For LASSI codes, judge is controlled by run_llm_judge:
-            #   run_llm_judge=True:  judge runs; three-tier verdict can override it (see below)
-            #   run_llm_judge=False: pure three-tier mode for LASSI codes; judge skipped; vanilla still judged
-            # For the zero-shot (vanilla LLM) pass, judge against the original uninstrumented source code.
-            # For the LASSI pipeline (not zero_shot), judge against the assertion-instrumented source code.
-            # code_blocks[0]=SOURCE_orig, code_blocks[1]=SOURCE_verify (both always pre-populated before while loop).
-            if run_llm_judge or zero_shot:
-                if zero_shot:
-                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy to avoid mutating the shared dict
-                    judge_dict["source_code"] = code_blocks[0]      # compare vanilla LLM against original (uninstrumented) source
-                    judge_dict["source_stdout"] = source_orig_stdout  # use uninstrumented stdout; source_verify_stdout has passthrough dump noise
-                else:
-                    judge_dict = dict(input_content_llmjudge_dict)  # shallow copy so strip below does not mutate the shared dict
-                    judge_dict["source_code"] = code_blocks[0]      # compare LASSI code against SOURCE_orig (uninstrumented); T1+T2 verified by this point so the judge should see the clean algorithm, not the LASSI-VERIFY blocks
-                    judge_dict["source_stdout"] = source_orig_stdout  # uninstrumented baseline; source_verify_stdout has Tier 2 passthrough noise
-                    # Strip T1 + T2 LASSI-VERIFY blocks from the generated code body so the
-                    # judge sees only the algorithmic transformation — correctness is already
-                    # established by the three tiers, so instrumentation is now noise.
-                    judge_dict["refactored_code"] = lassi.verify._strip_t2_blocks(
-                        lassi.verify._strip_t1_blocks(judge_dict.get("refactored_code", ""))
-                    )
-                # Strip Tier 1 + Tier 2 LASSI-VERIFY instrumentation from refactored stdout
-                # so the judge sees only the benchmark's primary output — matching the
-                # original (pre-LASSI) judge design and preventing context-window overflow
-                # from loop-inserted passthrough blocks (which can produce thousands of lines).
-                judge_dict["refactored_stdout"] = _strip_lassi_verify_stdout(judge_dict.get("refactored_stdout", ""))
-                valid_code_flag, judge_response_text, code_analysis = lassi.llm_methods.llm_judge(target_lang, llm_source, model_judge, num_ctx, system_prompt, judge_dict, power_measure, run_code_analysis, verification_log["sourcecode_analysis"], display_response, verifyprompt)
-            else:
-                # Pure three-tier mode (LASSI only, never zero_shot): Tier 1 + Tier 2 determine validity.
-                valid_code_flag = "VALID"
-                judge_response_text = "LLM judge disabled (run_llm_judge=False)"
-                code_analysis = "None"
-                print("\n----- LLM judge disabled: LASSI code accepted by Tier 1 + Tier 2 deterministic gates -----")
+            # (LLM judge ran earlier as a pre-tier baseline measurement — see PRE-TIER section.)
+            # Tier verdicts now decide the framework verdict; see derivation block below.
 
-            # Capture the raw judge verdict immediately after the judge call, before zero-energy guard
-            # or three-tier overrides can modify valid_code_flag. Used for discrepancy logging below.
-            judge_raw_verdict = valid_code_flag
-            # Normalize: the judge prompt only allows "VALID" or "INVALID". Any other response
-            # (e.g. "NONE", malformed output) is treated as INVALID.
-            if valid_code_flag != "VALID":
-                if valid_code_flag != "INVALID":
-                    judge_api_error_count += 1
-                    print(f"\n----- LLM judge returned unexpected verdict '{valid_code_flag}' — normalizing to INVALID (judge API error count: {judge_api_error_count}/3) -----")
-                    if judge_api_error_count >= 3:
-                        raise RuntimeError(
-                            f"LLM judge returned a non-verdict ('{valid_code_flag}') 3 times in a row. "
-                            "This likely indicates a persistent API error (e.g. context-window overflow, "
-                            "network timeout). Stopping pipeline to prevent further wasted iterations. "
-                            "Check the monitor log for the error details, fix the root cause "
-                            "(e.g. reduce prompt size), then restart."
-                        )
-                valid_code_flag = "INVALID"
-
-            # --- ZERO-SHOT EMPIRICAL VERIFICATION ---
-            # Run Tier 1 → Tier 2 → Tier 3 on the zero-shot code as additional empirical data.
-            # Each tier starts from the original (uninstrumented) zero-shot code using
-            # code_insert_instrumentation_from_template with a single-tier template derived
-            # from SOURCE_verify: T1 uses SOURCE_verify with T2 blocks stripped; T2 uses
-            # SOURCE_verify with T1 blocks stripped. This avoids T2 insertion messing up T1
-            # blocks and gives each tier a clean start from the original code.
-            # Single attempt only — no retries, no self-correction feedback.
-            # Override policy: if empirical verdict is FAIL, it overrides the judge
-            # (VALID → INVALID). If empirical is PASS or SKIP, the judge verdict stands.
-            # The attempt log records both the raw judge_verdict and the override_applied
-            # field, so the analysis script can recover the raw judge opinion for V3.
+            # --- ZERO-SHOT EMPIRICAL VERIFICATION (consolidated single-binary) ---
+            # Single LLM-generated combined T1+T2 instrumented binary (basellm_zs_verify),
+            # mirroring how LASSI codes are evaluated: one binary, one stdout, per-tier
+            # verdicts extracted in sequence with fail-fast gating.
+            #
+            # Flow:
+            #   1. Instrument the zero-shot code with the full SOURCE_verify (T1+T2)
+            #      template — one LLM call, one compile, one execute.
+            #   2. From the binary's stdout: check_tier1_assertions() → T1 verdict.
+            #   3. Only if T1 PASS: compare_passthrough_outputs() → T2 verdict
+            #      (against the SOURCE_verify spec).
+            #   4. Only if T1 + T2 both PASS: run T3 metamorphic variants (separate
+            #      compiles by design — each relation needs its own input transform).
+            #
+            # Single attempt only — no retries, no self-correction. The zero-shot
+            # baseline measures what the vanilla LLM produces without the LASSI
+            # self-correction loop; adding SC here would muddy the LASSI-vs-baseline
+            # comparison.
+            #
+            # The same binary execution captures instrumented runtime/energy as raw
+            # data (basellm_zs_verify_runtime_s, basellm_zs_verify_energy_J) — kept
+            # for diagnostic visibility but NOT used for a calculated comparison. The
+            # primary paper fairness comparison is uninstrumented zs (zeroshot_runtime_s)
+            # vs uninstrumented LASSI best (lassiee_clean_runtime_s); both already exist.
+            #
+            # Judge-as-baseline design: the empirical verdict IS the framework verdict
+            # for the zero-shot code when verify_zeroshot=True; the LLM judge baseline
+            # is recorded separately as judge_baseline_verdict for downstream comparison.
+            # When verify_zeroshot=False, only the judge baseline exists for the zero-shot
+            # code (Mode A's strictest "vanilla LLM + judge only" baseline) — the
+            # final_verdict derivation block below falls back to it in that case.
             _, _zs_src_ext = os.path.splitext(source_file_path)
             if verify_zeroshot and zero_shot:
                 print("\n\n----- " + color.BOLD + color.PURPLE +
@@ -2030,107 +3044,115 @@ def auto_code_llmgeneration_pipeline(prompts,
                 _zs_code = code_blocks[-1]   # uninstrumented zero-shot generated code
                 _sv_code = input_code        # SOURCE_verify (T1+T2 instrumented); code_blocks[1]
 
-                # --- Zero-shot Tier 1 ---
-                print(f"\n----- Zero-Shot Empirical Verify: Tier 1 instrumentation -----")
-                _zs_t1_template = lassi.verify._strip_t2_blocks(_sv_code)  # T1-only template
-                _zs_t1_instr = lassi.verify.code_insert_instrumentation_from_template(
-                    _zs_code, _zs_t1_template,
+                # --- Single combined T1+T2 instrumented variant ---
+                print(f"\n----- Zero-Shot Empirical Verify: instrumenting basellm with combined T1+T2 template -----")
+                _zs_instr = lassi.verify.code_insert_instrumentation_from_template(
+                    _zs_code, _sv_code,
                     llm_source, model, num_ctx, system_prompt,
                     display_response, verifyprompt=verifyprompt,
                 )
-                if not _zs_t1_instr:
-                    print(color.RED + "[Zero-Shot Tier 1] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
-                    zs_tier1_verdict = "INSTRUMENT_ERROR"
-                else:
-                    _zs_t1_path = os.path.join(experiment_data_directory,
-                                                file_name + "_zs_t1_Trial" + str(trial_number) + _zs_src_ext)
-                    with open(_zs_t1_path, 'w') as _f:
-                        _f.write(_zs_t1_instr)
-                    _zs_t1_compile, _zs_t1_exe = lassi.code_manager.compile_code(
-                        _zs_t1_path, target_lang, code_compiler, code_compiler_kwds
+
+                # Install the witness-chain harness into the zero-shot variant the same way as
+                # for LASSI variants (deterministic re-insertion), so its [witness_chain_state]
+                # passthrough is comparable to the SOURCE_verify spec. The template replication above
+                # may have copied a partial/garbled harness; code_insert_witness_chain strips any
+                # existing harness first, then installs a fresh one around the zero-shot structure.
+                if _witness_chain_applied and _zs_instr:
+                    _zs_instr, _zs_cv_status = lassi.verify.code_insert_witness_chain(
+                        _zs_instr, llm_source, model, num_ctx, system_prompt, display_response,
+                        verifyprompt=verifyprompt, code_description=llm_code_description_response,
+                        is_variant=True,
+                        source_harness_reference=code_blocks[1] if len(code_blocks) > 1 else None,
                     )
-                    if _zs_t1_compile != "":
-                        print(color.RED + "[Zero-Shot Tier 1] Compile failed — INSTRUMENT_ERROR." + color.END)
+                    _zs_instr = _apply_witness_fallback_if_needed(_zs_instr, _witness_chain_use_fallback_design)
+                    print(f"\n----- Zero-Shot Empirical Verify: witness-chain re-install status={_zs_cv_status} -----")
+
+                _zs_stdout = ""          # combined-binary stdout; T1+T2 verdicts parsed from here
+                _zs_combined_ok = False  # True iff instrumentation+compile+execute all succeeded
+                # Per-tier diagnostic dicts — initialize so verification_log persistence
+                # has something to stash even when a tier is skipped (T2/T3 only run when
+                # the prior tier(s) PASS). Empty dict signals "not exercised".
+                _zs_t1_diag = {}
+                _zs_t2_diag = {}
+                _zs_t3_diag = {}
+                _zs_t3_results = []
+                if not _zs_instr:
+                    print(color.RED + "[basellm_zs_verify] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
+                    zs_tier1_verdict = "INSTRUMENT_ERROR"
+                    experiment_data["basellm_zs_verify_status"] = "instrument_error"
+                else:
+                    _zs_path = os.path.join(experiment_data_directory,
+                                             file_name + "_basellm_zs_verify_Trial" + str(trial_number) + _zs_src_ext)
+                    with open(_zs_path, 'w') as _f:
+                        _f.write(_zs_instr)
+                    _zs_compile, _zs_exe = lassi.code_manager.compile_code(
+                        _zs_path, target_lang, code_compiler, code_compiler_kwds
+                    )
+                    if _zs_compile != "":
+                        print(color.RED + "[basellm_zs_verify] Compile failed — INSTRUMENT_ERROR." + color.END)
                         zs_tier1_verdict = "INSTRUMENT_ERROR"
+                        experiment_data["basellm_zs_verify_status"] = "compile_error"
                     else:
-                        _zs_t1_exec_r, _zs_t1_stdout, *_ = lassi.code_manager.execute_code_selectvendor(
-                            experiment_data_directory, 0, True, trial_number,
-                            directory, _zs_t1_exe, exe_input_parameters,
-                            False, "zs_t1_verify", target_lang, build_script, make_script,
+                        (_zs_result, _zs_stdout_full, _zs_energy, _zs_avg_power, _zs_std_power,
+                         _zs_duration, _zs_metrics) = lassi.code_manager.execute_code_selectvendor(
+                            experiment_data_directory, code_version, True, trial_number,
+                            directory, _zs_exe, exe_input_parameters,
+                            power_measure, "basellm_zs_verify", target_lang, build_script, make_script,
                             gpu_vendor="auto", wait=5,
                         )
-                        if _zs_t1_exec_r != "0":
-                            print(color.RED + "[Zero-Shot Tier 1] Execute failed — INSTRUMENT_ERROR." + color.END)
+                        if _zs_result != "0":
+                            print(color.RED + "[basellm_zs_verify] Execute failed — INSTRUMENT_ERROR." + color.END)
                             zs_tier1_verdict = "INSTRUMENT_ERROR"
+                            experiment_data["basellm_zs_verify_status"] = "execute_error"
                         else:
-                            _zs_t1_verdict, _zs_t1_diag = lassi.verify.check_tier1_assertions(_zs_t1_stdout)
-                            zs_tier1_verdict = _zs_t1_verdict
-                            print(f"\n----- Zero-Shot Empirical Verify: Tier 1 → {zs_tier1_verdict} -----")
-                            if _zs_t1_verdict == "FAIL":
-                                print(_zs_t1_diag.get("summary", ""))
+                            _zs_combined_ok = True
+                            _zs_stdout = _zs_stdout_full
+                            # Raw instrumented runtime/energy data (no calculated diffs)
+                            experiment_data["basellm_zs_verify_status"] = "success"
+                            experiment_data["basellm_zs_verify_runtime_s"] = round(_zs_duration, 4)
+                            if power_measure and _zs_energy > 0:
+                                experiment_data["basellm_zs_verify_energy_J"] = round(_zs_energy, 4)
+                            print(f"[basellm_zs_verify] runtime={round(_zs_duration, 4)}s instrumented "
+                                  f"(basellm uninstrumented={round(duration_refactor, 4)}s, "
+                                  f"SOURCE_verify={round(runtime_history[1], 4)}s)")
 
-                # --- Zero-shot Tier 2 (only if Tier 1 PASS) ---
-                # Instruments T2 passthrough into the original zs_code (not the T1-instrumented code)
-                # so the T2 LLM call cannot inadvertently corrupt the T1 assertion blocks.
-                _zs_t2_stdout = ""
-                _zs_t2_code = ""
-                if run_tier2 and zs_tier1_verdict == "PASS":
-                    print(f"\n----- Zero-Shot Empirical Verify: Tier 2 instrumentation -----")
-                    _zs_t2_template = lassi.verify._strip_t1_blocks(_sv_code)  # T2-only template
-                    _zs_t2_instr = lassi.verify.code_insert_instrumentation_from_template(
-                        _zs_code, _zs_t2_template,
-                        llm_source, model, num_ctx, system_prompt,
-                        display_response, verifyprompt=verifyprompt,
-                    )
-                    if not _zs_t2_instr:
-                        print(color.RED + "[Zero-Shot Tier 2] Instrumentation returned empty — INSTRUMENT_ERROR." + color.END)
-                        zs_tier2_verdict = "INSTRUMENT_ERROR"
-                    else:
-                        _zs_t2_path = os.path.join(experiment_data_directory,
-                                                    file_name + "_zs_t2_Trial" + str(trial_number) + _zs_src_ext)
-                        with open(_zs_t2_path, 'w') as _f:
-                            _f.write(_zs_t2_instr)
-                        _zs_t2_compile, _zs_t2_exe = lassi.code_manager.compile_code(
-                            _zs_t2_path, target_lang, code_compiler, code_compiler_kwds
+                # --- Per-tier verdict extraction (fail-fast on T1, then T2, then T3) ---
+                if _zs_combined_ok:
+                    # Tier 1 — parse assertion blocks from the combined stdout
+                    _zs_t1_verdict, _zs_t1_diag = lassi.verify.check_tier1_assertions(_zs_stdout)
+                    zs_tier1_verdict = _zs_t1_verdict
+                    print(f"\n----- Zero-Shot Empirical Verify: Tier 1 → {zs_tier1_verdict} -----")
+                    if _zs_t1_verdict == "FAIL":
+                        print(_zs_t1_diag.get("summary", ""))
+
+                    # Tier 2 — only if T1 PASS; parse passthrough blocks from the same stdout
+                    if run_tier2 and zs_tier1_verdict == "PASS":
+                        _zs_t2_verdict, _zs_t2_diag = lassi.verify.compare_passthrough_outputs(
+                            spec_stdout=passthrough_spec_output,
+                            generated_stdout=_zs_stdout,
+                            tolerance=tier2_tolerance,
+                            n_safety_override=tolerance_safety_factor,
+                            buffer_classification=tier2_buffer_classification,
                         )
-                        if _zs_t2_compile != "":
-                            print(color.RED + "[Zero-Shot Tier 2] Compile failed — INSTRUMENT_ERROR." + color.END)
-                            zs_tier2_verdict = "INSTRUMENT_ERROR"
-                        else:
-                            _zs_t2_exec_r, _zs_t2_stdout, *_ = lassi.code_manager.execute_code_selectvendor(
-                                experiment_data_directory, 0, True, trial_number,
-                                directory, _zs_t2_exe, exe_input_parameters,
-                                False, "zs_t2_verify", target_lang, build_script, make_script,
-                                gpu_vendor="auto", wait=5,
-                            )
-                            if _zs_t2_exec_r != "0":
-                                print(color.RED + "[Zero-Shot Tier 2] Execute failed — INSTRUMENT_ERROR." + color.END)
-                                zs_tier2_verdict = "INSTRUMENT_ERROR"
-                            else:
-                                _zs_t2_verdict, _zs_t2_diag = lassi.verify.compare_passthrough_outputs(
-                                    spec_stdout=passthrough_spec_output,
-                                    generated_stdout=_zs_t2_stdout,
-                                    tolerance=tier2_tolerance,
-                                )
-                                zs_tier2_verdict = _zs_t2_verdict
-                                _zs_t2_code = _zs_t2_instr  # save for T3 (only when compile+execute succeeded)
-                                print(f"\n----- Zero-Shot Empirical Verify: Tier 2 → {zs_tier2_verdict} -----")
-                                if _zs_t2_diag.get("failures"):
-                                    print(_zs_t2_diag.get("summary", ""))
+                        zs_tier2_verdict = _zs_t2_verdict
+                        print(f"\n----- Zero-Shot Empirical Verify: Tier 2 → {zs_tier2_verdict} -----")
+                        if _zs_t2_diag.get("failures"):
+                            print(_zs_t2_diag.get("summary", ""))
 
-                    # --- Zero-shot Tier 3 (only if Tier 2 PASS) ---
-                    # Self-referential: the zero-shot T2 code is tested against itself under
-                    # input transformation, using _zs_t2_stdout as the baseline — same design
-                    # as LASSI-generated codes. file_name is the actual benchmark name (not
-                    # file_name+"_zs") so Stage 0 source-variant templates are found correctly.
-                    # code_version="zs" produces _vzs suffix to distinguish from LASSI variants.
-                    if run_tier3 and tier3_active_relations and zs_tier2_verdict == "PASS":
+                    # Tier 3 — only if T1 + T2 both PASS (separate metamorphic variants).
+                    # Self-referential: zs code tested against itself under input
+                    # transformation, using _zs_stdout as the baseline (same design as
+                    # LASSI codes). file_name is the actual benchmark name (not file_name
+                    # +"_zs") so Stage 0 source-variant templates are found correctly.
+                    # code_version="zs" produces _vzs suffix on variant artifacts.
+                    if (run_tier3 and tier3_active_relations
+                            and zs_tier1_verdict == "PASS" and zs_tier2_verdict == "PASS"):
                         print(f"\n----- Zero-Shot Empirical Verify: Tier 3 -----")
                         _zs_t3_verdict, _zs_t3_results, _zs_t3_diag = lassi.verify.run_metamorphic_variants(
-                            _zs_t2_code,
+                            lassi.verify._strip_witness_chain_blocks(_zs_instr),  # witness-chain harness stripped: Tier 3 does not compare chain state
                             tier3_active_relations,
                             tier3_contract,
-                            _zs_t2_stdout,
+                            _zs_stdout,
                             llm_source, model, num_ctx, system_prompt,
                             display_response,
                             directory, file_name, code_compiler, code_compiler_kwds,
@@ -2139,6 +3161,7 @@ def auto_code_llmgeneration_pipeline(prompts,
                             experiment_data_directory=experiment_data_directory,
                             code_version="zs",
                             verifyprompt=verifyprompt,
+                            n_safety_override=tolerance_safety_factor,
                         )
                         zs_tier3_verdict = _zs_t3_verdict
                         print(f"\n----- Zero-Shot Empirical Verify: Tier 3 → {zs_tier3_verdict} -----")
@@ -2163,6 +3186,14 @@ def auto_code_llmgeneration_pipeline(prompts,
                 verification_log["zeroshot_tier2_verdict"] = zs_tier2_verdict
                 verification_log["zeroshot_tier3_verdict"] = zs_tier3_verdict
                 verification_log["zeroshot_empirical_verdict"] = zs_empirical_verdict
+                # Persist per-tier diagnostic detail so the ZS verdict is auditable from the
+                # trial JSON without having to dig through the monitor log. Matches the
+                # detail level captured for LASSI iterations in verification_log["tier2_results"]
+                # and ["tier3_results"]. Empty dicts/lists indicate the tier was not exercised.
+                verification_log["zeroshot_tier1_diagnostic"] = _zs_t1_diag
+                verification_log["zeroshot_tier2_diagnostic"] = _zs_t2_diag
+                verification_log["zeroshot_tier3_diagnostic"] = _zs_t3_diag
+                verification_log["zeroshot_tier3_results"] = _zs_t3_results
                 experiment_data["zeroshot_tier1_verdict"] = zs_tier1_verdict
                 experiment_data["zeroshot_tier2_verdict"] = zs_tier2_verdict
                 experiment_data["zeroshot_tier3_verdict"] = zs_tier3_verdict
@@ -2170,108 +3201,88 @@ def auto_code_llmgeneration_pipeline(prompts,
                 print(f"\n----- Zero-Shot Empirical Verdict: {zs_empirical_verdict} "
                       f"(T1={zs_tier1_verdict}, T2={zs_tier2_verdict}, T3={zs_tier3_verdict}) -----")
 
-            # Empirical verdict overrides LLM judge for zero-shot code.
-            # If empirical verification ran and found a failure, the code is INVALID
-            # regardless of what the judge said. If empirical was SKIP (verify_zeroshot
-            # disabled or no active tiers ran), fall back to the judge verdict.
-            if verify_zeroshot and zero_shot and zs_empirical_verdict == "FAIL":
-                if valid_code_flag == "VALID":
-                    print(color.YELLOW + f"[Zero-Shot] Empirical verification FAIL overrides judge VALID → marking INVALID" + color.END)
-                valid_code_flag = "INVALID"
-            elif verify_zeroshot and zero_shot and zs_empirical_verdict == "PASS":
-                pass  # judge and empirical agree (or empirical confirms VALID — keep as-is)
-            # zs_empirical_verdict == "SKIP": keep judge verdict unchanged
+            # --- FRAMEWORK FINAL VERDICT DERIVATION (judge-as-baseline) ---
+            # The framework verdict (valid_code_flag) is derived from tier verdicts alone for
+            # LASSI codes; the LLM judge baseline (judge_raw_verdict) does NOT participate.
+            # For zero-shot codes when verify_zeroshot=True, the empirical (T1/T2/T3) verdict
+            # IS the framework verdict — independent of the judge baseline (no override). When
+            # verify_zeroshot=False, the judge baseline IS the framework verdict (Mode A's
+            # strictest "vanilla LLM + judge only" baseline; no empirical was run).
+            # T1 SKIP/FAIL/exhaustion already exited via `continue` paths above, so by the time
+            # we reach here for a LASSI code, either all active tiers ran cleanly or T2/T3
+            # budget was exhausted on this attempt.
+            _tier2_was_exhausted = tier2_exhausted  # captured for the override_applied tag below
+            _tier3_was_exhausted = tier3_exhausted
+
+            if not zero_shot:
+                _t3_ok = (tier3_verdict == "PASS" or not (run_tier3 and tier3_active_relations))
+                if tier2_exhausted:
+                    valid_code_flag = "INVALID"
+                    _final_override_label = "tier2_exhausted"
+                    judge_response_text = (f"Tier 2 self-correction budget exhausted "
+                                           f"({self_correction_verify_counter_code_max} attempts): "
+                                           f"code marked INVALID; fresh generation next.")
+                elif tier3_exhausted:
+                    valid_code_flag = "INVALID"
+                    _final_override_label = "tier3_exhausted"
+                    judge_response_text = (f"Tier 3 metamorphic testing budget exhausted "
+                                           f"({self_correction_tier3_counter_code_max} attempts): "
+                                           f"code marked INVALID.")
+                elif tier1_verdict == "PASS" and tier2_verdict == "PASS" and _t3_ok:
+                    valid_code_flag = "VALID"
+                    _final_override_label = "none"
+                else:
+                    # Defensive: any other state (unexpected SKIP/FAIL that escaped the continue
+                    # paths) lands here as INVALID. Should be unreachable in normal flow.
+                    valid_code_flag = "INVALID"
+                    _final_override_label = "none"
+                tier2_exhausted = False   # reset for next iteration
+                tier3_exhausted = False
+            elif zero_shot:
+                # Zero-shot: empirical verdict is the framework verdict when verify_zeroshot=True.
+                # When verify_zeroshot=False (or empirical was SKIP — e.g., all tiers inactive),
+                # fall back to the judge baseline (Mode A's "vanilla LLM + judge only" path).
+                # Judge baseline is recorded independently as judge_raw_verdict / discrepancy log
+                # — no override semantics; the two are parallel measurements.
+                if verify_zeroshot and zs_empirical_verdict == "PASS":
+                    valid_code_flag = "VALID"
+                elif verify_zeroshot and zs_empirical_verdict == "FAIL":
+                    valid_code_flag = "INVALID"
+                else:
+                    # SKIP (empirical inactive) or verify_zeroshot=False — judge baseline is the only signal.
+                    valid_code_flag = "VALID" if judge_raw_verdict == "VALID" else "INVALID"
+                _final_override_label = "none"
 
             # Handle scenario where we might have a bad power measurement
             # (only applies in EE mode; in runtime mode energy is always 0)
             if power_measure and total_energy_joules_refactor == 0:
                 valid_code_flag = "INVALID"
 
-            # --- THREE-TIER PRIORITY OVERRIDES ---
-            # Three-tier verdict takes priority over the LLM judge for LASSI codes (not zero_shot).
-            # Discrepancies are logged to verification_log["judge_discrepancies"] for research analysis:
-            # they reveal cases where the LLM judge was wrong in either direction.
-            # Capture exhausted flags BEFORE overrides reset them (needed for override_applied in Table 2 ★)
-            _tier2_was_exhausted = tier2_exhausted
-            _tier3_was_exhausted = tier3_exhausted
-            _override2_fired = False
-
-            # Override 1 (false positive): Tier 2 budget exhausted → INVALID even if judge said VALID.
-            # T2 per-code limit exhausted: the code has a fundamental numerical equivalence flaw.
-            # T1 exhaustion uses a continue path (see T1 SC branch) and never reaches this override block.
-            if tier2_exhausted and not zero_shot:
-                if judge_raw_verdict == "VALID":
-                    verification_log["judge_discrepancies"].append({
-                        "code_version": code_version, "zero_shot": zero_shot,
-                        "type": "false_positive",
-                        "judge_verdict": judge_raw_verdict, "tier2_verdict": "FAIL_exhausted",
-                        "final_verdict": "INVALID",
-                    })
-                    print(f"\n----- Three-tier override: judge=VALID overridden to INVALID (Tier 2 exhausted — judge false positive) -----")
-                valid_code_flag = "INVALID"
-                judge_response_text = f"Tier 2 self-correction budget exhausted ({self_correction_verify_counter_code_max} attempts): code marked INVALID; fresh generation next."
-                code_analysis = "None"
-                tier2_exhausted = False  # reset for next iteration
-
-            # Override 2 (false negative): Tier 1 PASS + Tier 2 PASS + Tier 3 PASS/ok-SKIP → VALID even if judge said INVALID.
-            # All active tiers must be satisfied: Tier 2 PASS alone is insufficient if Tier 1 or Tier 3 is active.
-            # tier1_verdict == "SKIP" is NOT acceptable here and cannot reach this point: any T1 SKIP/FAIL causes
-            # a `continue` back to the top of the while loop (lines 1727, 1763) before the judge or overrides run.
-            # The T1 check here therefore only needs to allow PASS.
-            # tier3_verdict == "SKIP" is only acceptable when T3 is genuinely inactive (run_tier3=False).
-            # When run_tier3=True, Stage 0 guarantees at least one active relation (aborts trial otherwise),
-            # so tier3_active_relations is never empty in the main loop — the T3 fallback below only covers
-            # the run_tier3=False configuration opt-out.
-            # Tier 1 exhausted is handled inline (continue before judge); Tier 3 exhausted by Override 3.
-            # Only applies to LASSI codes (zero_shot has no instrumentation → SKIP, no override).
-            _t3_ok = (tier3_verdict == "PASS" or not (run_tier3 and tier3_active_relations))
-            if (tier1_verdict == "PASS" and tier2_verdict == "PASS"
-                    and _t3_ok
-                    and valid_code_flag != "VALID" and not zero_shot):
-                _t1_label = (f"Tier 1 {tier1_verdict}" if not zero_shot else "Tier 1 inactive")
-                _t3_label = (f"Tier 3 {tier3_verdict}" if (run_tier3 and tier3_active_relations)
-                             else "Tier 3 inactive")
+            # --- DISCREPANCY RECORD (per final-attempt, when the judge ran) ---
+            # Captures the raw (judge_baseline, tier verdicts, final_verdict) tuple for every
+            # attempt that reached the judge. Used by downstream analysis to compute judge
+            # FP/FN counts vs the framework verdict — no override semantics are involved.
+            if run_llm_judge or zero_shot:
+                if not zero_shot:
+                    _disc_t1, _disc_t2, _disc_t3 = tier1_verdict, tier2_verdict, tier3_verdict
+                else:
+                    _disc_t1 = zs_tier1_verdict if verify_zeroshot else "SKIP"
+                    _disc_t2 = zs_tier2_verdict if verify_zeroshot else "SKIP"
+                    _disc_t3 = zs_tier3_verdict if verify_zeroshot else "SKIP"
                 verification_log["judge_discrepancies"].append({
                     "code_version": code_version, "zero_shot": zero_shot,
-                    "type": "false_negative",
-                    "judge_verdict": judge_raw_verdict, "tier1_verdict": tier1_verdict,
-                    "tier2_verdict": tier2_verdict, "tier3_verdict": tier3_verdict,
-                    "final_verdict": "VALID",
+                    "judge_baseline_verdict": judge_raw_verdict,
+                    "judge_response_text": judge_raw_response,
+                    "tier1_verdict": _disc_t1,
+                    "tier2_verdict": _disc_t2,
+                    "tier3_verdict": _disc_t3,
+                    "final_verdict": valid_code_flag,
                 })
-                print(f"\n----- Three-tier override: judge={judge_raw_verdict} overridden to VALID "
-                      f"({_t1_label} + Tier 2 PASS + {_t3_label} — judge false negative) -----")
-                valid_code_flag = "VALID"
-                _override2_fired = True
 
-            # Override 3 (false positive): Tier 3 budget exhausted → INVALID regardless of judge or Tier 2.
-            # Tier 3 is the final authority: a code that cannot satisfy a metamorphic relation after
-            # self_correction_tier3_counter_code_max attempts has a structural mathematical flaw.
-            # This override runs AFTER Override 2 so it has the last word.
-            if tier3_exhausted and not zero_shot:
-                if valid_code_flag == "VALID":
-                    verification_log["judge_discrepancies"].append({
-                        "code_version": code_version, "zero_shot": zero_shot,
-                        "type": "false_positive",
-                        "judge_verdict": judge_raw_verdict, "tier3_verdict": "FAIL_exhausted",
-                        "final_verdict": "INVALID",
-                    })
-                    print(f"\n----- Three-tier override: verdict=VALID overridden to INVALID (Tier 3 exhausted — false positive) -----")
-                valid_code_flag = "INVALID"
-                judge_response_text = (f"Tier 3 metamorphic testing budget exhausted "
-                                       f"({self_correction_tier3_counter_code_max} attempts): code marked INVALID.")
-                code_analysis = "None"
-                tier3_exhausted = False  # reset for next iteration
-
-            # Table 2 ★ final attempt row — emitted after all overrides have settled valid_code_flag.
-            # LASSI codes and (now) the zero-shot code each get one row here.
-            # Compile/execute errors use the earlier continue paths and never reach here.
+            # Table 2 ★ final attempt row — emitted after the tier-derived framework verdict is set.
+            # LASSI codes and the zero-shot code each get one row here. Compile/execute errors
+            # use the earlier continue paths and never reach here.
             if not zero_shot:
-                _override_applied = (
-                    "judge_override_tier3_exhausted" if _tier3_was_exhausted else
-                    "judge_override_tiers_pass"      if _override2_fired     else
-                    "judge_override_tier2_exhausted" if _tier2_was_exhausted else
-                    "none"
-                )
                 _cb_idx = len(code_blocks) - 1
                 _t1_instr = lassi.verify.extract_tier1_labels(code_blocks[-1])
                 _t2_instr = lassi.verify.extract_tier2_labels(code_blocks[-1])
@@ -2288,8 +3299,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_verdict=tier2_verdict, tier2_instrumented_labels=_t2_instr,
                     tier2_diagnostic=tier2_diagnostic,
                     tier3_verdict=tier3_verdict, tier3_diagnostic=tier3_diagnostic,
-                    judge_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
-                    override_applied=_override_applied,
+                    judge_baseline_verdict=judge_raw_verdict,
+                    judge_response_text=judge_raw_response,
+                    final_verdict=valid_code_flag,
+                    override_applied=_final_override_label,
                 )
                 attempt_log_buffer.append(_rec)
                 current_sc_trigger = None  # reset; next fresh generation starts clean
@@ -2298,6 +3311,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                 # (zs_tier1/2/3_verdict) from the separate T1/T2 compile+execute runs, or "SKIP"
                 # if verify_zeroshot=False. The zero-shot code has no inline instrumentation so
                 # tier{1,2}_instrumented_labels are empty strings.
+                # judge-as-baseline: judge_baseline_verdict and final_verdict are independent
+                # measurements (no override). override_applied stays "none" for zero-shot now;
+                # the discrepancy log captures the (judge, framework) pair for downstream
+                # comparison.
                 _rec = _build_attempt_record(
                     app_name=file_name, trial_number=trial_number,
                     code_block_index=len(code_blocks) - 1, attempt_number=1,
@@ -2311,13 +3328,10 @@ def auto_code_llmgeneration_pipeline(prompts,
                     tier2_verdict=zs_tier2_verdict, tier2_instrumented_labels="",
                     tier2_diagnostic={},
                     tier3_verdict=zs_tier3_verdict, tier3_diagnostic={},
-                    judge_verdict=judge_raw_verdict, final_verdict=valid_code_flag,
-                    override_applied=(
-                        "zs_empirical_fail→INVALID"
-                        if (verify_zeroshot and zs_empirical_verdict == "FAIL"
-                            and judge_raw_verdict == "VALID")
-                        else "none"
-                    ),
+                    judge_baseline_verdict=judge_raw_verdict,
+                    judge_response_text=judge_raw_response,
+                    final_verdict=valid_code_flag,
+                    override_applied="none",
                 )
                 attempt_log_buffer.append(_rec)
 
@@ -2325,7 +3339,7 @@ def auto_code_llmgeneration_pipeline(prompts,
             if not zero_shot:
                 valid_code_history.append(valid_code_flag)
             else:
-                valid_code_history.append("basellm_" + stage + "_" + valid_code_flag)
+                valid_code_history.append("basellm_" + valid_code_flag)
             
             # Substract out idle metrics: we do this during the power data collection
             total_energy_joules_lessidle = total_energy_joules_refactor - idle_energy_joules
@@ -2353,7 +3367,15 @@ def auto_code_llmgeneration_pipeline(prompts,
             print("  Valid code history: ", end=' ')
             print(valid_code_history)
             if zero_shot and verify_zeroshot and zs_empirical_verdict != "SKIP":
-                _agree = "✓ agree" if (zs_empirical_verdict == "PASS") == (valid_code_history[-1].endswith("VALID")) else "⚠ DISAGREE"
+                # Map both verdicts to a common boolean (pass=True, fail=False) before
+                # comparing — judge says VALID/INVALID, empirical says PASS/FAIL. They
+                # AGREE when VALID↔PASS or INVALID↔FAIL. (Previous version used
+                # valid_code_history[-1].endswith("VALID"), which was always True for
+                # both "basellm_VALID" AND "basellm_INVALID", silently flipping every
+                # empirical FAIL into a spurious DISAGREE regardless of the judge.)
+                _judge_pass = (judge_raw_verdict == "VALID")
+                _empirical_pass = (zs_empirical_verdict == "PASS")
+                _agree = "✓ agree" if _judge_pass == _empirical_pass else "⚠ DISAGREE"
                 print(f"  Zero-shot: judge={judge_raw_verdict}, empirical={zs_empirical_verdict} ({_agree})")
             print("  Iteration log: ", end= ' ')
             print(iteration_log)
@@ -2700,6 +3722,59 @@ def auto_code_llmgeneration_pipeline(prompts,
                 print(f"[Best Clean Run] EXECUTE EXCEPTION — using instrumented metrics for final report.\n{_clean_ex}")
                 lassiee_clean_status = "execute_error"
 
+        # ----------------------------------------------------------------
+        # LASSI RESULT ARTIFACT
+        # Production framing: LASSI's single deliverable is "the best validated
+        # refactoring that OUTPERFORMS source, if one exists" — no intermediate
+        # versions, no attempt count. Emit clearly-named copies ONLY when the
+        # winner is validated (we are already inside tracking_best_version > 1)
+        # AND faster than source on the fair clean comparison. Two copies:
+        #   *_LASSI_RESULT_Trial{N}.cu               — deployable (instrumentation stripped)
+        #   *_LASSI_RESULT_instrumented_Trial{N}.cu  — as-validated (Tier 1/2/3 + witness blocks)
+        # "Faster than source" uses the clean uninstrumented metric (energy in
+        # EE mode, else runtime); the clean run must have succeeded so the
+        # comparison is fair AND the deployable copy is known-compilable.
+        # ----------------------------------------------------------------
+        _result_metric = lassiee_clean_energy_diff if power_measure else lassiee_clean_runtime_diff
+        _result_beats_source = (
+            lassiee_clean_status == "success"
+            and isinstance(_result_metric, (int, float))
+            and _result_metric < 0
+        )
+        if _result_beats_source:
+            _metric_label = ("energy " + str(lassiee_clean_energy_diff)) if power_measure \
+                else ("runtime " + str(lassiee_clean_runtime_diff))
+            _result_header = (
+                "// ============================================================\n"
+                "// LASSI-VERIFY RESULT — validated refactoring that outperforms source\n"
+                f"// Application: {app_name}   Trial: {trial_number}\n"
+                f"// Clean (uninstrumented) vs source: {_metric_label}%\n"
+                f"// Verified: Tier 1/2/3 + witness chain (see result_verification_log_*_Trial{trial_number}.json)\n"
+                f"// Deployable stripped code; as-validated instrumented copy: "
+                f"*_LASSI_RESULT_instrumented_Trial{trial_number}.cu\n"
+                "// ============================================================\n"
+            )
+            _result_clean_path = os.path.join(
+                experiment_data_directory,
+                file_name_save + "_LASSI_RESULT_Trial" + str(trial_number) + ".cu")
+            with open(_result_clean_path, 'w') as _rf:
+                _rf.write(_result_header + best_clean_code)
+            _result_instr_path = os.path.join(
+                experiment_data_directory,
+                file_name_save + "_LASSI_RESULT_instrumented_Trial" + str(trial_number) + ".cu")
+            with open(_result_instr_path, 'w') as _rf:
+                _rf.write(best_code_raw)
+            print(color.GREEN + color.BOLD +
+                  f"\n----- [LASSI RESULT] Validated refactoring beats source "
+                  f"({_metric_label}%); wrote deployable + as-validated copies:\n"
+                  f"        {os.path.basename(_result_clean_path)}\n"
+                  f"        {os.path.basename(_result_instr_path)} -----" + color.END)
+        else:
+            print(f"\n----- [LASSI RESULT] No result artifact emitted — best validated "
+                  f"variant does not outperform source "
+                  f"(clean_status={lassiee_clean_status}, "
+                  f"{'energy' if power_measure else 'runtime'}_diff={_result_metric}). -----")
+
     # Prompt the LLM to compare the codes between SOURCE and the "BEST" refactored version.
     # Only run if a generated code exists (tracking_best_version > 1; indices 0-1 are source versions).
     if (tracking_best_version > 1):
@@ -2944,9 +4019,25 @@ def auto_code_llmgeneration_pipeline(prompts,
         # overhead (SOURCE_verify vs SOURCE_orig), not an optimization result — suppress as N/A.
         experiment_data["lassiee_energy_diff"] = round(((energy_history[best_index] - sourcecode_total_energy_joules) / sourcecode_total_energy_joules) * 100 ,2) if best_index > 1 and power_measure and sourcecode_total_energy_joules != 0 else "N/A"
         experiment_data["lassiee_avg_power_diff"] = round(((power_history[best_index] - sourcecode_ave_power) / sourcecode_ave_power) * 100 ,2) if best_index > 1 and power_measure and sourcecode_ave_power != 0 else "N/A"
-        # Baseline: runtime_history[0] = SOURCE_orig (uninstrumented). duration at this point
-        # is SOURCE_verify runtime (overwritten at Stage 0b); using it would give an inflated diff.
-        experiment_data["lassiee_runtime_diff"] = round(((runtime_history[best_index] - runtime_history[0]) / runtime_history[0]) * 100 ,2) if best_index > 1 and len(runtime_history) > 0 and runtime_history[0] != 0 else "N/A"
+        # Runtime diff prefers a CLEAN-vs-CLEAN comparison (uninstrumented LASSI best, via
+        # the strip-and-rebuild step, vs runtime_history[0] = SOURCE_orig uninstrumented).
+        # When the clean rebuild failed (compile_error from dangling harness references, an
+        # LLM-restructured loop the strip pattern didn't recognize, etc.), fall back to an
+        # apples-to-apples INSTRUMENTED comparison: runtime_history[best_index] (instrumented
+        # LASSI winner) vs runtime_history[1] (SOURCE_verify, also instrumented). The earlier
+        # silent fallback to runtime_history[0] (clean source) as the denominator produced an
+        # invalid number that conflated optimization with instrumentation overhead.
+        # To distinguish the two cases when reading the CSV: lassiee_clean_status == "success"
+        # ⇒ diff is clean-vs-clean; otherwise diff is instrumented-vs-instrumented.
+        if best_index > 1:
+            if lassiee_clean_status == "success" and lassiee_clean_runtime_s != "NA" and len(runtime_history) > 0 and runtime_history[0] != 0:
+                experiment_data["lassiee_runtime_diff"] = round(((lassiee_clean_runtime_s - runtime_history[0]) / runtime_history[0]) * 100, 2)
+            elif len(runtime_history) > 1 and runtime_history[1] != 0:
+                experiment_data["lassiee_runtime_diff"] = round(((runtime_history[best_index] - runtime_history[1]) / runtime_history[1]) * 100, 2)
+            else:
+                experiment_data["lassiee_runtime_diff"] = "N/A"
+        else:
+            experiment_data["lassiee_runtime_diff"] = "N/A"
         match_code_comparison_response = re.search(r"\[OPTIMIZATION LIST\](.*?)\[/OPTIMIZATION LIST\]", code_comparison_response, re.DOTALL)
         if match_code_comparison_response:
             optimization_list_text = match_code_comparison_response.group(1).strip()
@@ -2995,8 +4086,17 @@ def auto_code_llmgeneration_pipeline(prompts,
     experiment_data["tier2_fail_total"] = sum(1 for r in attempt_log_buffer
                                               if str(r.get("tier2_verdict", "")).startswith("FAIL")
                                               and r.get("is_final_attempt", False))
-    experiment_data["judge_false_positives"] = sum(1 for d in discrepancies if d.get("type") == "false_positive")
-    experiment_data["judge_false_negatives"] = sum(1 for d in discrepancies if d.get("type") == "false_negative")
+    # Judge FP/FN recomputed from the raw (judge_baseline, final) verdict pair per the
+    # judge-as-baseline design — no override semantics. A false positive is "judge said VALID
+    # but framework (tier-derived) said INVALID"; a false negative is the inverse.
+    experiment_data["judge_false_positives"] = sum(
+        1 for d in discrepancies
+        if d.get("judge_baseline_verdict") == "VALID" and d.get("final_verdict") == "INVALID"
+    )
+    experiment_data["judge_false_negatives"] = sum(
+        1 for d in discrepancies
+        if d.get("judge_baseline_verdict") == "INVALID" and d.get("final_verdict") == "VALID"
+    )
     tier3_results_vlog = verification_log.get("tier3_results", [])
     experiment_data["tier3_pass_count"] = sum(1 for r in attempt_log_buffer
                                               if str(r.get("tier3_verdict", "")).startswith("PASS")
@@ -3058,15 +4158,19 @@ def auto_code_llmgeneration_pipeline(prompts,
         # Runtime: use uninstrumented values wherever available.
         # - Source code: runtime_history[0] = SOURCE_orig (uninstrumented; no Tier 1/2 overhead)
         # - Base LLM code: runtime_history[2] = zero-shot output (generated from SOURCE_orig, no LASSI-VERIFY blocks)
+        # - Base LLM code (instrumented): basellm_zs_verify_runtime_s (full T1+T2 instrumentation,
+        #   apples-to-apples vs LASSI codes which always carry instrumentation)
         # - Best refactored code: prefer lassiee_clean_runtime_s (strip-and-rerun) if available;
         #   fall back to instrumented runtime_history[best_index] with a note.
         # Idle runtime is omitted — not meaningful for runtime-performance mode.
         _base_llm_rt = str(round(runtime_history[2], 4)) if len(runtime_history) > 2 else "NA"
+        _base_llm_rt_instr = experiment_data.get("basellm_zs_verify_runtime_s", "NA")
         _best_rt_val = lassiee_clean_runtime_s if lassiee_clean_runtime_s != "NA" else runtime_history[best_index]
         _best_rt_note = " (uninstrumented)" if lassiee_clean_runtime_s != "NA" else " (instrumented — clean run unavailable)"
         meta_data_file += "Runtime (s): "
         meta_data_file += "  Source code (uninstrumented): " + str(round(runtime_history[0], 4))
         meta_data_file += "  Base LLM code: " + _base_llm_rt
+        meta_data_file += "  Base LLM code (instrumented): " + str(_base_llm_rt_instr)
         meta_data_file += "  Best Refactored code: " + str(round(_best_rt_val, 4)) + _best_rt_note
     if yes_execute:
         meta_data_file += "\n\n\n----- SOURCE: EXECUTION OUTPUT -----\n"
@@ -3090,7 +4194,15 @@ def auto_code_llmgeneration_pipeline(prompts,
         meta_data_file += "Valid code history: " + str(valid_code_history)
         meta_data_file += "\n"
         meta_data_file += "Iteration log: " + str(iteration_log)
-            
+
+    # GPU health timeline — appended outside the metric-history branch so it is
+    # included for both EE and runtime trials. Captures the pre-flight + per-version
+    # snapshots so the reviewer can see whether GPU state degraded during this trial
+    # (and whether any verdicts other than 'OK' should warrant filtering out the row).
+    meta_data_file += "\n\n"
+    meta_data_file += lassi.gpu_health.format_timeline(
+        verification_log.get("gpu_health_timeline", []))
+
     # Write meta data for this experiment
     if make_script:
         # filename = directory + "/" + "metadata" + "_" + experiment + ".txt"
@@ -3105,6 +4217,16 @@ def auto_code_llmgeneration_pipeline(prompts,
 
     # Append collected data to experiment spreadsheet
     print("\nSave experimental data to file.")
+    _current_experiment_data_keys = frozenset(experiment_data.keys())
+    if _current_experiment_data_keys != _experiment_data_registered_keys:
+        _unregistered = sorted(_current_experiment_data_keys - _experiment_data_registered_keys)
+        _missing = sorted(_experiment_data_registered_keys - _current_experiment_data_keys)
+        raise RuntimeError(
+            "experiment_data's key set changed during this trial — writing the CSV row now "
+            "would silently misalign it against the header. "
+            f"New/unregistered keys (add to DATAFIELDNAMES in run_lassi.py): {_unregistered}. "
+            f"Missing keys (removed or never set): {_missing}."
+        )
     fieldnames = list(experiment_data.keys())
     with open(experiment_data_file_object, "a", newline="") as exp_file:
         writer = csv.DictWriter(exp_file, fieldnames=fieldnames)

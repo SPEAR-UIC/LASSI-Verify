@@ -183,7 +183,12 @@ def _compute_attempts_to_resolution(df: pd.DataFrame) -> dict:
     Outcomes:
       "valid"     — final_verdict == VALID
       "exhausted" — override_applied indicates budget exhaustion
-      "invalid"   — INVALID but not exhausted (e.g. judge-only override)
+                    (tier{1,2,3}_exhausted / exhausted_*_sc_budget /
+                    global_sc_budget_exhausted; see _is_exhausted)
+      "invalid"   — INVALID for any other reason (defensive bucket; under the
+                    judge-as-baseline design the tier-derivation block at the
+                    end of each iteration may set INVALID without an exhaustion
+                    tag if a tier verdict escaped the SC continue paths)
     """
     # Exclude zeroshot single-pass rows
     df_main = df[df["generation_type"] != "ZEROSHOT"].copy()
@@ -336,7 +341,7 @@ def _compute_tier_detection_cases(df: pd.DataFrame) -> pd.DataFrame:
                     continue
 
                 is_final = row.get("is_final_attempt") == True
-                judge_raw = row.get("judge_verdict") if is_final else None
+                judge_raw = row.get("judge_baseline_verdict") if is_final else None
                 judge_str = (
                     str(judge_raw).strip().upper()
                     if judge_raw and not pd.isna(judge_raw)
@@ -363,7 +368,7 @@ def _compute_tier_detection_cases(df: pd.DataFrame) -> pd.DataFrame:
                     "failed_labels_or_relation": row.get(label_col, ""),
                     "self_correction_trigger":   row.get("self_correction_trigger", ""),
                     "is_final_attempt":          is_final,
-                    "judge_verdict":             judge_str,
+                    "judge_baseline_verdict":             judge_str,
                     "judge_agreed_with_fail":    judge_agreed,
                     "next_attempt_fixed":        next_fixed,
                 })
@@ -381,8 +386,8 @@ def _summarise_detection(cases: pd.DataFrame) -> dict:
     # Judge comparison — only final attempts where judge actually ran
     final_judged = cases[
         (cases["is_final_attempt"] == True)
-        & cases["judge_verdict"].notna()
-        & ~cases["judge_verdict"].isin(["NONE", "NAN", ""])
+        & cases["judge_baseline_verdict"].notna()
+        & ~cases["judge_baseline_verdict"].isin(["NONE", "NAN", ""])
     ]
     n_judged = len(final_judged)
     n_agreed = int(final_judged["judge_agreed_with_fail"].sum()) if n_judged > 0 else 0
@@ -397,8 +402,8 @@ def _summarise_detection(cases: pd.DataFrame) -> dict:
     for kernel, grp in cases.groupby("kernel_name"):
         kfj = grp[
             (grp["is_final_attempt"] == True)
-            & grp["judge_verdict"].notna()
-            & ~grp["judge_verdict"].isin(["NONE", "NAN", ""])
+            & grp["judge_baseline_verdict"].notna()
+            & ~grp["judge_baseline_verdict"].isin(["NONE", "NAN", ""])
         ]
         kn = len(kfj)
         ka = int(kfj["judge_agreed_with_fail"].sum()) if kn > 0 else 0
@@ -614,15 +619,16 @@ def report(results: dict, output_dir: str) -> None:
     if cm:
         tp, fn, fp, tn = cm["tp"], cm["fn"], cm["fp"], cm["tn"]
         total = cm["total"]
-        print("\n=== Judge vs. Three-Tier Confusion Matrix ===")
-        print(f"  (tiers = ground truth, judge = classifier, n={total} final LASSI attempts)")
-        print(f"  TP (tiers PASS + judge VALID):    {tp}  "
+        print("\n=== Judge Baseline vs. Three-Tier Framework — Agreement Matrix ===")
+        print(f"  (framework verdict = operational truth (tier-derived); "
+              f"judge baseline = comparator. n={total} final LASSI attempts)")
+        print(f"  TP (framework VALID + judge VALID):     {tp}  "
               f"({tp/total:.0%})" if total else "  TP: 0")
-        print(f"  FN (tiers PASS + judge INVALID):  {fn}  "
-              f"({fn/total:.0%})" if total else "  FN: 0")
-        print(f"  FP (tiers FAIL + judge VALID):    {fp}  "
-              f"({fp/total:.0%}) ← bugs judge missed" if total else "  FP: 0")
-        print(f"  TN (tiers FAIL + judge INVALID):  {tn}  "
+        print(f"  FN (framework VALID + judge INVALID):   {fn}  "
+              f"({fn/total:.0%}) ← judge too strict; framework recovered" if total else "  FN: 0")
+        print(f"  FP (framework INVALID + judge VALID):   {fp}  "
+              f"({fp/total:.0%}) ← bugs the judge alone would have approved" if total else "  FP: 0")
+        print(f"  TN (framework INVALID + judge INVALID): {tn}  "
               f"({tn/total:.0%})" if total else "  TN: 0")
         _write(
             pd.DataFrame([{"cell": "TP", "count": tp},
@@ -649,24 +655,34 @@ def _write(df: pd.DataFrame, output_dir: str, filename: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _compute_confusion_matrix(df: pd.DataFrame) -> dict:
-    """2×2 confusion matrix: tiers (ground truth) vs. LLM judge (classifier).
+    """2×2 agreement matrix: LLM judge baseline vs. tier-derived framework verdict.
 
-    Ground truth:
-      PASS = T1==PASS AND T2==PASS AND T3==PASS (all three tiers agree code is valid)
-      FAIL = any tier failed
+    Under the judge-as-baseline design (planning/fix_judge_ordering_plan.md), the
+    LLM judge is a *baseline comparator* representing current LLM-only practice;
+    the framework verdict is derived from the three tiers (T1+T2+T3) and is the
+    operational truth the framework reports. This function measures how often the
+    judge baseline agrees with the framework verdict — i.e., how well the judge,
+    used alone, would have approximated what the full verification framework
+    determines.
 
-    Classifier = judge_verdict (VALID / INVALID).
+    Framework verdict (operational truth, derived from tiers alone):
+      VALID = T1==PASS AND T2==PASS AND T3==PASS (all three tiers passed)
+      INVALID = any tier failed
 
-    Only final LASSI attempts where the judge actually ran are included.
+    Comparator = judge_baseline_verdict (VALID / INVALID); never modified by tiers.
 
-    Matrix cells (tiers = rows, judge = columns):
-      TP: tiers PASS + judge VALID   (both agree: valid)
-      FN: tiers PASS + judge INVALID (judge too strict — false rejection)
-      FP: tiers FAIL + judge VALID   (judge missed the bug — false acceptance)
-      TN: tiers FAIL + judge INVALID (both agree: invalid)
+    Only final LASSI attempts where the judge produced a usable verdict are
+    included. Zero-shot codes are handled separately (see pass@k V3/V4).
 
-    For the paper argument, FP is the critical number: bugs that the three-tier
-    framework caught but the judge would have let through.
+    Matrix cells (framework = rows, judge baseline = columns), retained as
+    TP/FN/FP/TN for familiarity with ML reviewers:
+      TP: framework VALID + judge VALID     (judge agrees with framework: valid)
+      FN: framework VALID + judge INVALID   (judge too strict; framework recovers)
+      FP: framework INVALID + judge VALID   (judge missed a real bug)
+      TN: framework INVALID + judge INVALID (judge agrees with framework: invalid)
+
+    FP is the critical paper number: bugs the three-tier framework caught but the
+    judge alone would have approved.
     """
     if df.empty:
         return {"tp": 0, "fn": 0, "fp": 0, "tn": 0, "total": 0}
@@ -674,20 +690,20 @@ def _compute_confusion_matrix(df: pd.DataFrame) -> dict:
     # Include ALL final LASSI attempts, including single-attempt successes
     # (LASSI_FRESH with is_final_attempt=True). Only ZEROSHOT is excluded —
     # zero-shot codes are handled separately (see pass@k V3/V4).
-    # Note: _EXCLUDE_GEN_TYPES also contains LASSI_FRESH, which is correct
-    # for the correction yield analysis but wrong here.
     finals = df[
         (df["is_final_attempt"] == True) &
         (df["generation_type"] != "ZEROSHOT")
     ].copy()
 
-    def _tiers_pass(row) -> bool:
+    def _framework_valid(row) -> bool:
+        """Framework verdict = all three tiers PASS."""
         t1 = str(row.get("tier1_verdict", "")).strip().upper()
         t2 = str(row.get("tier2_verdict", "")).strip().upper()
         t3 = str(row.get("tier3_verdict", "")).strip().upper()
         return t1 == "PASS" and t2 == "PASS" and t3 == "PASS"
 
-    def _judge_valid(v) -> object:
+    def _judge_baseline_valid(v) -> object:
+        """Returns True/False for the raw judge baseline verdict; None if absent."""
         if pd.isna(v) or v is None:
             return None
         s = str(v).strip().upper()
@@ -695,20 +711,20 @@ def _compute_confusion_matrix(df: pd.DataFrame) -> dict:
             return None
         return s == "VALID"
 
-    finals["tiers_pass"] = finals.apply(_tiers_pass, axis=1)
-    finals["judge_valid"] = finals["judge_verdict"].apply(_judge_valid)
+    finals["framework_valid"] = finals.apply(_framework_valid, axis=1)
+    finals["judge_baseline_valid"] = finals["judge_baseline_verdict"].apply(_judge_baseline_valid)
 
     # Only include rows where judge produced an actual verdict
-    has_judge = finals[finals["judge_valid"].notna()].copy()
+    has_judge = finals[finals["judge_baseline_valid"].notna()].copy()
     n_total = len(has_judge)
 
     if n_total == 0:
         return {"tp": 0, "fn": 0, "fp": 0, "tn": 0, "total": 0}
 
-    tp = int(((has_judge["tiers_pass"] == True)  & (has_judge["judge_valid"] == True)).sum())
-    fn = int(((has_judge["tiers_pass"] == True)  & (has_judge["judge_valid"] == False)).sum())
-    fp = int(((has_judge["tiers_pass"] == False) & (has_judge["judge_valid"] == True)).sum())
-    tn = int(((has_judge["tiers_pass"] == False) & (has_judge["judge_valid"] == False)).sum())
+    tp = int(((has_judge["framework_valid"] == True)  & (has_judge["judge_baseline_valid"] == True)).sum())
+    fn = int(((has_judge["framework_valid"] == True)  & (has_judge["judge_baseline_valid"] == False)).sum())
+    fp = int(((has_judge["framework_valid"] == False) & (has_judge["judge_baseline_valid"] == True)).sum())
+    tn = int(((has_judge["framework_valid"] == False) & (has_judge["judge_baseline_valid"] == False)).sum())
 
     return {"tp": tp, "fn": fn, "fp": fp, "tn": tn, "total": n_total}
 

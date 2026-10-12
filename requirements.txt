@@ -1,14 +1,12 @@
 ollama
-cerebras_cloud_sdk
+requests
 tqdm
 # DO NOT INSTALL pynvml
 nvidia-ml-py
 pandas
 matplotlib
 tiktoken
-aiohttp
 markdown
-numba
 pyyaml
 streamlit
 # jupyterlab

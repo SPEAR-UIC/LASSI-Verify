@@ -1,0 +1,596 @@
+{
+  "operator_id": "sync-removal",
+  "family": "program-defect",
+  "detector": "tiers_1_3",
+  "observed_failure_class_generalized": "deleted synchronization gating a write-then-read hazard",
+  "evidence_pointer": "planning/LASSI_Verify_Phase2_Bridge.md 2026-08-23 design-proper entry, catalog entry 1",
+  "mechanism": "generic_rule",
+  "mechanism_description": "delete a __syncthreads()/__threadfence() call gating a shared-memory or shared-accumulator write-then-read hazard",
+  "applicability_rule": "a __syncthreads()/__threadfence() call textually precedes a shared-memory write read by a different code path",
+  "per_instance": [
+    {
+      "kernel": "bsearch",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_BSEARCH_1__07-21-2026_t07_47_59",
+        "trial": 1,
+        "code_version": 3
+      },
+      "diff": "removed: '__syncthreads();' (was immediately before 'size_t p = k;')",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_bs_output": "exact",
+          "final_bs4_output": "exact",
+          "final_bs2_output": "exact",
+          "final_bs3_output": "exact"
+        },
+        "per_label_results": {
+          "final_bs_output": [
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            }
+          ],
+          "final_bs4_output": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "ada360b5fcbe5e47417697f2af57d8b9",
+              "injected_md5": "ada360b5fcbe5e47417697f2af57d8b9"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "ada360b5fcbe5e47417697f2af57d8b9",
+              "injected_md5": "ada360b5fcbe5e47417697f2af57d8b9"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "ada360b5fcbe5e47417697f2af57d8b9",
+              "injected_md5": "ada360b5fcbe5e47417697f2af57d8b9"
+            }
+          ],
+          "final_bs2_output": [
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            }
+          ],
+          "final_bs3_output": [
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            },
+            {
+              "mode": "n/a",
+              "match": null,
+              "reason": "dump file not produced (block likely preprocessed out, e.g. #ifdef DEBUG)"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "undetected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_outlier_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_small_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_shift_invariance_v3.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_outlier_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_small_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_shift_invariance_v3.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_shift_invariance_v3.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_outlier_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_input_sensitivity__p_small_v3.cu": "not_available",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_outlier_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_permutation_sensitivity__p_small_v3.cu": "SKIP",
+            "bsearch-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_BSEARCH_1_mt_query_shift_invariance_v3.cu": "not_available"
+          },
+          "catching_observer": null
+        }
+      }
+    },
+    {
+      "kernel": "lid-driven-cavity",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_LIDDRIVENC_1__07-24-2026_t16_03_41",
+        "trial": 1,
+        "code_version": 10
+      },
+      "diff": "removed: '__syncthreads();' after warp_sums[warp] write in sum_pressure",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_u_field": "exact",
+          "final_pressure_black": "exact",
+          "final_v_field": "exact",
+          "final_pressure_red": "exact"
+        },
+        "per_label_results": {
+          "final_u_field": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "d1f3ce0258a7a3ab509b56c66071a2fb",
+              "injected_md5": "2758d0bd563d8cd940e509f5b4839952"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "d1f3ce0258a7a3ab509b56c66071a2fb",
+              "injected_md5": "22501dc30f72ea94366b82c636ee3e07"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "d1f3ce0258a7a3ab509b56c66071a2fb",
+              "injected_md5": "b05fd26b44676d9fcac55327b5fb0f5b"
+            }
+          ],
+          "final_pressure_black": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "43ea383f11a8044e5d9f53c671d5290b",
+              "injected_md5": "a778145310421b56b390d4d7d10ec895"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "43ea383f11a8044e5d9f53c671d5290b",
+              "injected_md5": "22b3558a6ad8194821326b4968278b2d"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "43ea383f11a8044e5d9f53c671d5290b",
+              "injected_md5": "9dfa86b6bcab79577ff2ccafb14db120"
+            }
+          ],
+          "final_v_field": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "89a5de3ff92ddcda50ced2bf9be71cca",
+              "injected_md5": "916fab24976351c4b19ad783d870098d"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "89a5de3ff92ddcda50ced2bf9be71cca",
+              "injected_md5": "9f76daaa2251ffed5fce0521d51828d6"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "89a5de3ff92ddcda50ced2bf9be71cca",
+              "injected_md5": "9f49d9d40c01456e2c52651fd80e0460"
+            }
+          ],
+          "final_pressure_red": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "1de7a29159605b4714831185c8763bf2",
+              "injected_md5": "5efd774a10ecf2df104ebbc29aa2dbb8"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "1de7a29159605b4714831185c8763bf2",
+              "injected_md5": "13d85559a3a88fcc251407d2959f54fc"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "1de7a29159605b4714831185c8763bf2",
+              "injected_md5": "bd9b794e58cff69b1f3d7b4685ae8955"
+            }
+          ]
+        },
+        "verdict": "BEHAVIOR_CHANGING"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "detected",
+        "minus_t2": "undetected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_initial_lid_velocity_sensitivity__p_outlier_v10.cu": "PASS",
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_initial_lid_velocity_sensitivity__p_small_v10.cu": "PASS",
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_lid_velocity_sensitivity__p_outlier_v10.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_initial_lid_velocity_sensitivity__p_outlier_v10.cu": "PASS",
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_initial_lid_velocity_sensitivity__p_small_v10.cu": "PASS",
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_lid_velocity_sensitivity__p_outlier_v10.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_initial_lid_velocity_sensitivity__p_outlier_v10.cu": "not_available",
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_initial_lid_velocity_sensitivity__p_small_v10.cu": "not_available",
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_lid_velocity_sensitivity__p_outlier_v10.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "not_available",
+          "t3": {
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_initial_lid_velocity_sensitivity__p_outlier_v10.cu": "PASS",
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_initial_lid_velocity_sensitivity__p_small_v10.cu": "PASS",
+            "lid-driven-cavity-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_LIDDRIVENC_1_mt_lid_velocity_sensitivity__p_outlier_v10.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        }
+      }
+    },
+    {
+      "kernel": "pathfinder",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_PATHFINDER_1__07-26-2026_t05_34_18",
+        "trial": 1,
+        "code_version": 6
+      },
+      "diff": "removed: '__syncthreads();' after prev[tx]=gpuSrc[xidx] write",
+      "neutrality_verdict": "NEUTRAL",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_path_costs": "exact"
+        },
+        "per_label_results": {
+          "final_path_costs": [
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "3ce4b001ef009c79081fedf3c5435d8b",
+              "injected_md5": "3ce4b001ef009c79081fedf3c5435d8b"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "3ce4b001ef009c79081fedf3c5435d8b",
+              "injected_md5": "3ce4b001ef009c79081fedf3c5435d8b"
+            },
+            {
+              "mode": "exact",
+              "match": true,
+              "base_md5": "3ce4b001ef009c79081fedf3c5435d8b",
+              "injected_md5": "3ce4b001ef009c79081fedf3c5435d8b"
+            }
+          ]
+        },
+        "verdict": "NEUTRAL"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "undetected",
+        "minus_t1": "undetected",
+        "minus_t2": "undetected",
+        "minus_t3": "undetected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_outlier_v6.cu": "PASS",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_small_v6.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t1": {
+          "verdict": "undetected",
+          "t1": "not_available",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_outlier_v6.cu": "PASS",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_small_v6.cu": "PASS"
+          },
+          "catching_observer": null
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_small_v6.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": null
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "PASS",
+          "witness": "not_available",
+          "t3": {
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_final_result_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_outlier_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_input_grid_sensitivity__p_small_v6.cu": "not_available",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_outlier_v6.cu": "FAIL",
+            "pathfinder-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_PATHFINDER_1_mt_row_weight_sensitivity__p_small_v6.cu": "PASS"
+          },
+          "catching_observer": [
+            "tier3"
+          ]
+        }
+      }
+    },
+    {
+      "kernel": "threadfence",
+      "base_id": {
+        "experiment_dir": "generated_codes/experiment/SC Correctness 26 Workshop/KERNEL_EXP-SC26_THREADF_1__07-20-2026_t14_07_07",
+        "trial": 1,
+        "code_version": 5
+      },
+      "diff": "removed: '__syncthreads();' after warpSums[warpId] write (no literal __threadfence() present in this variant; used its __syncthreads() instead, per catalog's either/or wording)",
+      "neutrality_verdict": "BEHAVIOR_CHANGING",
+      "decisive_test_record": {
+        "method": "uninstrumented_full_state_diff",
+        "n_repeat": 3,
+        "per_buffer_comparison_mode_used": {
+          "final_reduction_result": "exact"
+        },
+        "per_label_results": {
+          "final_reduction_result": [
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "2d919283940c23ce45b95cf1241215b5"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "b700d55e1485b7cbb12d87a8484b47b8"
+            },
+            {
+              "mode": "exact",
+              "match": false,
+              "base_md5": "a60cd2e7f8612abf22a7720ca7e788e5",
+              "injected_md5": "3a718a9a94404a75cf6812aeb3add4ee"
+            }
+          ]
+        },
+        "verdict": "BEHAVIOR_CHANGING"
+      },
+      "in_place_kernel_metadata": null,
+      "tier_configuration_results": {
+        "full_stack": "detected",
+        "minus_t1": "detected",
+        "minus_t2": "undetected",
+        "minus_t3": "detected",
+        "minus_witness": "detected"
+      },
+      "raw_sweep_results": {
+        "full_stack": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "FAIL",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "FAIL"
+          },
+          "catching_observer": [
+            "tier2",
+            "tier3"
+          ]
+        },
+        "minus_t1": {
+          "verdict": "detected",
+          "t1": "not_available",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "FAIL",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "FAIL"
+          },
+          "catching_observer": [
+            "tier2",
+            "tier3"
+          ]
+        },
+        "minus_t2": {
+          "verdict": "undetected",
+          "t1": "PASS",
+          "t2": "not_available",
+          "witness": "PASS",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "not_available",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "not_available"
+          },
+          "catching_observer": null
+        },
+        "minus_t3": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "PASS",
+          "t3": {
+            "*": "not_evaluated"
+          },
+          "catching_observer": [
+            "tier2"
+          ]
+        },
+        "minus_witness": {
+          "verdict": "detected",
+          "t1": "PASS",
+          "t2": "FAIL",
+          "witness": "not_available",
+          "t3": {
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_sum_v5.cu": "FAIL",
+            "threadfence-cuda_main_ee_refactorcode_CUDA_expKERNEL_EXP-SC26_THREADF_1_mt_input_scaling_v5.cu": "FAIL"
+          },
+          "catching_observer": [
+            "tier2",
+            "tier3"
+          ]
+        }
+      }
+    }
+  ]
+}

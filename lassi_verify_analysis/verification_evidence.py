@@ -204,8 +204,8 @@ def compute(df_trials: pd.DataFrame, df_attempts: pd.DataFrame) -> dict:
             "t3_relations_tested":  row.get("tier3_relations_tested", "N/A"),
             "t3_relations_passed":  row.get("tier3_relations_passed", "N/A"),
             "t3_relation_names":    "; ".join(t3_rels),
-            # Judge
-            "judge_verdict":        str(row.get("judge_verdict", "N/A")).strip().upper(),
+            # Judge baseline (independent of tier verdicts under judge-as-baseline)
+            "judge_baseline_verdict":        str(row.get("judge_baseline_verdict", "N/A")).strip().upper(),
         })
 
     # Aggregate per kernel
@@ -256,7 +256,7 @@ def compute(df_trials: pd.DataFrame, df_attempts: pd.DataFrame) -> dict:
             "t3_rel_freq":         t3_rel_freq,
             "t3_rel_counts":       t3_rel_counts,
             "judge_valid_count":   sum(
-                1 for r in rows if r.get("judge_verdict") == "VALID"
+                1 for r in rows if r.get("judge_baseline_verdict") == "VALID"
             ),
         }
 

@@ -53,6 +53,7 @@ Properties tied to specific execution patterns:
 - **Verifying that GPU and CPU produce the same result** — this is handled separately and is not a Tier 1 concern
 - **Checking specific domain-correct values** — do not assert that a field equals a known boundary condition value, a known analytical solution, or any particular number
 - **Re-running the computation to verify it** — do not add a serial CPU fallback and compare to GPU output
+- **Asserting properties of an existing CPU reference buffer** — many benchmarks contain a built-in CPU verification path (buffers often named `*_ref`, `*_cpu`, `*_serial`, `*_expected`). These buffers are off-limits for Tier 1 assertions; checking their finiteness or comparing them to the GPU output will fail the instrumented source. Assert only properties of the GPU output buffer itself.
 
 ### The one-sentence rule:
 > **Check that values exist, are finite, and are in a plausible range. Do NOT check that they equal anything specific.**
@@ -99,10 +100,10 @@ Apply to **all** GPU codes before selecting anything else:
 
 ### Layer 2: Domain Invariants (Conditionally Applicable)
 Apply when your analysis identifies the computational domain:
-- **Linear Algebra / Solvers**: matrix symmetry (3.1), conditioning (6.4), convergence residual (6.5)
+- **Linear Algebra / Solvers**: matrix symmetry (3.1), output finiteness (6.3)
 - **CFD / Physics simulations**: conservation laws (2.1, 2.3), positivity constraints (5.1, 5.2)
-- **Molecular Dynamics**: particle count conservation (2.2), energy conservation (2.1), temperature bounds (5.5)
-- **Iterative Solvers**: final convergence criterion (6.5) — check the residual after all iterations, not intermediate monotonicity
+- **Molecular Dynamics**: particle count conservation (2.2), energy conservation (2.1), positivity (5.1)
+- **Iterative Solvers**: final convergence criterion — check the residual after all iterations (see the worked example), not intermediate monotonicity
 - **Stochastic / Monte Carlo**: probability conservation (2.5), non-negativity (5.2)
 - **Transforms / Permutations**: element count conservation (2.2), norm conservation if unitary (2.4)
 
@@ -111,7 +112,7 @@ Apply only when the specific problem structure clearly requires it:
 - Sparsity pattern preservation (7.1) — only for sparse matrix operations
 - Diagonal dominance (7.2) — only if the algorithm requires it and the original code enforces it
 - Orthogonality (7.4) — only for orthogonalization algorithms
-- Symmetry under permutation (3.2, 3.3, 3.4) — only when the problem has explicit symmetry
+- Symmetry under permutation (3.2, 3.3) — only when the problem has explicit symmetry
 
 **When in doubt about any Layer 3 assertion, omit it.** A false positive assertion — one that fails in the original code due to an incorrect assumption — is worse than a missing assertion.
 
@@ -251,42 +252,6 @@ checker that all assertion blocks were reached and no failures were detected.
 
 ---
 
-## Your Instructions
-
-### Step 1: Analyze the Code
-Identify:
-- Kernel functions and host functions
-- Input/output data structures
-- Memory transfer points (cudaMemcpy, hipMemcpy)
-- Mathematical operations performed
-- Physical domain and expected invariants
-
-### Step 2: Select Minimal Relevant Assertions
-- Choose from the catalog below
-- Focus on properties that validate correctness
-- Prefer host-side assertions over device-side
-- Consider computational cost (avoid expensive checks in hot loops)
-
-### Step 3: Insert Assertions at Strategic Points
-- **Host function start:** Input validation
-- **Before device transfer:** Data validity
-- **After device transfer:** Output validation
-- **Host function end:** Final correctness checks
-
-### Step 4: Mark All Insertions
-```cpp
-// LASSI_INSTRUMENTATION - [Brief description of what you're checking]
-[assertion code here]
-```
-
-### Step 5: Preserve Original Code
-- Insert assertions around original code
-- Do NOT modify the original algorithm
-- Do NOT change kernel implementations — this means **zero changes** to `__global__` function signatures (parameters), bodies (logic), or call sites. Any modification to a kernel during assertion insertion corrupts the ground-truth spec and invalidates all downstream Tier 2 comparisons.
-- Only ADD assertion checks in host code
-
----
-
 ## ❌ ANTI-PATTERNS: What NOT to Do
 
 These are examples of **INCORRECT** assertion insertions that violate the invariant-only rule:
@@ -306,10 +271,19 @@ dim3 threads(blockDim.x, blockDim.y);
     bool _t1_pass = (num_streams == 4);  // WRONG: 1, 2, or 8 streams compute the same result
     printf("LASSI-VERIFY ASSERTIONS [stream_count_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
 }
-```
-**WHY THIS IS WRONG:** Thread block dimensions, stream counts, shared memory tile sizes, and reduction strategies are hardware mapping decisions — they control how the GPU schedules work, not what is computed. Changing them is the primary mechanism by which an LLM optimization can improve energy efficiency or runtime. An assertion on these values directly forbids the optimization the framework is designed to find.
 
-Applying the decision test: if `blockDim.x` changes from 16 to 32, does the code compute a wrong answer? No — Tier 2 confirms numerical equivalence independently. Therefore it is a Type B parameter and must never be asserted.
+// ALSO BAD — asserts the specific grid shape/size computed for a launch
+{
+    bool _t1_pass = (dimGrid.x == N && dimGrid.y == N);
+    // WRONG: a launch mapping that avoids redundant work (e.g. one thread per unique
+    // work-item instead of one thread per cell of a full N×N space, with an index-decode
+    // formula inside the kernel) computes the identical answer with different grid dims.
+    printf("LASSI-VERIFY ASSERTIONS [grid_dims_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+**WHY THIS IS WRONG:** Thread block dimensions, grid dimensions, stream counts, shared memory tile sizes, and reduction strategies are hardware mapping decisions — they control how the GPU schedules work, not what is computed. Changing them is the primary mechanism by which an LLM optimization can improve energy efficiency or runtime. An assertion on these values directly forbids the optimization the framework is designed to find. This applies equally to grid dimensions as to block dimensions: a smarter launch that covers the same logical work through a different index mapping (fewer threads, a reshaped grid, a decode formula recovering the original indices) is exactly the kind of optimization Tier 1 must not block.
+
+Applying the decision test: if `blockDim.x` changes from 16 to 32, or `dimGrid` changes shape while still covering the same work, does the code compute a wrong answer? No — Tier 2 confirms numerical equivalence independently. Therefore these are Type B parameters and must never be asserted by their specific value.
 
 **CORRECT:** Assert only that the problem-size count is positive and the device pointer is non-null:
 ```cpp
@@ -351,7 +325,7 @@ __global__ void bad_kernel(double* matrix, int N) {
 ```cpp
 // BAD - Checks implementation-specific intermediate state
 for (int iter = 0; iter < max_iter; iter++) {
-    jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
+    solver_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
 
     // WRONG: Monotonicity assumption won't hold for all parallel strategies
     cudaMemcpy(h_x_new, d_x_new, N*sizeof(double), cudaMemcpyDeviceToHost);
@@ -393,18 +367,18 @@ __global__ void bad_kernel(double* data, int N) {
 ```cpp
 // BAD — adds a new outputBuffer parameter to capture debug data, then rewrites
 // the kernel body to accommodate it, discarding the original computation.
-__global__ void pathfinder(const int* gpuWall, const int* gpuSrc,
-                            int* gpuResult, int* outputBuffer,  // ← NEW PARAM ADDED
-                            const int iteration, const int theHalo,
-                            const int borderCols, const int cols, const int t) {
-    (void)gpuWall;      // ← All original DP parameters discarded
+__global__ void dp_kernel(const int* inputBuf, const int* srcBuf,
+                          int* resultBuf, int* outputBuffer,  // ← NEW PARAM ADDED
+                          const int iteration, const int halo,
+                          const int border, const int cols, const int t) {
+    (void)inputBuf;     // ← All original DP parameters discarded
     (void)iteration;
-    (void)theHalo;
-    (void)borderCols;
+    (void)halo;
+    (void)border;
     (void)t;
     int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (global_idx < cols) {
-        gpuResult[global_idx] = gpuSrc[global_idx];  // ← Entire DP replaced with copy
+        resultBuf[global_idx] = srcBuf[global_idx];  // ← Entire DP replaced with copy
     }
     // ... debug buffer write added here ...
 }
@@ -416,37 +390,53 @@ __global__ void pathfinder(const int* gpuWall, const int* gpuSrc,
 **CORRECT:** Leave the kernel signature and body completely untouched. If you need to inspect a value that is computed inside the kernel, copy the relevant output buffer from device to host after the kernel completes and validate it in a host-side assertion block.
 
 ### ❌ WRONG: Comparing GPU Output to a CPU Reference or Expected Value
-```cpp
-// BAD — computes a CPU reference and asserts GPU output matches it
-uint64_t cpu_hash = murmurhash3_cpu(key, length);
-cudaMemcpy(h_out, d_out, numKeys * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-{
-    bool _t1_pass = (h_out[0] == cpu_hash);  // WRONG: correctness check, not structural
-    printf("LASSI-VERIFY ASSERTIONS [gpu_cpu_hash_match]: %s\n", _t1_pass ? "PASS" : "FAIL");
-}
 
-// ALSO BAD — comparing host buffer to device buffer to "verify" the copy
+Do NOT assert that the GPU output equals a CPU-computed reference, an expected value, or any
+benchmark-embedded verification buffer. Many scientific benchmarks contain their own serial CPU
+verification path — host arrays typically named `*_ref`, `*_cpu`, `*_host`, `*_serial`,
+`*_expected`, `*_gt`, populated by a CPU loop computing the same function and compared to the GPU
+result. These buffers are off-limits for Tier 1: asserting on or against them fails the instrumented
+source for reasons unrelated to the transformation.
+
+```cpp
+// BAD — asserts GPU output matches a CPU reference (correctness check, not structural)
+uint64_t cpu_ref = cpu_reference(input, length);
+cudaMemcpy(h_out, d_out, N * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+{
+    bool _t1_pass = (h_out[0] == cpu_ref);            // WRONG
+    printf("LASSI-VERIFY ASSERTIONS [gpu_cpu_match]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+// ALSO BAD — even just checking finiteness of an existing CPU reference buffer
 {
     bool _t1_pass = true;
-    for (int i = 0; i < N; i++) {
-        if (h_out[i] != expected_values[i]) { _t1_pass = false; break; }  // WRONG
-    }
-    printf("LASSI-VERIFY ASSERTIONS [output_matches_ref]: %s\n", _t1_pass ? "PASS" : "FAIL");
+    for (int i = 0; i < N; i++) if (!isfinite(output_ref[i])) { _t1_pass = false; break; }  // WRONG
+    printf("LASSI-VERIFY ASSERTIONS [ref_finite]: %s\n", _t1_pass ? "PASS" : "FAIL");
 }
 ```
-**WHY THIS IS WRONG:** Computing a CPU reference adds code that can itself be incorrect, producing FAIL on valid source code. The assertion is fragile: it fails if the CPU reference has a bug, if the data types differ, or if floating-point rounding differs between CPU and GPU. Verifying that computed output values are numerically correct is out of scope for Tier 1.
 
-**CORRECT:** Check only that the output pointer is non-null, the count is correct, and values are finite (for floats) or within the representable range of their type (for integers). Do not check specific values.
+**WHY THIS IS WRONG:** (1) CPU reference paths legitimately evaluate to non-finite values for valid
+inputs (`log2(0)`, `1/0`, signed-zero `sqrt`), so even a finiteness check on them FAILs on correct
+source. (2) The CPU reference is auxiliary test code, not a specification — it may be buggy or handle
+edge cases differently. (3) CPU and GPU accumulate floating-point rounding differently, so
+equality/near-equality does not hold in general. (4) Verifying computed values is Tier 2's job, by
+comparing the generated code's GPU output against the instrumented source's GPU output — not Tier 1's.
+
+**CORRECT:** Ignore the reference buffer entirely. Assert only structural properties of the GPU
+output — pointer non-null, count correct, values finite (floats) or in representable range (ints).
 ```cpp
-cudaMemcpy(h_out, d_out, numKeys * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+cudaMemcpy(h_out, d_out, N * sizeof(float), cudaMemcpyDeviceToHost);
 // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Validate output pointer and that kernel produced non-trivial output
+// LASSI_INSTRUMENTATION - GPU output pointer valid and values finite after transfer
 {
-    bool _t1_pass = (h_out != NULL && numKeys > 0);
+    bool _t1_pass = (h_out != NULL && N > 0);
     printf("LASSI-VERIFY ASSERTIONS [output_ptr_valid]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
+
+> **Invariant rule for reference buffers:** If an assertion's condition reads any buffer populated by
+> a CPU computation of the same kernel function — whether you added it or it was already in the
+> source — remove that condition and replace it with a structural check on the GPU output alone.
 
 ### ❌ WRONG: Asserting on a Host Buffer Before the Device-to-Host Copy
 ```cpp
@@ -476,6 +466,104 @@ cudaMemcpy(h_out, d_out, N * sizeof(uint64_t), cudaMemcpyDeviceToHost);  // copy
 {
     bool _t1_pass = (h_out != NULL && N > 0);
     printf("LASSI-VERIFY ASSERTIONS [output_valid_post_copy]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+### ❌ WRONG: Asserting a Fixed Inventory of Allocated Buffers
+```cpp
+// BAD — enumerates a specific set of device pointers that must all be non-null
+{
+    bool _t1_pass = (d_buf_a != NULL && d_buf_b != NULL &&
+                     d_buf_c != NULL && d_buf_d != NULL);
+    printf("LASSI-VERIFY ASSERTIONS [device_allocations_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+**WHY THIS IS WRONG:** How many distinct buffers a computation uses, and whether a particular
+buffer is allocated at all, is an implementation choice — not a property of the algorithm. A
+valid optimization may fuse two buffers into one, or may legitimately leave a buffer unallocated
+(NULL) because a restructured code path no longer needs it — NULL used deliberately as a "this
+output is not produced here" sentinel is not a bug. An assertion that hardcodes a specific set of
+pointers as "must all be non-null" fails the moment a correct optimization changes that set, even
+though the actual computation and its output are unaffected.
+
+Applying the decision test: if a buffer is deliberately left unallocated because a legitimate
+restructuring no longer needs it, does the code compute a wrong answer? No — Tier 2 confirms the
+output is correct independently. A fixed pointer-inventory check is therefore a Type B assertion
+in disguise (it fixes an implementation detail — how many buffers exist and which ones — rather
+than a semantic property) and must not be written this way.
+
+**CORRECT:** Assert non-null only for buffers you can justify, in one sentence, as unconditionally
+required by *any* valid implementation of this algorithm — typically the primary input and output
+actually passed to the kernel launch you are instrumenting near. If you cannot state that
+one-sentence justification for a specific pointer, leave it out of the check.
+```cpp
+// GOOD — checks only the buffers this launch site cannot function without
+{
+    bool _t1_pass = (d_input != NULL && d_output != NULL);
+    printf("LASSI-VERIFY ASSERTIONS [device_allocations_valid]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+```
+
+> **General principle behind both anti-patterns above:** if a legitimate optimization could
+> change WHICH buffers exist, WHICH launch geometry is used, or HOW MANY of something there are —
+> while still computing the correct answer — do not hardcode that structural detail into a
+> pass/fail check. This applies beyond launch configuration and buffer counts to any structural
+> quantity an optimization is free to change (loop trip counts from a restructured tiling, number
+> of kernel launches from a fused or split kernel, etc.): check that the computation's inputs and
+> outputs are valid, never that its shape matches one particular implementation.
+
+### ❌ WRONG: `*_unchanged` Assertions on Mutable Buffers or Mutated Variables
+
+The `problem_spec_*_unchanged` pattern (and any other "value unchanged" / "length unchanged" / "pointer unchanged" assertion) is intended for **immutable problem-specification constants** — scalar values that define WHAT problem is being solved (see the "Problem Specification Constants" exception earlier in this document). It is **not** appropriate for buffers, arrays, or variables that the source code legitimately modifies during execution. When you apply `*_unchanged` to a mutable target, the assertion fires FAIL on the original SOURCE itself (because the source genuinely does change the value), and the trial aborts at Stage 0 before any LASSI iteration can run.
+
+```cpp
+// BAD — `lengths` is an array that the kernel writes to (e.g., per-thread output sizes).
+// The kernel computes new length values into this buffer; the assertion correctly fires
+// FAIL because lengths IS changed — but the verdict aborts Stage 0 unnecessarily because
+// the assertion target was wrong, not because the source is buggy.
+int initial_total_length = 0;
+for (int i = 0; i < N; i++) initial_total_length += lengths[i];
+
+kernel<<<blocks, threads>>>(d_in, d_lengths, N);   // ← kernel writes to d_lengths
+cudaMemcpy(lengths, d_lengths, N * sizeof(int), cudaMemcpyDeviceToHost);
+
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+{
+    int current_total_length = 0;
+    for (int i = 0; i < N; i++) current_total_length += lengths[i];
+    bool _t1_pass = (current_total_length == initial_total_length);   // WRONG: lengths IS mutated
+    printf("LASSI-VERIFY ASSERTIONS [problem_spec_lengths_unchanged]: %s\n", _t1_pass ? "PASS" : "FAIL");
+}
+// <<< END LASSI-VERIFY ASSERTIONS <<<
+```
+
+**WHY THIS IS WRONG:** The `lengths` array is a kernel output (or scratch buffer, or per-element state); it is updated as part of the computation. The `*_unchanged` assertion fires FAIL because the source legitimately changes the value — not because the source is broken. The Stage 0 self-check then aborts the trial.
+
+**Before inserting any `*_unchanged` assertion, verify the target is genuinely immutable:**
+- Search the kernel body — is there any `target[idx] = ...` or `atomic*(&target[idx], ...)` write to this buffer?
+- Look for `cudaMemset` on the target's device buffer between kernel launches (zero-reset implies the buffer is overwritten each iteration)
+- Look for `cudaMemcpy H→D` to the target's device buffer between kernel launches (implies the host re-initializes it each iteration)
+- Look for host-side reassignment in a benchmark repeat loop (`for (int i = 0; i < repeat; ++i) { target[k] = ...; }`)
+
+If ANY of those are present, the target is mutable — do NOT apply `*_unchanged` to it.
+
+**Safe candidates for `*_unchanged`:**
+- Scalar problem-spec constants: `N`, `M`, `num_keys`, `num_iterations`, `dims`, etc. — values that define problem size and never change during execution
+- Read-only input arrays that the LLM has verified are never written to by any kernel or host-side mutation between the assertion's capture point and the check point
+- Compile-time constants (`#define`, `constexpr`) — these are inherently immutable
+
+**CORRECT for a mutable output buffer:** Use a structural check that does not assume immutability.
+```cpp
+cudaMemcpy(lengths, d_lengths, N * sizeof(int), cudaMemcpyDeviceToHost);
+// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
+// LASSI_INSTRUMENTATION - Output lengths are non-negative and within expected bound
+{
+    bool _t1_pass = true;
+    for (int i = 0; i < N; i++) {
+        if (lengths[i] < 0 || lengths[i] > MAX_EXPECTED_LENGTH) { _t1_pass = false; break; }
+    }
+    printf("LASSI-VERIFY ASSERTIONS [output_lengths_in_range]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
@@ -722,7 +810,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
 
 ---
 
-## Category 3: Symmetry Properties (4 patterns)
+## Category 3: Symmetry Properties (3 patterns)
 
 ### 3.1 Matrix Symmetry
 **Use when:** Operations should preserve symmetric matrices
@@ -768,23 +856,6 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
-
-### 3.4 Rotational Symmetry
-**Use when:** System has rotational invariance
-```cpp
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Rotational invariance check (simplified)
-{
-    // For 2D field with rotational symmetry
-    // (actual implementation depends on coordinate system)
-    double center_value = field[N/2][N/2];
-    bool _t1_pass = true; // fill with radial checks as needed
-    printf("LASSI-VERIFY ASSERTIONS [rotational_sym]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-```
-
----
 
 ## Category 4: Monotonicity (4 patterns)
 
@@ -849,7 +920,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
 
 ---
 
-## Category 5: Physical Constraints (6 patterns)
+## Category 5: Physical Constraints (3 patterns)
 
 ### 5.1 Positivity
 **Use when:** Physical quantities must be positive (temperature, density, energy)
@@ -896,56 +967,7 @@ double _t1_initial_norm = compute_l2_norm(vector, N);
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
 
-### 5.4 Speed of Light Constraint
-**Use when:** Velocities in relativistic simulations
-```cpp
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Relativistic speed constraint check
-{
-    const double C = 299792458.0; // Speed of light in m/s
-    bool _t1_pass = true;
-    for (int i = 0; i < N; i++) {
-        double speed = sqrt(vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
-        if (!(speed <= C)) { _t1_pass = false; break; }
-    }
-    printf("LASSI-VERIFY ASSERTIONS [speed_of_light]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-```
-
-### 5.5 Thermodynamic Constraints
-**Use when:** Working with thermodynamic quantities
-```cpp
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Thermodynamic constraints check
-{
-    bool _t1_pass = (temperature > 0.0 && entropy_change >= 0.0 && pressure > 0.0);
-    printf("LASSI-VERIFY ASSERTIONS [thermodynamic]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-```
-
-### 5.6 Charge Conservation
-**Use when:** Electromagnetic simulations
-```cpp
-// Declare capture variable at function scope, before computation:
-double _t1_initial_charge = compute_total_charge(particles, N);
-
-// ... computation ...
-
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Charge conservation check
-{
-    double _t1_final_charge = compute_total_charge(particles, N);
-    bool _t1_pass = (fabs(_t1_final_charge - _t1_initial_charge) < 1e-10);
-    printf("LASSI-VERIFY ASSERTIONS [charge_conserved]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-```
-
----
-
-## Category 6: Numerical Stability (5 patterns)
+## Category 6: Numerical Stability (3 patterns)
 
 ### 6.1 NaN Detection (Output)
 **Use when:** Validating output for numerical errors
@@ -991,34 +1013,6 @@ double _t1_initial_charge = compute_total_charge(particles, N);
 }
 // <<< END LASSI-VERIFY ASSERTIONS <<<
 ```
-
-### 6.4 Condition Number Bounds
-**Use when:** Matrix operations sensitive to conditioning
-```cpp
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Conditioning check
-{
-    double condition_number = estimate_condition_number(matrix, N);
-    bool _t1_pass = (condition_number < 1e12);
-    printf("LASSI-VERIFY ASSERTIONS [condition_number]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-```
-
-### 6.5 Relative Error Bounds
-**Use when:** Comparing computed result to known or expected value
-```cpp
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Relative error bound check
-{
-    double _t1_rel_err = fabs(computed - expected) / fabs(expected);
-    bool _t1_pass = (_t1_rel_err < tolerance);
-    printf("LASSI-VERIFY ASSERTIONS [rel_error_bound]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-```
-
----
 
 ## Category 7: Structural Invariants (4 patterns)
 
@@ -1096,135 +1090,11 @@ double _t1_initial_charge = compute_total_charge(particles, N);
 
 ---
 
-## Selection Guidelines for GPU Code
-
-### DO Insert Assertions For:
-- ✅ **Host-side input validation** (before cudaMemcpy H→D)
-- ✅ **Host-side output validation** (after cudaMemcpy D→H)
-- ✅ **Kernel launch parameter validation** (grid/block dimensions)
-- ✅ **Mathematical invariants** (conservation, symmetry, physical laws)
-- ✅ **Properties that survive ANY parallelization or optimization**
-
-### DO NOT Insert Assertions For:
-- ❌ Thread/block/warp execution order
-- ❌ Shared memory state during kernel execution
-- ❌ Thread synchronization points
-- ❌ Performance metrics (kernel timing, memory bandwidth)
-- ❌ Implementation-specific GPU optimizations
-- ❌ Intermediate kernel states (unless copied to host)
-
-### GPU-Specific Guidelines:
-
-**Assertion Placement Priority:**
-1. **Host-side (preferred):** All invariant checks on CPU before/after GPU operations
-2. **Device-side (use sparingly):** Only for critical invariants that must be checked per-thread
-   - Device assertions have significant performance cost
-   - May cause kernel to fail silently or hang
-   - Prefer copying data to host for validation
-
-**Memory Transfer Validation:**
-```cpp
-// ALWAYS validate before H→D transfer
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Validate input data before host-to-device transfer
-{
-    bool _t1_pass = (h_data != nullptr);
-    if (_t1_pass) {
-        for (int i = 0; i < N; i++) {
-            if (!isfinite(h_data[i])) { _t1_pass = false; break; }
-        }
-    }
-    printf("LASSI-VERIFY ASSERTIONS [htod_input_valid]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-cudaMemcpy(d_data, h_data, N*sizeof(double), cudaMemcpyHostToDevice);
-
-// ALWAYS validate after D→H transfer
-cudaMemcpy(h_result, d_result, N*sizeof(double), cudaMemcpyDeviceToHost);
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Validate output data after device-to-host transfer
-{
-    bool _t1_pass = true;
-    for (int i = 0; i < N; i++) {
-        if (!isfinite(h_result[i])) { _t1_pass = false; break; }
-    }
-    printf("LASSI-VERIFY ASSERTIONS [dtoh_output_valid]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-```
-
-**Kernel Parameter Validation:**
-```cpp
-// >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-// LASSI_INSTRUMENTATION - Validate kernel launch parameters
-{
-    bool _t1_pass = (threads > 0 && threads <= 1024 && blocks > 0);
-    printf("LASSI-VERIFY ASSERTIONS [kernel_params_valid]: %s\n", _t1_pass ? "PASS" : "FAIL"); fflush(stdout);
-}
-// <<< END LASSI-VERIFY ASSERTIONS <<<
-```
-
-### Cost Considerations:
-- **Low cost:** Pointer checks, single value checks, kernel parameter validation
-- **Medium cost:** O(N) checks on host after device-to-host transfer
-- **High cost:** O(N²) matrix checks on host
-- **Very high cost:** Device-side assertions (avoid if possible)
-
-**For large-scale GPU codes:**
-- Prefer low-medium cost host-side assertions
-- Avoid expensive checks in performance-critical paths
-- Consider sampling for very large arrays (check subset of elements)
-- Use compile-time flags to disable assertions in production
-
----
-
-## Domain-Specific Guidance
-
-### Computational Fluid Dynamics (CFD)
-Key invariants:
-- Mass conservation
-- Energy conservation
-- Momentum conservation
-- Positivity of density, pressure, temperature
-- Speed limits (subsonic/supersonic bounds)
-
-### Linear Algebra
-Key invariants:
-- Matrix symmetry preservation
-- Orthogonality preservation
-- Norm conservation (unitary transforms)
-- Rank preservation (where applicable)
-- Conditioning bounds
-
-### Molecular Dynamics
-Key invariants:
-- Particle count conservation
-- Energy conservation (microcanonical ensemble)
-- Momentum conservation
-- Positivity of inter-particle distances
-- Temperature bounds
-
-### Monte Carlo Simulations
-Key invariants:
-- Probability sum to 1
-- Non-negativity of probabilities
-- Detailed balance (where applicable)
-- Acceptance ratio bounds
-
-### Iterative Solvers
-Key invariants:
-- Residual decrease (monotonicity)
-- Solution bounds
-- Convergence criteria satisfaction
-- Numerical stability
-
----
-
-## Example: GPU Jacobi Solver Instrumentation
+## Example: GPU Iterative Linear Solver Instrumentation
 
 **INPUT CODE (before instrumentation):**
 ```cpp
-__global__ void jacobi_kernel(double* A, double* b, double* x, double* x_new, int N) {
+__global__ void solver_kernel(double* A, double* b, double* x, double* x_new, int N) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < N) {
         double sigma = 0.0;
@@ -1235,7 +1105,7 @@ __global__ void jacobi_kernel(double* A, double* b, double* x, double* x_new, in
     }
 }
 
-void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double tol) {
+void iterative_solver(double* A, double* b, double* x, int N, int max_iter, double tol) {
     double *d_A, *d_b, *d_x, *d_x_new;
 
     cudaMalloc(&d_A, N*N*sizeof(double));
@@ -1251,7 +1121,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
     int blocks = (N + threads - 1) / threads;
 
     for (int iter = 0; iter < max_iter; iter++) {
-        jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
+        solver_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
         cudaDeviceSynchronize();
         std::swap(d_x, d_x_new);
     }
@@ -1264,7 +1134,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
 
 **YOUR OUTPUT (after instrumentation):**
 ```cpp
-__global__ void jacobi_kernel(double* A, double* b, double* x, double* x_new, int N) {
+__global__ void solver_kernel(double* A, double* b, double* x, double* x_new, int N) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < N) {
         double sigma = 0.0;
@@ -1275,7 +1145,7 @@ __global__ void jacobi_kernel(double* A, double* b, double* x, double* x_new, in
     }
 }
 
-void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double tol) {
+void iterative_solver(double* A, double* b, double* x, int N, int max_iter, double tol) {
     // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
     // LASSI_INSTRUMENTATION - Input pointer validity and parameter bounds
     {
@@ -1319,7 +1189,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
     // >>> BEGIN LASSI-VERIFY ASSERTIONS (do not edit this block) >>>
-    // LASSI_INSTRUMENTATION - Diagonal dominance check (Jacobi convergence requirement)
+    // LASSI_INSTRUMENTATION - Diagonal non-zero check (convergence requirement for this iterative solver)
     {
         bool _t1_pass = true;
         for (int i = 0; i < N; i++) {
@@ -1330,10 +1200,10 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
     // <<< END LASSI-VERIFY ASSERTIONS <<<
 
     // NOTE: Matrix symmetry is NOT inserted here.
-    // Jacobi iteration does not require a symmetric matrix — many valid Jacobi problems
-    // use non-symmetric diagonally-dominant systems. Inserting a symmetry check would be
-    // a Type B (implementation-specific) assertion for this code. Only add symmetry
-    // checks if the source code itself explicitly requires or documents symmetry.
+    // This particular iterative solver does not require a symmetric matrix — many valid
+    // iterative-solver problems use non-symmetric diagonally-dominant systems. Inserting
+    // a symmetry check would be a Type B (implementation-specific) assertion for this code.
+    // Only add symmetry checks if the source code itself explicitly requires or documents symmetry.
 
     double *d_A, *d_b, *d_x, *d_x_new;
 
@@ -1350,7 +1220,7 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
     int blocks = (N + threads - 1) / threads;
 
     for (int iter = 0; iter < max_iter; iter++) {
-        jacobi_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
+        solver_kernel<<<blocks, threads>>>(d_A, d_b, d_x, d_x_new, N);
         cudaDeviceSynchronize();
         std::swap(d_x, d_x_new);
     }
@@ -1406,29 +1276,6 @@ void jacobi_solver(double* A, double* b, double* x, int N, int max_iter, double 
 6. ✅ Assertions check **transformation-invariant properties** only
 7. ✅ Original kernel code **unchanged**
 8. ✅ Clear `// LASSI_INSTRUMENTATION` markers
-8. ✅ No symmetry assumption inserted — Jacobi does not require symmetric matrices
-
----
-
-## Notes on Implementation
-
-1. **All assertions use standard library functions only:**
-   - `<cstdio>` for printf() and fflush()
-   - `<math.h>` for isnan(), isinf(), isfinite(), fabs(), sqrt()
-   - No custom LASSI library required
-   - Code runs to completion — never use assert(), exit(), or abort(). The pipeline checks all assertions after execution and provides the LLM with a complete list of failures.
-
-2. **Assertions marked with `// LASSI_INSTRUMENTATION`:**
-   - This marker tells the code generation LLM to preserve these sections
-   - Enables automated verification that assertions weren't modified
-
-3. **Rationale documentation:**
-   - Each assertion block should include a brief comment explaining what invariant is being checked
-   - This aids in debugging if assertions fail
-
-4. **Tolerance values:**
-   - Use appropriate tolerances for floating-point comparisons
-   - Typical values: 1e-6 to 1e-10 depending on numerical precision requirements
-   - Relative tolerances preferred for conservation laws
+8. ✅ No symmetry assumption inserted — this iterative solver does not require a symmetric matrix
 
 ---

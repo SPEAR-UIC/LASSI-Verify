@@ -23,6 +23,8 @@ from pathlib import Path
 import streamlit as st
 import yaml
 
+import lassi.llm_config
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="LASSI-Verify Launcher",
@@ -39,16 +41,17 @@ def load_source_apps():
 source_apps = load_source_apps()
 
 HECBENCH_APPS = [k for k in source_apps["HeCBench"].keys() if k != "source_folder"]
-MINIAPPS      = [k for k in source_apps["Miniapps"].keys()  if k != "source_folder"]
 
-# LLM option lists
-ARGO_MODELS     = ["gpt54", "gpt5", "gpt41", "gpt4olatest", "gpto4mini", "gpt4turbo", "gpt4o",
-                   "claudesonnet46", "claudesonnet4"]
-CEREBRAS_MODELS = ["gpt-oss-120b", "qwen-3-coder-480b"]
-OLLAMA_MODELS   = ["devstral:24b", "qwq:latest", "deepseek-r1:70b", "qwen2.5-coder:32b",
-                   "qwen3:latest", "qwen3-coder:30b", "codestral:22b", "llama3.3:latest",
-                   "deepseek-coder-v2:16b", "phi4", "granite3.2:8b-instruct-q8_0"]
-ALL_MODELS      = ARGO_MODELS + CEREBRAS_MODELS + OLLAMA_MODELS
+# LLM option list for the ollama backend (openai_compatible is populated dynamically
+# from the endpoint's /models list instead — see fetch_openai_compatible_models()).
+OLLAMA_MODELS = ["devstral:24b", "qwq:latest", "deepseek-r1:70b", "qwen2.5-coder:32b",
+                 "qwen3:latest", "qwen3-coder:30b", "codestral:22b", "llama3.3:latest",
+                 "deepseek-coder-v2:16b", "phi4", "granite3.2:8b-instruct-q8_0"]
+
+
+@st.cache_data(show_spinner="Fetching available models...")
+def fetch_openai_compatible_models(base_url, api_key):
+    return lassi.llm_config.list_openai_compatible_models(base_url, api_key)
 
 # Load current config.yaml as defaults
 def load_config(path="config.yaml"):
@@ -81,6 +84,11 @@ st.markdown(f"""
       Configure and launch the LASSI-Verify pipeline.
       Settings are saved to <code>config.yaml</code> then <code>run_lassi.py</code> is started.
     </p>
+    <p style="margin:6px 0 0 0; color:gray; font-size:0.85rem; font-style:italic;">
+      M. T. Dearing, X. Wu, V. Taylor, and Z. Lan, &ldquo;LASSI-Verify: Adaptive Empirical
+      Verification of LLM-Generated Parallel Scientific Code Transformations,&rdquo;
+      SC26 Workshops (Correctness 2026), Chicago, IL, USA, Nov. 2026.
+    </p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -93,19 +101,13 @@ col_app, col_task, col_llm = st.columns([1, 1, 1.4])
 # ── Column 1: App Selection ───────────────────────────────────────────────────
 with col_app:
     st.subheader("App")
-    collection = st.selectbox(
-        "Collection",
-        ["HeCBench", "Miniapps"],
-        index=0 if _get(["app", "collection"], "HeCBench") == "HeCBench" else 1,
-    )
-    if collection == "HeCBench":
-        app_list    = HECBENCH_APPS
-        make_script = False
-        build_script = False
-    else:
-        app_list     = MINIAPPS
-        make_script  = True
-        build_script = False
+    # Miniapps/Altis support was removed from source_apps.json when the repo was
+    # trimmed to the exact 21 HeCBench kernels reported in the paper — HeCBench
+    # is the only collection with data behind it today.
+    collection = "HeCBench"
+    app_list    = HECBENCH_APPS
+    make_script = False
+    build_script = False
 
     default_app = _get(["app", "name"], "jacobi")
     app_name = st.selectbox(
@@ -121,41 +123,42 @@ with col_app:
     st.caption(f"Exec params: `{app_params}`")
 
     st.subheader("Language")
-    source_lang = st.selectbox("Source", ["CUDA", "OMP", "HIP", "SYCL"],
-                               index=["CUDA", "OMP", "HIP", "SYCL"].index(
-                                   _get(["language", "source"], "CUDA")))
-    target_lang = st.selectbox("Target", ["CUDA", "OMP", "HIP", "SYCL"],
-                               index=["CUDA", "OMP", "HIP", "SYCL"].index(
-                                   _get(["language", "target"], "CUDA")))
+    LANG_OPTIONS = ["CUDA", "OMP", "HIP", "SYCL"]
+    source_lang = "CUDA"
+    target_lang = "CUDA"
+
+    def _lang_help(lang):
+        if lang == "CUDA":
+            return "The only language used for the reported results."
+        return "Not used for the reported results. Reserved for future work."
+
+    st.caption("Source")
+    for _lang in LANG_OPTIONS:
+        st.checkbox(_lang, value=(_lang == "CUDA"), disabled=True,
+                    help=_lang_help(_lang), key=f"source_lang_{_lang}")
+
+    st.caption("Target")
+    for _lang in LANG_OPTIONS:
+        st.checkbox(_lang, value=(_lang == "CUDA"), disabled=True,
+                    help=_lang_help(_lang), key=f"target_lang_{_lang}")
 
 # ── Column 2: Task Mode ───────────────────────────────────────────────────────
 with col_task:
     st.subheader("Task Mode")
-    _power  = _get(["task", "power_measure"],    False)
-    _feedback = _get(["task", "yes_power_feedback"], True)
-    if _power and _feedback:
-        _default_mode = "Energy Efficiency (EE)"
-    elif not _power and _feedback:
-        _default_mode = "Runtime Performance"
-    else:
-        _default_mode = "Translation (one-shot)"
-
-    task_mode = st.radio(
-        "Mode",
-        ["Energy Efficiency (EE)", "Runtime Performance", "Translation (one-shot)"],
-        index=["Energy Efficiency (EE)", "Runtime Performance", "Translation (one-shot)"].index(_default_mode),
-        help="EE: optimise energy. Runtime: optimise wall-clock time. Translation: one-shot, no feedback loop.",
+    power_measure      = False
+    yes_power_feedback = True
+    st.checkbox(
+        "Runtime Performance", value=True, disabled=True,
+        help="The only mode used for the reported results.",
     )
-    if task_mode == "Energy Efficiency (EE)":
-        power_measure     = True
-        yes_power_feedback = True
-    elif task_mode == "Runtime Performance":
-        power_measure     = False
-        yes_power_feedback = True
-    else:
-        power_measure     = False
-        yes_power_feedback = False
-        st.warning("⚠️ Translation mode has a known infinite-loop-on-success issue.")
+    st.checkbox(
+        "Energy Efficiency (EE) — future work", value=False, disabled=True,
+        help="Not used for the reported results. Reserved for future work.",
+    )
+    st.checkbox(
+        "Translation (one-shot) — future work", value=False, disabled=True,
+        help="Not used for the reported results. Reserved for future work.",
+    )
 
     st.subheader("Experiment")
     trial_number = st.number_input("Starting trial #", min_value=1, value=int(_get(["experiment", "trial_number"], 1)))
@@ -168,13 +171,72 @@ with col_task:
 with col_llm:
     st.subheader("LLM")
 
+    BACKENDS = ["ollama", "openai_compatible"]
+    BACKEND_LABELS = {"ollama": "Ollama", "openai_compatible": "OpenAI-compatible"}
+    _default_backend = _get(["llm", "backend"], "openai_compatible")
+    backend = st.selectbox(
+        "Backend",
+        BACKENDS,
+        index=BACKENDS.index(_default_backend) if _default_backend in BACKENDS else 0,
+        format_func=lambda b: BACKEND_LABELS[b],
+        help="Ollama: local server. OpenAI-compatible: OpenAI, Argo Gateway's "
+             "OpenAI-compatible endpoint, or any other OpenAI-compatible server.",
+    )
+
+    # argo_username is kept as a silent passthrough (no GUI field) because
+    # run_lassi.py reads cfg["llm"]["argo_username"] unconditionally. The "argo"
+    # backend (lassi/llm_config.py's argo_llm(), the old streamchat protocol) is
+    # no longer offered here but still works by hand-editing config.yaml.
+    argo_username   = _get(["llm", "argo_username"], "enter-your-Argonne-domain-username")
+    openai_base_url = _get(["llm", "openai_compatible", "base_url"], "https://api.openai.com/v1")
+    openai_api_key  = _get(["llm", "openai_compatible", "api_key"], "")
+
+    if backend == "ollama":
+        st.caption("Connects to a local `ollama serve` instance (localhost:11434). "
+                   "Make sure the selected model has been pulled.")
+    else:
+        st.caption("Works with OpenAI, Argo Gateway's OpenAI-compatible endpoint, or any "
+                   "other OpenAI-compatible server (vLLM, llama.cpp server, LM Studio, ...).")
+        col_url, col_refresh = st.columns([5, 1])
+        with col_url:
+            openai_base_url = st.text_input("Base URL", value=openai_base_url)
+        openai_api_key = st.text_input("API key", value=openai_api_key, type="password",
+                                       help="Leave blank to use the OPENAI_API_KEY environment variable instead.")
+        with col_refresh:
+            st.write("")  # vertical spacer to align the button with the Base URL field
+            if st.button("🔄", help="Force-refresh the model list (bypass cache)"):
+                fetch_openai_compatible_models.clear()
+                st.rerun()
+
+    openai_models = None
+    openai_models_error = None
+    if backend == "openai_compatible" and openai_base_url:
+        try:
+            openai_models = fetch_openai_compatible_models(openai_base_url, openai_api_key)
+        except Exception as e:
+            openai_models_error = str(e)
+
+    if openai_models_error:
+        st.warning(f"Could not fetch model list from {openai_base_url!r}: {openai_models_error}\n\n"
+                   "Falling back to free-text model fields.")
+
     def model_selectbox(label, cfg_key, default):
         cur = _get(["llm", cfg_key], default)
-        options = ALL_MODELS
+        if backend == "ollama":
+            options = [(m, m) for m in OLLAMA_MODELS]
+        elif backend == "openai_compatible" and openai_models is not None:
+            options = openai_models  # list of (usable_id, display_label) tuples
+        else:
+            # Model list unavailable (fetch failed, or URL not yet entered) — free text.
+            return st.text_input(label, value=cur)
         # If current value not in list (e.g. custom Ollama tag) prepend it
-        if cur not in options:
-            options = [cur] + options
-        return st.selectbox(label, options, index=options.index(cur))
+        values = [v for v, _ in options]
+        if cur not in values:
+            options = [(cur, cur)] + options
+            values = [cur] + values
+        display_labels = dict(options)
+        return st.selectbox(label, values, index=values.index(cur),
+                            format_func=lambda v: display_labels.get(v, v))
 
     model       = model_selectbox("Model (general)",  "model",       "gpt54")
     model_coder = model_selectbox("Model (coder)",     "model_coder", "gpt54")
@@ -185,13 +247,6 @@ with col_llm:
     num_ctx_coder = st.number_input("Context tokens (coder)", min_value=4096, max_value=1000000,
                                     value=int(_get(["llm", "num_ctx_coder"], 200000)), step=4096)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        argo_uri = st.selectbox("Argo endpoint", ["local", "remote"],
-                                index=0 if _get(["llm", "argo_uri"], "local") == "local" else 1)
-    with col_b:
-        argo_username = st.text_input("Argo username", value=_get(["llm", "argo_username"], "mdearing"))
-
 st.divider()
 
 # ── Second row: Verification + Pipeline options ───────────────────────────────
@@ -199,21 +254,32 @@ col_ver, col_pipe = st.columns(2)
 
 with col_ver:
     st.subheader("LASSI-Verify Tiers")
-    run_tier2       = st.checkbox("Enable Tier 2 (empirical equivalence)",
-                                  value=bool(_get(["verification", "run_tier2"], True)))
+    run_tier2 = True
+    st.checkbox(
+        "Enable Tier 2 (empirical equivalence)", value=True, disabled=True,
+        help="Locked on — every reported trial ran all three tiers together "
+             "(three-tier all-or-nothing design). Per-tier toggles are reserved for "
+             "a future ablation study.",
+    )
     tier2_tolerance = st.number_input("Tier 2 tolerance",
                                       value=float(_get(["verification", "tier2_tolerance"], 1e-6)),
-                                      format="%.2e", step=1e-7, disabled=not run_tier2)
-    run_tier3       = st.checkbox("Enable Tier 3 (metamorphic testing)",
-                                  value=bool(_get(["verification", "run_tier3"], True)))
+                                      format="%.2e", step=1e-7)
+    run_tier3 = True
+    st.checkbox(
+        "Enable Tier 3 (metamorphic testing)", value=True, disabled=True,
+        help="Locked on — same as Tier 2, reserved for a future ablation study.",
+    )
     tier3_tolerance = st.number_input("Tier 3 tolerance",
                                       value=float(_get(["verification", "tier3_tolerance"], 1e-5)),
-                                      format="%.2e", step=1e-6, disabled=not run_tier3)
+                                      format="%.2e", step=1e-6)
     run_llm_judge   = st.checkbox("Enable LLM judge",
                                   value=bool(_get(["verification", "run_llm_judge"], True)),
                                   help="Disable for pure three-tier mode (Tier 1+2+3 only).")
     run_code_analysis = st.checkbox("Enable code analysis (pre-Tier-1 rubric)",
                                     value=bool(_get(["verification", "run_code_analysis"], False)))
+    st.caption("Witness chain (cheat-resistant loop-deletion detection) is always "
+               "enabled — a core, non-optional part of the verification scheme, not "
+               "an ablation knob in this launcher.")
 
 with col_pipe:
     st.subheader("Pipeline Options")
@@ -241,13 +307,17 @@ new_cfg = {
         "yes_power_feedback": yes_power_feedback,
     },
     "llm": {
+        "backend":        backend,
         "model":          model,
         "model_coder":    model_coder,
         "model_judge":    model_judge,
         "num_ctx":        int(num_ctx),
         "num_ctx_coder":  int(num_ctx_coder),
-        "argo_uri":       argo_uri,
         "argo_username":  argo_username,
+        "openai_compatible": {
+            "base_url": openai_base_url,
+            "api_key":  openai_api_key,
+        },
     },
     "verification": {
         "run_tier2":          run_tier2,

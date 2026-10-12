@@ -139,12 +139,19 @@ def compute_judge_lassi_pass_vector(
     best_code_merged: pd.DataFrame,
     kernel: str,
 ) -> np.ndarray:
-    """Variant 2: judge-pass@k (LASSI) — judge verdict on same best codes.
+    """Variant 2: judge-pass@k (LASSI) — judge baseline verdict on same best codes.
 
     Uses Table 2 is_best_code==True rows (pre-joined with Table 1 runtime cols).
     A trial passes iff:
     1. There is an is_best_code==True row in Table 2 for this trial
-    2. That row's judge_verdict == "VALID" (pre-override judge verdict)
+    2. That row's judge_baseline_verdict == "VALID"
+
+    Under the judge-as-baseline design, judge_baseline_verdict is the raw LLM
+    judge output captured BEFORE Tier 1/2/3 ever run; it is never modified by
+    tier results. V2 thus measures what a vanilla LLM-only practitioner (no
+    three-tier framework) would have approved on the same best-code set, in
+    direct contrast to V1 (verified-pass@k LASSI, which uses the framework
+    verdict). V1 and V2 are independent measurements on identical codes.
 
     Runtime improvement is intentionally excluded: pass@k measures functional
     correctness only.  Performance is a separate metric.
@@ -183,7 +190,7 @@ def compute_judge_lassi_pass_vector(
     pass_map: dict[tuple, bool] = {}
     for _, row in bc_kernel.iterrows():
         key = (row.get("app_name"), row.get("trial_number"))
-        judge = row.get("judge_verdict")
+        judge = row.get("judge_baseline_verdict")
         pass_map[key] = str(judge).strip().upper() == "VALID"
 
     # Map back to the trial order in df_kernel using the compound key
@@ -213,14 +220,18 @@ def compute_judge_zeroshot_pass_vector(
     """Variant 3: judge-pass@k (zero-shot).
 
     A trial passes iff the LLM judge said VALID for the zero-shot code,
-    using the *raw pre-override* judge_verdict from the attempt log
+    using judge_baseline_verdict from the attempt log
     (generation_type == 'zeroshot' rows).
 
-    This is the correct source for V3 because the pipeline can apply an
-    empirical override (zs_empirical_fail→INVALID) that writes INVALID into
-    base_v1_valid even when the judge said VALID.  V3 and V4 are meant to be
-    compared directly (judge accuracy vs. three-tier accuracy on the same ZS
-    code), so V3 must reflect the judge's raw opinion before any override.
+    Under the judge-as-baseline design (post-June 2026), judge_baseline_verdict
+    is the raw LLM judge output for the zero-shot code and is recorded
+    INDEPENDENTLY of the empirical verify (no override). V3 (judge baseline) and
+    V4 (empirical/framework verdict) are parallel measurements on the same ZS
+    code — comparing them directly answers "how often would the judge alone have
+    approved what the three-tier framework also approves?". Reading the
+    attempt log is preferred over Table 1's base_v1_valid because base_v1_valid
+    holds the framework verdict (= empirical when verify_zeroshot=True, else
+    the judge baseline), which is V4, not V3.
 
     Trials where the zero-shot code failed to compile or execute have no
     zeroshot attempt row (the judge was never called) and default to False —
@@ -228,21 +239,21 @@ def compute_judge_zeroshot_pass_vector(
 
     Falls back to base_v1_valid == "VALID" if df_attempts is empty or contains
     no zeroshot rows (preserves backward compatibility with runs that pre-date
-    the attempt log or used verify_zeroshot=False).
+    the attempt log).
 
     Returns:
         Boolean numpy array of shape (n_trials,).
     """
-    # Prefer raw judge_verdict from the attempt log.
+    # Prefer judge_baseline_verdict from the attempt log.
     # generation_type is uppercased by the data_loader normalization step.
     if not df_attempts.empty and "generation_type" in df_attempts.columns:
         zs_rows = df_attempts[df_attempts["generation_type"] == "ZEROSHOT"]
-        if not zs_rows.empty and "judge_verdict" in zs_rows.columns:
+        if not zs_rows.empty and "judge_baseline_verdict" in zs_rows.columns:
             # Build (app_name, trial_number) → raw judge verdict mapping
             judge_map: dict[tuple, bool] = {}
             for _, row in zs_rows.iterrows():
                 key = (row.get("app_name"), row.get("trial_number"))
-                judge_map[key] = str(row.get("judge_verdict", "")).strip().upper() == "VALID"
+                judge_map[key] = str(row.get("judge_baseline_verdict", "")).strip().upper() == "VALID"
 
             compound_keys = list(zip(df_kernel["app_name"], df_kernel["trial_number"]))
             result = pd.Series(
@@ -261,13 +272,14 @@ def compute_judge_zeroshot_pass_vector(
             return result.values
 
     # Fallback: use base_v1_valid from Table 1 for runs that pre-date the attempt
-    # log or used verify_zeroshot=False.  NOTE: base_v1_valid conflates the raw
-    # judge verdict with any zs_empirical_fail→INVALID override that was applied,
-    # so V3 may be understated if that override fired.
+    # log. NOTE: base_v1_valid holds the framework verdict (= empirical when
+    # verify_zeroshot=True, else the judge baseline); for runs where empirical
+    # was run, this fallback measures V4 (framework), not V3 (judge baseline)
+    # — they may differ when empirical and judge disagree.
     log.debug(
         "Variant 3: falling back to base_v1_valid (attempt log unavailable or "
-        "missing zeroshot rows — raw judge verdict may differ from base_v1_valid "
-        "if zs_empirical_fail override was applied)."
+        "missing zeroshot rows — note that on verify_zeroshot=True runs this "
+        "fallback measures the framework verdict, not the judge baseline)."
     )
     return df_kernel["base_v1_valid"].eq("VALID").values
 
@@ -547,10 +559,12 @@ def _write_zeroshot_table(results: dict, output_dir: str) -> None:
 def _write_summary_figure(results: dict, output_dir: str) -> None:
     """Write pass_at_k_summary.png/pdf — grouped bar chart, three variants.
 
-    V2 (Judge LASSI) is excluded from the figure: its values are trivially equal
-    to V1 (Verified LASSI) because tiers always override the judge — plotting both
-    would be misleading.  The meaningful comparison is LASSI three-tier vs. the
-    judge-only zero-shot baseline.
+    V2 (Judge LASSI) is excluded from the figure to keep the visual focused on
+    the cross-system comparison (LASSI framework vs. vanilla baseline). V1
+    (verified-pass@k LASSI) and V2 (judge-pass@k LASSI) are independent
+    measurements on the same best-code set under the judge-as-baseline design,
+    and are reported side-by-side in the per-kernel CSVs; the figure highlights
+    V1 vs. V3/V4 (the across-system contrast) because that's the headline result.
     """
     variants = [
         ("verified_lassi",    "Verified (LASSI)",    "#1f4e79"),  # dark blue

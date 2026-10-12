@@ -118,6 +118,7 @@ Statistics: min=<val>, max=<val>, mean=<val>
 Sample_first10: <v0> <v1> <v2> <v3> <v4> <v5> <v6> <v7> <v8> <v9>
 Sample_last10: <vN-10> <vN-9> <vN-8> <vN-7> <vN-6> <vN-5> <vN-4> <vN-3> <vN-2> <vN-1>
 Sample_spread10: <v[N/11]> <v[2N/11]> ... <v[10N/11]>
+Checksum: <0xHEX>          (integer/byte-typed buffers ONLY — see below)
 === END LASSI-VERIFY PASSTHROUGH [label] ===
 ```
 
@@ -132,6 +133,41 @@ indices N-10 to N-1. For row-major GPU output buffers, these are often boundary 
 remain unchanged even when interior computation is wrong. `Sample_spread10` samples 10
 elements at evenly-spaced interior indices `(k+1)*N/11` for k=0..9, giving guaranteed
 interior coverage independent of array layout.
+
+**Why `Checksum` — and why only for integer/byte-typed buffers:** `Sample_*` covers ~30
+elements no matter how large the buffer is — for a buffer with millions of elements, that's
+a vanishingly small fraction, and a correctness violation confined to elements the samples
+don't happen to land on can pass Tier 2 undetected even though min/max/mean and all three
+sample groups look fine. A checksum folded over every byte of the buffer closes that gap
+completely: any difference anywhere changes it.
+
+**Restrict this to buffers that are compared exactly — integer and byte types (the same
+types `_compute_fp_tolerance()` on the comparison side already treats as `atol=0, rtol=0`:
+`int`, `long`, `short`, `unsigned` variants, `char`, `bool`, `byte`, `size_t`, fixed-width
+`int8_t`/`uint8_t`/etc., and application-specific integer typedefs like `u64Int`). **Do NOT
+add a checksum for `float`/`double` buffers or any buffer with legitimate floating-point
+reordering wobble** — a content hash treats any bit difference as a mismatch, which would
+flag exactly the benign FP reassociation the tolerance-aware comparison exists to permit.
+If you are unsure whether a buffer's type is exact-comparable, omit the checksum — the
+existing Statistics/Sample fields remain the correctness evidence for it either way; the
+checksum is additive coverage for the exact-typed case only, never a required field.
+
+**Checksum algorithm — FNV-1a (64-bit) over the buffer's raw bytes:**
+```cpp
+uint64_t lv_checksum = 0xcbf29ce484222325ULL;               // FNV-1a offset basis
+const unsigned char* lv_bytes = (const unsigned char*)lv_host_buf;
+long long lv_nbytes = lv_N * (long long)sizeof(lv_host_buf[0]);
+for (long long lv_i = 0; lv_i < lv_nbytes; lv_i++) {
+    lv_checksum ^= lv_bytes[lv_i];
+    lv_checksum *= 0x100000001b3ULL;                         // FNV-1a prime
+}
+printf("Checksum: 0x%016llx\n", (unsigned long long)lv_checksum);
+```
+Compute this immediately after the existing min/max/mean loop, over the same host buffer,
+and print it as the last line before the block's END marker (after `Sample_spread10`, or
+after `Sample_first10` if `N <= 10`). Order-sensitive by construction (unlike a plain
+XOR-fold) — two buffers holding the same values in different positions still checksum
+differently, so a corruption can't hide behind e.g. a value ending up in the wrong slot.
 
 **Label naming convention:** Use a descriptive label that identifies the output buffer.
 Examples: `[final_solution]`, `[final_hashes]`, `[final_field]`, `[output_result]`.

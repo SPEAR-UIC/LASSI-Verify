@@ -1,9 +1,9 @@
 import re
-from lassi.llm_config import argo_llm, cerebras_llm, ollama_llm, ollama_llm_nostream
+from lassi.llm_config import call_llm
 from lassi.format_colors import color
 
 
-def llm_code_compare(prompts, input_content_llmjudge_dict, source_duration, source_total_energy_joules, source_ave_power, refactored_duration, refactored_total_energy_joules, refactored_ave_power, llm_source, model, num_ctx, system_prompt, display_response, verifyprompt, uri):
+def llm_code_compare(prompts, input_content_llmjudge_dict, source_duration, source_total_energy_joules, source_ave_power, refactored_duration, refactored_total_energy_joules, refactored_ave_power, llm_source, model, num_ctx, system_prompt, display_response, verifyprompt):
     print("\n\n----- " + color.BOLD + color.BLUE + "FINAL CODE COMPARISON: Source Code vs. Best Refactored Code" + color.END + " -----\n")
             
     compare_code = prompts.get_code_comparison(input_content_llmjudge_dict["refactored_code_lang"] + "_cpp")
@@ -21,28 +21,19 @@ def llm_code_compare(prompts, input_content_llmjudge_dict, source_duration, sour
     
     # Send prompt to LLM endpoint
     print("\n" + color.GREEN + "--> ... " + color.UNDERLINE + "LLM prompt to compare codes." + color.END + "\n\n")
-    code_comparison_response = llm_call("code comparison", llm_source, model, num_ctx, system_prompt, compare_code, display_response, verifyprompt, uri)
+    code_comparison_response = llm_call("code comparison", llm_source, model, num_ctx, system_prompt, compare_code, display_response, verifyprompt)
 
     return code_comparison_response
 
-    
-def llm_call(intent, llm_source, model, num_ctx, system_prompt, content_prompt, display_response, verifyprompt=False, uri="remote"):
-   
+
+def llm_call(intent, llm_source, model, num_ctx, system_prompt, content_prompt, display_response, verifyprompt=False):
+
     if intent == "refactoring plan":
         print("\n\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to write a refactoring plan." + color.END + "\n")
     if intent == "code analysis":
         print("\n\n" + color.GREEN + "--> ... " + color.UNDERLINE + "prompt LLM to perform code analysis." + color.END + "\n")
-        
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, 0.2, verifyprompt, uri)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    else:
-        print("Invalid LLM source")
+
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
 
     print("< BEGIN: LLM RESPONSE · " + intent + " >")
     print(response_text)
@@ -51,7 +42,7 @@ def llm_call(intent, llm_source, model, num_ctx, system_prompt, content_prompt, 
     return response_text
 
 
-def llm_judge(target_lang, llm_source, model, num_ctx, system_prompt, input_content_dict, power_measure, run_code_analysis, sourcecode_analysis, display_response, verifyprompt=False, uri="remote"):
+def llm_judge(target_lang, llm_source, model, num_ctx, system_prompt, input_content_dict, power_measure, run_code_analysis, sourcecode_analysis, display_response, verifyprompt=False):
 
     intent = "code validation judge"
 
@@ -94,16 +85,7 @@ def llm_judge(target_lang, llm_source, model, num_ctx, system_prompt, input_cont
         # No energy metrics measured. This refactored code should be flagged INVALID.
             return "INVALID"
     
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    else:
-        print("Invalid LLM source")
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
 
     print("< BEGIN: LLM RESPONSE · " + intent + " >")
     print(response_text)
@@ -174,17 +156,8 @@ def code_knowledge_llm(llm_source, model, num_ctx, system_prompt, input_context,
     # """
 
     content_prompt = content_prompt + "\n\n" + input_context
-    
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    else:
-        print("Invalid LLM source")
+
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
 
     print("< BEGIN: LLM RESPONSE · context knowledge summary >")
     print(response_text)
@@ -212,17 +185,8 @@ def code_description_llm(llm_source, model, num_ctx, system_prompt, input_contex
     
     content_prompt = content_prompt + "\n\n" + input_context
     content_prompt = content_prompt + "\n\n[START OF CODE TO DESCRIBE AND ANALYZE]\n" + input_code + "\n\n"  # [/END SOURCE CODE]"
-    
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    else:
-        print("Invalid LLM source")
+
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
 
     print("< BEGIN: LLM RESPONSE · code description >")
     print(response_text)
@@ -253,17 +217,8 @@ def system_description_llm(llm_source, target_lang, model, num_ctx, system_promp
     """
     
     content_prompt = content_prompt + "\n[CPU/GPU SYSTEM DETAILS TO DESCRIBE]\n\n" + gpu_system_details + "\n"
-    
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
-    else:
-        print("Invalid LLM source")
+
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, 0.2, verifyprompt)
 
     print("< BEGIN: LLM RESPONSE · GPU system description >")
     print(response_text)
@@ -293,17 +248,8 @@ def code_generator_llm(llm_source, model, num_ctx, temp, system_prompt, content_
     # print("  content_prompt: " + str(content_prompt))
     # print("  display_response: " + str(display_response))
     
-    if llm_source == "argo":
-        response_text = argo_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "lmstudio":
-        response_text = lmstudio_llm(model, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "ollama":
-        response_text = ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    elif llm_source == "cerebras":
-        response_text = cerebras_llm(model, num_ctx, system_prompt, content_prompt, temp, verifyprompt)
-    else:
-        print("Invalid LLM source")
-        
+    response_text = call_llm(llm_source, model, num_ctx, system_prompt, content_prompt, temp, verifyprompt, stream=False)
+
     print("< BEGIN: LLM GENERATED CODE · code generator >")
     print(response_text)
     print("< END: LLM GENERATED CODE >")

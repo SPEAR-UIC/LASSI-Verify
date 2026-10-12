@@ -1,9 +1,24 @@
 
 # LASSI-Verify Pipeline Overview
 
-**Version:** v4 (develop-runtime branch, March 2026)
+**Version:** v4 — post-hardening (branch `verify-hardening`, updated 2026-07-23)
 **Target GPU:** NVIDIA RTX 5000 Ada (sm_89); also supports AMD ROCm via HIP
 **Primary benchmark collection:** HeCBench (CUDA C++ kernels)
+
+> **Changelog — 2026-07-23 accuracy pass (sync doc to committed code through `7aaff6c`).**
+> Sections touched in THIS pass (new or corrected material): (1) new **"Final Witness Chain"**
+> section; (2) witness step added to the **Pipeline Flow** diagram and the **Tier 2** section;
+> (3) **Tier 3 "Implemented Relation Types"** table extended with INVARIANCE, SENSITIVITY, and
+> ADDITIVITY (was 6 types, now 9) + Mode-2 canonical-transform note; (4) **Self-Correction
+> Architecture** budgets corrected (per-code Tier-2 = 3, global safety net = 45); (5)
+> **zero-shot** path rewritten (single combined T1+T2 verify binary); (6) **Key Configuration
+> Parameters** adds `run_witness_chain`; (7) **Implementation Files** line count + witness
+> references. Everything NOT listed here is June-vintage (≤ `34ba419`) prose that was
+> re-verified against the code this pass and left unchanged — most notably the judge-as-baseline
+> model, `code_blocks` layout, and the Tier 1/2 core mechanics. Design provenance for the new
+> material: `05abd7a`/`802e38d`/`30d1c69` (witness chain), `d837910`/`f6c918c`/`668de6e`/`7aaff6c`
+> (INVARIANCE/SENSITIVITY + Mode-2), `014dfe1`/`e094788` (zero-shot consolidation),
+> `bc1521d`/`71f96d9` (Stage-0 retry loops), `1d3733b` (determinism gate).
 
 ---
 
@@ -83,10 +98,23 @@ Source file (.cu)
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
+│ WITNESS-CHAIN INSTRUMENTATION (if run_witness_chain=True)       │
+│  Separate LLM insertion step (Witness_Chain_Harness.md) wraps   │
+│  the timed loop with a sentinel-write → kernel → chain-update    │
+│  harness; captures final chain as a Tier 2 passthrough block    │
+│  [witness_chain_state]. Requires run_tier2. A per-trial 64-bit  │
+│  LASSI_VERIFY_SEED is injected at runtime. See "Final Witness   │
+│  Chain" section. (Re-inserted deterministically into each variant.)│
+└────────────────────────────────┬────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
 │ STAGE 0b: Test SOURCE_verify                                    │
 │  Compile + execute *_verify.cu; collect instrumented baseline.  │
 │  Captures: stdout with PASSTHROUGH blocks → tier2_spec_output   │
 │  (This becomes the Tier 2 reference for all generated codes.)   │
+│  A tolerance-aware determinism gate re-runs SOURCE_verify and    │
+│  requires self-consistent output before it is accepted as spec.  │
 └────────────────────────────────┬────────────────────────────────┘
                                  │
                                  ▼
@@ -143,7 +171,10 @@ Source file (.cu)
          │  │  Parse PASSTHROUGH blocks from stdout.  │  │
          │  │  Compare labeled blocks to spec         │  │
          │  │  (tier2_spec_output from SOURCE_verify).│  │
-         │  │  FAIL → self-correction (up to 5x/code).│  │
+         │  │  Includes [witness_chain_state] (exact  │  │
+         │  │  equality) — a divergence here is the   │  │
+         │  │  cheat signal, surfaced as tier2 FAIL.  │  │
+         │  │  FAIL → self-correction (up to 3x/code).│  │
          │  └──────────────┬──────────────────────────┘  │
          │                 │                              │
          │  ┌──────────────▼──────────────────────────┐  │
@@ -250,11 +281,13 @@ Sample_spread10: %.17g %.17g ...  (10 interior values at (k+1)*N/11, k=0..9; omi
 
 `Sample_spread10` was added to provide guaranteed interior coverage. `Sample_first10`/`Sample_last10` only cover array boundaries (indices 0–9 and N-10..N-1). For convergence-sensitive solvers, interior divergence can be masked if boundary elements happen to look correct — notably observed in Jacobi when a pointer-swap bug left boundary rows intact while the interior diverged. `Sample_spread10` at evenly-spaced indices `(k+1)*N/11` catches interior bugs regardless of array layout.
 
-**Comparison:** Deterministic first (`|a-b| ≤ atol + rtol×max(|a|,|b|)` with `atol = |spec_max|×rtol`). Falls back to LLM parse if deterministic parsing fails. Default `tier2_tolerance = 1e-6`.
+**Comparison:** Deterministic first (`|a-b| ≤ atol + rtol×max(|a|,|b|)` with `atol = |spec_max|×rtol`). Falls back to LLM parse if deterministic parsing fails. Default `tier2_tolerance = 1e-6`. FP comparisons additionally support a **ULP-aware tolerance** path for integer-typedef / exact-FP cases (see `lassi/verify.py` tolerance helper). The largest observed per-block relative error is recorded as `tier2_max_relative_error` in the attempt log.
 
-**Self-correction:** On FAIL, the raw stdout diff (SOURCE_verify reference + generated output) is fed back to the LLM as self-correction context. Up to 5 retries per code, 15 total across the run.
+**Witness-chain block:** When `run_witness_chain=True`, the harness's final chain state is captured as an ordinary Tier 2 passthrough block labeled `[witness_chain_state]` and compared with **exact-string equality** (not the FP tolerance path). A mismatch therefore produces a Tier 2 `FAIL` with `witness_chain_state` in `tier2_failed_labels` — the witness chain has **no separate verdict of its own**; it rides on Tier 2. See the "Final Witness Chain" section for the mechanism.
 
-**Stacking:** Tier 1 instrumentation is applied first; Tier 2 is applied on top. The LLM prompt for Tier 2 explicitly preserves existing ASSERTIONS blocks.
+**Self-correction:** On FAIL, the raw stdout diff (SOURCE_verify reference + generated output) is fed back to the LLM as self-correction context. Up to **3 retries per code** (`self_correction_verify_counter_code_max`); a global safety-net counter (`self_correction_verify_counter_max = 45`) bounds the whole run. When the per-code witness block is the failing label, a **cheat-detection-specific** feedback message is used instead of the generic "fix the passthrough" guidance.
+
+**Stacking:** Tier 1 instrumentation is applied first; Tier 2 is applied on top; the witness-chain harness is a further, separate insertion step. The LLM prompts for Tier 2 and the witness step explicitly preserve existing ASSERTIONS blocks. Both the Tier 1 and Tier 2 Stage-0 instrumentation steps run **feedback-driven retry loops** (re-prompt on compile/parse failure) before the baseline is accepted.
 
 ---
 
@@ -286,15 +319,26 @@ On FAIL: self-correction (up to 3 retries per code, sharing global counter).
 |------|-------|--------------|
 | **SCALING** | Z_stat ≈ factor × Y_stat; Z_sample[i] ≈ factor × Y_sample[i] | Factor, Statistics, Sample_first10 |
 | **SYMMETRY** | Same as SCALING with factor=−1 (min/max swap) | Factor, Statistics, Sample_first10 |
+| **ADDITIVITY** | Z_stat ≈ Y_stat + c (uniform additive shift, factor=0.0 convention) | Factor, Statistics, Sample_first10 |
 | **PERMUTATIVE / ROTATION** | Step A: Z_stat ≈ Y_stat (invariance, factor=1.0); Step B: Z[idx1] ≈ Y[idx2] and Z[idx2] ≈ Y[idx1] (equivariance, fires when indices fall in first10 or last10 range) | Swap_idx1, Swap_idx2, Sample_at_idx1, Sample_at_idx2, Statistics, Sample_first10 |
 | **CONSERVATION** | \|sum_after − sum_before\| / \|sum_before\| < rtol | Sum (before + after blocks) |
 | **MONOTONICITY** | residual[k] ≥ residual[k+1] − rtol×\|residual[k]\| | Iteration, Residual (per-iter blocks) |
+| **INVARIANCE** | Z_stat ≈ Y_stat under an input transform that must NOT change the observable (identity replay; factor conventionally 1.0). For categorical/equality-based kernels and co-normalized-scaling (z-score) kernels. | Statistics, Sample_first10 |
+| **SENSITIVITY** | Inverse of INVARIANCE: a relevant input change **MUST** change the observable — "no response" = FAIL. Probed with a **multi-perturbation set** (`p_small` minimal bump + `p_outlier` generic out-of-range outlier); a variant is VALID iff it responds to **every** perturbation the SOURCE responded to (AND-all over source-active perturbations). Optional local-response probe via `canonical_target_index`. | Statistics, Sample_first10 (per perturbation) |
 
 **Catalog:** `Metamorphic_Relations_Catalog.md` — formal 3-tuples, examples, contraindications, and implementation notes for each relation type.
 
+**Mode-2 canonical-transform enforcement (SENSITIVITY / INVARIANCE soundness fix, `668de6e`/`7aaff6c`):** the input transform is wrapped in `MT_TRANSFORM` delimiters, captured byte-exact from the source at the Stage 0 filter, and re-inserted **byte-identically** into every variant (`_enforce_canonical_transform`). This makes the Stage-0 "source responds" guarantee transfer to each variant — the variant LLM controls only harness *placement*, never the stimulus content. It closes both the SENSITIVITY false-reject (variant used a weaker perturbation than the source was filtered with) and the INVARIANCE false-accept (variant used a weaker/no-op transform). `p_outlier` additionally carries a domain-aware guardrail so the outlier stays inside any hard input-domain constraint the kernel actually processes.
+
 **Null-factor relations — Phase 3 future work (NOT yet implemented):**
 
-All currently-implemented relation types require a concrete numeric `factor` in the contract JSON. The checker computes `Z_stat ≈ factor × Y_stat` and `Z_sample[i] ≈ factor × Y_sample[i]` for each block field. This is sufficient for SCALING, SYMMETRY (factor=−1), and PERMUTATIVE (factor=1.0, with index-swap equivariance checks).
+> **Clarification (2026-07-23):** "null-factor" here means specifically the **element-wise
+> buffer permutation / set-equivalence** comparison described below — that remains unimplemented.
+> It does NOT refer to INVARIANCE or SENSITIVITY, which ARE implemented (above) as their own
+> typed statistical checks (INVARIANCE via a factor=1.0 stat comparison, SENSITIVITY via the
+> response/no-response perturbation probe) rather than via an element-wise buffer read.
+
+All currently-implemented factor-based relation types require a concrete numeric `factor` in the contract JSON. The checker computes `Z_stat ≈ factor × Y_stat` and `Z_sample[i] ≈ factor × Y_sample[i]` for each block field. This is sufficient for SCALING, SYMMETRY (factor=−1), and PERMUTATIVE (factor=1.0, with index-swap equivariance checks).
 
 A **null-factor** relation is one where no fixed scalar relates the variant output to the baseline — instead, the check requires element-wise array comparison between two specific output buffers (e.g., "the sorted output is always a permutation of the input"). These checks cannot be expressed as `Z_stat ≈ factor × Y_stat` on aggregate statistics and require full buffer reads and sorted-match or set-equivalence logic.
 
@@ -306,26 +350,86 @@ A **null-factor** relation is one where no fixed scalar relates the variant outp
 
 **Default tolerance:** `tier3_tolerance = 1e-5` (slightly looser than Tier 2).
 
-**Relation cost:** All currently implemented relation types (SCALING, SYMMETRY, PERMUTATIVE, ROTATION, CONSERVATION, MONOTONICITY) require 1 extra compile + run (labeled `"cheap"` in the catalog). ROTATION shares the same checker and variant-generation code path as PERMUTATIVE (both are handled by the `elif relation_type in ("PERMUTATIVE", "ROTATION"):` branch). The theoretical zero-extra-run optimization for CONSERVATION/SYMMETRY is not yet implemented.
+**Relation cost:** All currently implemented relation types (SCALING, SYMMETRY, ADDITIVITY, PERMUTATIVE, ROTATION, CONSERVATION, MONOTONICITY, INVARIANCE, SENSITIVITY) require 1 extra compile + run per relation (labeled `"cheap"` in the catalog); SENSITIVITY runs one extra binary per perturbation in its set. ROTATION shares the same checker and variant-generation code path as PERMUTATIVE (both are handled by the `elif relation_type in ("PERMUTATIVE", "ROTATION"):` branch). The theoretical zero-extra-run optimization for CONSERVATION/SYMMETRY is not yet implemented. **Note (Tier 3 vs witness):** the witness-chain harness is stripped from the code before Tier 3 variant generation — Tier 3 does not compare chain state.
 
 ---
 
-## LLM Judge + Three-Tier Override System
+## Final Witness Chain (Cheat-Resistant Loop-Deletion Detection)
 
-The LLM judge reads both codes and their stdout outputs and returns a functional equivalence verdict (VALID or INVALID). Any other response (e.g. SKIP, malformed output) is normalized to INVALID and counted as an API error; three consecutive API errors halt the pipeline. The raw judge verdict is captured as `judge_raw_verdict` immediately after the judge call, before any tier override logic runs — this is what is stored as `judge_verdict` in Table 2 and is never subsequently modified. For LASSI-generated codes, deterministic tier results take priority over the judge via four override rules applied in order:
+**What it is.** A resource-tracking instrumentation harness — the sibling of Tier 1 — that
+deterministically detects transformations which preserve output equivalence while silently
+*dropping computational work*. The canonical target is the timing-loop-deletion cheat: deleting a
+benchmark's `for (i<repeat)` loop and post-dividing elapsed time by `repeat` to fabricate a speedup,
+which every output-only check passes because the loop body is idempotent. **Enabled by default**
+(`run_witness_chain=True`, `pipeline_v4.py:261`); **requires `run_tier2=True`** because it reports
+through Tier 2.
 
-| Override | Condition | Final verdict | Logged as |
-|----------|-----------|---------------|-----------|
-| **Tier 1 exhausted** (inline) | Per-code Tier 1 budget exhausted | **INVALID** + `continue` (skips judge entirely) | — |
-| **Override 1** | Tier 2 budget exhausted | **INVALID** (overrides judge) | `false_positive` |
-| **Override 2** | Tier 1 PASS/SKIP + Tier 2 PASS + Tier 3 PASS/SKIP | **VALID** (overrides judge) | `false_negative` |
-| **Override 3** (last word) | Tier 3 budget exhausted | **INVALID** (overrides Override 2) | `false_positive` |
+**Catalog / authoritative spec:** `lassi/context/Witness_Chain_Harness.md` (matches the implemented
+code; the "Decision Tree cases 1–8" section within it is explicitly marked *superseded*).
 
-Override 3 runs after Override 2 and has final authority: a code that exhausts Tier 3 retries is INVALID regardless of any prior verdict.
+**Mechanism (final, as built — differs from the June-18 proposal):**
+1. A per-trial 64-bit runtime seed `LASSI_VERIFY_SEED = 0x{secrets.randbits(64)}` is injected
+   (`pipeline_v4.py:363`) — unknown at LLM code-generation time, so the expected chain value cannot
+   be precomputed offline.
+2. Each timed kernel launch is wrapped: a **pre-call sentinel write** (`_t1_chain_write_sentinel`)
+   writes an 8-byte sentinel into the first 8 bytes of the kernel's output buffer, and a
+   **post-call chain update** (`_t1_chain_update`) folds a signal into the running chain state. The
+   sentinel write is a **type-agnostic 8-byte write** (reinterpret as `unsigned long long*`),
+   which **supersedes** the older per-output-type sentinel Decision Tree.
+3. **The fold is value-AGNOSTIC and BINARY** (job (ii), `30d1c69`): the chain update folds
+   *whether* the kernel overwrote the 8-byte tripwire this iteration (`observed != sentinel → 1`,
+   else `0`), **not what value** replaced it. If the kernel ran it overwrote the sentinel
+   (signal=1); if it was skipped/no-op the sentinel persists (signal=0), diverging the chain. This
+   deliberately makes the witness insensitive to benign output differences (FP rounding, alternate
+   correct paths) — **content/value correctness is Tier 2's job; the witness chain is purely
+   operational ("did the kernel actually run each iteration?").**
+4. After the timed loop, the final chain state is emitted as the Tier 2 passthrough block
+   `[witness_chain_state]` and compared with exact-string equality against SOURCE_verify's value
+   under the same seed.
 
-The zero-shot (vanilla LLM) code always goes through the judge — it has no Tier 1/2/3 instrumentation, so the judge is its only correctness gate. No overrides apply to zero-shot.
+**Verdict locus — this is three tiers, not four.** The witness chain has **no independent verdict
+column**. A chain mismatch surfaces as `tier2_verdict=FAIL` with `witness_chain_state` among
+`tier2_failed_labels`. The framework verdict remains `T1 ∧ T2 ∧ T3` with the witness folded into T2.
 
-Discrepancies are logged in `verification_log["judge_discrepancies"]` and CSV columns `judge_false_positives` / `judge_false_negatives`.
+**Determinism / canonicalization safeguards (post-proposal, prevent instrumentation-consistency
+false-rejects):**
+- `_enforce_canonical_witness_init` — exactly one continuous chain init placed before the
+  *outermost* timed loop (never re-seeded inside a loop), so source and every variant accumulate a
+  comparable single chain. Fixed the layout/segment-reduce init-placement over-strictness.
+- `_enforce_canonical_witness_device_fns` — the framework deterministically re-derives both witness
+  device-kernel bodies after insertion, guaranteeing byte-identical fold semantics for source and
+  every variant regardless of LLM re-insertion variance.
+- The harness is **re-inserted per variant** (a variant may have restructured/fused/graph-captured
+  its loop), so a chain mismatch genuinely means the variant performed fewer real kernel
+  invocations than the source — a dropped-work cheat — not an instrumentation artifact.
+
+**Known limitation (open):** the pre-kernel sentinel write corrupts kernels that read-modify-write
+their output buffer **in place** (confirmed on matrix-rotate; that kernel is held out of the current
+campaign pending a fix). Tracked separately; do not describe the witness chain as universally safe
+for in-place-mutation kernels.
+
+**Logged fields:** `witness_chain_status` (which insertion path was taken:
+`applied_decision_tree_case_N` / `soft_flag_no_safe_site` / `not_applied_no_timing_loop`) and
+`witness_chain_mismatches` (count of LASSI variants whose chain diverged from source).
+
+---
+
+## LLM Judge as Pre-Tier Baseline Measurement
+
+The LLM judge is a **baseline comparator** representing current LLM-only practice — it is NOT a framework tier. It runs immediately after compile+execute succeeds and BEFORE Tier 1/2/3, so it sees only what the executed code actually produced (the generated code and its stdout) and nothing from tier analysis. The judge returns a functional-equivalence verdict (VALID or INVALID); any other response is normalized to INVALID and counted against a 3-strike `judge_api_error_count` safety net that halts the pipeline on persistent API errors.
+
+The judge verdict is recorded as `judge_raw_verdict` (stored in Table 2 as `judge_baseline_verdict`) and **does not participate** in deciding the framework verdict. The framework verdict (`valid_code_flag`, written to Table 2 as `final_verdict`) is derived from tier verdicts alone:
+
+| Path | Condition | Framework verdict | `override_applied` tag |
+|------|-----------|-------------------|------------------------|
+| All tiers PASS | Tier 1 PASS + Tier 2 PASS + Tier 3 PASS-or-inactive | **VALID** | `none` |
+| Tier 1 exhausted (inline) | Per-code T1 budget exhausted | **INVALID** + `continue` | `tier1_exhausted` |
+| Tier 2 exhausted | Per-code T2 budget exhausted | **INVALID** | `tier2_exhausted` |
+| Tier 3 exhausted | Per-code T3 budget exhausted | **INVALID** | `tier3_exhausted` |
+
+For the zero-shot (vanilla LLM) code, the empirical verdict from a **single combined T1+T2 verify binary** (`014dfe1`: Tier-1 assertions and Tier-2 passthroughs are instrumented into one retrofit binary and run once — not the LASSI codes' separate multi-attempt T1→T2→T3 loop) IS the framework verdict when `verify_zeroshot=True`; these appear in the attempt log as `generation_type` zero-shot with `zs_tier1_verdict` / `zs_tier2_verdict` fields. A zero-shot variant that fails to compile/run still emits a Table 2 row with `final_verdict=INVALID` (`e094788`) rather than being dropped. The judge baseline is recorded separately with no override semantics. When `verify_zeroshot=False`, the judge baseline is the framework verdict (Mode A "vanilla LLM + judge only" baseline).
+
+The per-attempt (judge_baseline, tier-final) pair is logged to `verification_log["judge_discrepancies"]` and used downstream to compute `judge_false_positives` (judge VALID + framework INVALID) and `judge_false_negatives` (judge INVALID + framework VALID) per trial — these are now derived directly from the raw verdict pair, not from a "type" tag set at override time.
 
 **Tier 2 coverage note:** Three sample fields are captured: `Sample_first10` (indices 0–9), `Sample_last10` (N-10..N-1), and `Sample_spread10` (10 evenly-spaced interior indices `(k+1)*N/11`). Together these provide boundary + interior coverage. The original weakness — interior divergence masked by intact boundary elements (observed in a Jacobi pointer-swap bug) — is addressed by `Sample_spread10`. Tier 3 PERMUTATIVE testing provides additional structural coverage for cases where element-level sampling may still miss permutations.
 
@@ -336,9 +440,15 @@ Discrepancies are logged in `verification_log["judge_discrepancies"]` and CSV co
 | Counter | Scope | Max | Trigger | Exhaustion behavior |
 |---------|-------|-----|---------|---------------------|
 | `self_correction_tier1_counter_code` | Per generated code (resets on fresh generation) | 3 | Tier 1 FAIL | Inline: `valid_code_flag=INVALID` + `continue` (skips Tier 2/3/judge) |
-| `self_correction_verify_counter_code` | Per generated code (resets on fresh generation) | 5 | Tier 2 FAIL | Override 1: code marked INVALID; fresh generation next |
-| Per-code Tier 3 counter | Per generated code | 3 | Tier 3 FAIL | Override 3: code marked INVALID (last word) |
-| `self_correction_verify_counter` | Global, whole pipeline run | 15 | Tier 1 FAIL + Tier 2 FAIL + Tier 3 FAIL | Pipeline safety net; halts verification loop |
+| `self_correction_verify_counter_code` | Per generated code (resets on fresh generation) | 3 | Tier 2 FAIL (incl. `witness_chain_state`) | Code marked INVALID; fresh generation next |
+| `self_correction_tier3_counter_code` | Per generated code | 3 | Tier 3 FAIL | Code marked INVALID (last word) |
+| `self_correction_verify_counter` | Global, whole pipeline run | 45 | Tier 1 FAIL + Tier 2 FAIL + Tier 3 FAIL | Pipeline safety net; halts verification loop |
+
+> **Note:** all three per-code budgets are **3** (`pipeline_v4.py:296,302,309`). A tier catch that
+> is repaired within its 3-retry budget overwrites the failing `.cu` and leaves no on-disk artifact;
+> only *budget exhaustion* preserves the failing file with `final_verdict=INVALID`. This is why most
+> tier catches are invisible to the post-hoc oracle analysis (see `planning/oracle_analysis_runbook.md`
+> Step B.5). The earlier "Tier 2 = 5, global = 15" figures were pre-`verify-hardening` values.
 
 **Tier 1 exhaustion note:** When the per-code Tier 1 budget exhausts, the pipeline `continue`s immediately — Tier 2 and Tier 3 are never run for that code. This avoids overhead when Tier 1 has already determined the code is incorrect. The exhausted code stays in `code_blocks` as an artifact (no `pop()`).
 
@@ -363,13 +473,14 @@ Configured by two notebook flags:
 | File | Contents |
 |------|----------|
 | `lassi-verify_pipeline_data.csv` | **Table 1** — one row per trial; all `experiment_data` fields (final outcomes, aggregated counts) |
-| `lassi-verify_attempt_log.csv` | **Table 2** — one row per code attempt within a trial; per-attempt `judge_verdict`, `final_verdict`, `tier1/2/3_verdict`, `override_applied`, `is_best_code`, runtime/energy |
+| `lassi-verify_attempt_log.csv` | **Table 2** — one row per code attempt within a trial; per-attempt `judge_baseline_verdict`, `judge_response_text`, `final_verdict`, `tier1/2/3_verdict`, `override_applied`, `is_best_code`, runtime/energy |
 | `verification_log_<name>_Trial<N>.json` | Full Tier 2/3 results, judge discrepancies, config |
 | `<name>_Trial<N>.cu` | Each generated code version |
 | `<name>_verify.cu` | Instrumented SOURCE_verify (Tier 1 + Tier 2) |
 | `<name>_best_clean.cu` | Best LASSI code stripped of LASSI-VERIFY blocks |
 | `<name>_mt_<relation>.cu` | Tier 3 metamorphic variant sources |
 | `<name>_Trial<N>.txt` | Full metadata, prompts, stdout, comparison response |
+| `LASSI_RESULT` artifact | Canonical winner record emitted when a validated LASSI winner beats the source (`3314363`). Note: the winning code file is named `_v{lassiee_version}_Trial<N>.cu` (the versioned winner), not plain `_Trial<N>.cu`. |
 
 ### Key CSV columns — Table 1 (`lassi-verify_pipeline_data.csv`)
 - `lassiee_valid` — tier-dominant verdict for the best LASSI code (`VALID` / `INVALID` / `SOURCE`); used for Variant 1 (verified-pass@k) in pass@k analysis
@@ -386,9 +497,10 @@ Configured by two notebook flags:
 - `judge_false_positives`, `judge_false_negatives`
 
 ### Key CSV columns — Table 2 (`lassi-verify_attempt_log.csv`)
-- `judge_verdict` — raw LLM judge output captured before any override logic; never modified; used for Variant 2 (judge-pass@k LASSI) on the `is_best_code=True` row
-- `final_verdict` — tier-dominant operational result (`VALID` / `INVALID`); starts as judge output, then overrides ensure tiers win when they have a deterministic result; drives winner selection and self-correction
-- `override_applied` — which override fired (`none` / `override1_tier2_exhausted` / `override2_tiers_pass` / `override3_tier3_exhausted` / `global_sc_budget_exhausted` / `tier1_exhausted`); diagnostic only
+- `judge_baseline_verdict` — raw LLM judge output captured as a pre-tier baseline measurement; never overridden by tier verdicts; used for Variant 2 (judge-pass@k LASSI) on the `is_best_code=True` row. Older CSVs use the legacy column name `judge_verdict`; the analysis data loader transparently maps it onto this canonical name.
+- `judge_response_text` — verbatim LLM judge prose (the reasoning the judge produced when it issued its VALID/INVALID verdict). Populated on every attempt that reached the judge, including SC intermediates, so cross-attempt judge-verdict shifts and the *why* behind any single verdict are queryable from the data. Empty on attempts where the judge wasn't invoked (compile/execute failed before the judge stage). Multi-line; CSV writers use `QUOTE_MINIMAL`. Also persisted into the `judge_discrepancies` entries in the sidecar JSON for grep-style access.
+- `final_verdict` — framework verdict for the attempt (`VALID` / `INVALID`). Derived from tier verdicts alone for LASSI codes; equals the empirical verdict (when `verify_zeroshot=True`) or the judge baseline (when `verify_zeroshot=False`) for zero-shot codes. Drives winner selection and self-correction.
+- `override_applied` — exhaustion / pipeline-budget tag for the attempt: `none` (clean tier-derived verdict), `tier1_exhausted`, `tier2_exhausted`, `tier3_exhausted`, `exhausted_t1_sc_budget`, `exhausted_sc_budget`, `global_sc_budget_exhausted`. Tier-vs-judge override tags from earlier schemas (`judge_override_*`) are no longer produced under the judge-as-baseline design.
 - `tier1_verdict`, `tier2_verdict`, `tier3_verdict` — individual tier verdicts per attempt: `PASS` / `FAIL` / `SKIP`. All tiers are fully deterministic; parse errors in Tier 2 output produce `FAIL` and trigger self-correction. Budget exhaustion is encoded in `override_applied`, not in the verdict string.
 - `is_best_code` — True on exactly one row per trial (the winning code's final attempt row)
 - `is_final_attempt` — True for the definitive verdict row per code version; False for mid-retry self-correction rows
@@ -404,6 +516,7 @@ Configured by two notebook flags:
 | `tier2_tolerance` | `1e-6` | Relative FP tolerance for Tier 2 block comparison |
 | `run_tier3` | `True` | Enable Tier 3 metamorphic testing |
 | `tier3_tolerance` | `1e-5` | Relative FP tolerance for MT relation checks |
+| `run_witness_chain` | `True` | Enable the cheat-resistant witness-chain harness (requires `run_tier2`; reports via the `[witness_chain_state]` Tier 2 passthrough) |
 | `run_llm_judge` | `True` | Enable LLM judge (always on for zero-shot) |
 | `run_code_analysis` | `False` | Pre-loop LLM rubric step (pre-Tier-1/2 stop-gap) |
 | `power_measure` | `False` | GPU power/energy monitoring (requires pynvml) |
@@ -416,12 +529,14 @@ Configured by two notebook flags:
 
 | File | Role |
 |------|------|
-| `lassi/pipeline_v4.py` | Main pipeline orchestration (~1700 lines) |
-| `lassi/verify.py` | Tier 1, 2, and 3 instrumentation + checking functions |
-| `lassi/code_manager.py` | Compile, execute, GPU vendor detection |
+| `lassi/pipeline_v4.py` | Main pipeline orchestration (~3960 lines) |
+| `lassi/verify.py` | Tier 1, 2, 3 + witness-chain instrumentation, checking, strip, and canonicalization functions |
+| `lassi/code_manager.py` | Compile, execute, GPU vendor detection, witness-chain seed |
 | `lassi/pipeline_methods.py` | Stage 0, code analysis, metrics helpers |
-| `lassi/llm_methods.py` | LLM API calls (Argo/Ollama/Cerebras) |
-| `lassi/prompt_dictionary.py` | All LLM prompt templates + catalog loading |
+| `lassi/llm_methods.py` | LLM API calls (Argo/Ollama/OpenAI-compatible) |
+| `lassi/prompt_dictionary.py` | All LLM prompt templates + catalog loading (`get_codeknowledge`) |
 | `lassi/context/Invariant_Assertions_Catalog.md` | Tier 1 assertion reference |
 | `lassi/context/Metamorphic_Relations_Catalog.md` | Tier 3 relation reference |
+| `lassi/context/Witness_Chain_Harness.md` | Witness-chain harness insertion spec (loaded for the dedicated witness step) |
+| `run_lassi.py` / `lassiapp.py` | CLI entry point (`config.yaml`) / GUI launcher |
 | `LASSI_power_pipeline_v4.ipynb` | Jupyter notebook: experiment configuration + run |

@@ -1,0 +1,44 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+type: software
+title: "LASSI-Verify"
+repository-code: "https://github.com/SPEAR-UIC/LASSI-Verify"
+authors:
+  - family-names: Dearing
+    given-names: "Matthew T."
+    affiliation: "University of Illinois Chicago"
+    email: mdear2@uic.edu
+  - family-names: Wu
+    given-names: Xingfu
+    affiliation: "Argonne National Laboratory"
+    email: xingfu.wu@anl.gov
+  - family-names: Taylor
+    given-names: Valerie
+    affiliation: "Argonne National Laboratory"
+    email: vtaylor@anl.gov
+  - family-names: Lan
+    given-names: Zhiling
+    affiliation: "University of Illinois Chicago"
+    email: zlan@uic.edu
+preferred-citation:
+  type: conference-paper
+  title: "LASSI-Verify: Adaptive Empirical Verification of LLM-Generated Parallel Scientific Code Transformations"
+  authors:
+    - family-names: Dearing
+      given-names: "Matthew T."
+      affiliation: "University of Illinois Chicago"
+    - family-names: Wu
+      given-names: Xingfu
+      affiliation: "Argonne National Laboratory"
+    - family-names: Taylor
+      given-names: Valerie
+      affiliation: "Argonne National Laboratory"
+    - family-names: Lan
+      given-names: Zhiling
+      affiliation: "University of Illinois Chicago"
+  conference:
+    name: "SC26 Workshops (Correctness 2026)"
+  location: "Chicago, Illinois, USA"
+  year: 2026
+  month: 11
+  # DOI not yet assigned; proceedings are not indexed until around the conference date.
