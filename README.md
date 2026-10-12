@@ -99,6 +99,20 @@ streamlit run lassiapp.py
 
 Opens a browser-based form at `http://localhost:8501` for configuring and launching a run without editing `config.yaml` directly.
 
+## Adding a New Kernel
+
+Trying a new HeCBench kernel doesn't require any code changes — it just needs to be vendored into `source_codes/HeCBench/` and registered in `source_apps.json`:
+
+1. **Vendor the source file(s).** HeCBench's own repo nests kernels as `src/<kernel>-cuda/main.cu`; this pipeline expects a flat layout instead: `source_codes/HeCBench/<kernel>/<kernel>-cuda_main.cu` (and `<kernel>-hip_main.cu` if you also want an AMD/HIP path). Copy the kernel's source in and rename its main file to match this convention.
+2. **Local headers just work.** If the kernel `#include`s a local header (e.g. `#include "kernels.h"`), put the header in the same flat kernel folder with a plain relative include — no path prefix needed. `code_manager.py` passes an `-I` flag pointing at the kernel's own source folder on every compile, so the header resolves correctly no matter where the pipeline writes the generated/instrumented copy.
+3. **Register it in `source_apps.json`**, under `"HeCBench"`, with:
+   - `app_folder` — the kernel's folder name (must match step 1)
+   - `app_params` — the benchmark's positional command-line arguments (check the kernel's own `argv` parsing or README to get these right)
+   - `code_lines` — informational only; shown in the GUI's kernel picker
+4. That's it — `lassiapp.py`'s kernel dropdown reads directly from `source_apps.json`, so the new kernel shows up automatically. No changes needed anywhere in `lassi/`.
+
+One thing you can't set up in advance: whether Tier 3 finds a usable metamorphic relation for the kernel is decided by the LLM at runtime (Stage 0's source filter) — some computational patterns are easier for the LLM to find a relation for than others, and this only surfaces once you actually try the kernel.
+
 ## Related Projects
 
 LASSI-Verify is part of a small suite of tools from the same research group exploring LLM-based automated refactoring of parallel scientific GPU/HPC code:
