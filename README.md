@@ -106,7 +106,7 @@ Opens a browser-based form at `http://localhost:8501` for configuring and launch
 
 ## Adding a New Kernel
 
-No code changes required — vendor the source and add a `source_apps.json` entry.
+No code changes required when adding a new kernel from the HeCBench collection not listed above. You only need to register details about the source code in a new `source_apps.json` entry.
 
 1. **Layout.** HeCBench nests kernels as `src/<kernel>-cuda/main.cu`. This pipeline requires a flat `source_codes/HeCBench/<kernel>/<kernel>-cuda_main.cu` (and `<kernel>-hip_main.cu` for HIP). Rename the main file accordingly.
 2. **Local headers.** Place any `#include`d header in the same kernel folder, referenced by filename only (no path). `code_manager.py` passes an `-I` flag for the kernel's source folder on every compile, so the include resolves regardless of where the generated/instrumented copy is compiled.
@@ -116,11 +116,10 @@ No code changes required — vendor the source and add a `source_apps.json` entr
    - `code_lines` — informational; shown in the GUI
 4. `lassiapp.py`'s kernel dropdown reads `source_apps.json` directly — no further changes needed.
 
-Tier 3 relation applicability (whether the LLM finds a usable metamorphic relation for the kernel) is determined at runtime and cannot be predicted in advance.
 
 ## Related Projects
 
-LASSI-Verify is part of a small suite of tools from the same research group exploring LLM-based automated refactoring of parallel scientific GPU/HPC code:
+LASSI-Verify is part of a suite of tools from the SPEAR research group exploring LLM-based automated refactoring of parallel scientific GPU/HPC code:
 
 - **LASSI** — the original self-correcting pipeline for translating parallel scientific code between languages (e.g., CUDA to OpenMP) via an iterative LLM self-correction loop. LASSI-Verify's self-correction loop builds directly on this design.
 - **LASSI-EE** — re-targets the same self-correction loop at energy-efficiency refactoring, using runtime GPU power profiling and an LLM-as-judge screening step.
