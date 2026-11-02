@@ -154,34 +154,29 @@ def experimental_setup(cfg):
     -- all-pairs-distance ["10000"]
     -- marchingCubes ["100"]
 
-    Altis apps:
-    -- level1/bfs ["--size 3"]
-    -- level2/raytracing [""]
-    -- level2/mandelbrot ["--imageSize 1024 --iterations 100000"]
-
-    Miniapps:
-    -- miniMDock ["-lfile", "./input/7cpa/7cpa_ligand.pdbqt", "-nrun 500"]
-    -- XSBench ["-m", "event", "-l", "1700000000"]
-
     """
 
     # ****************************
     # ---> EXPERIMENT UPDATE FIELD (now loaded from config.yaml)
 
     # Enter source application to process through LASSI
-    source_collection = cfg["app"]["collection"]   # "HeCBench" | "Miniapps"
+    source_collection = cfg["app"]["collection"]   # "HeCBench"
     source_app        = cfg["app"]["name"]          # e.g. "jacobi"
-    make_script       = cfg["app"]["make_script"]   # Used only for Miniapps
-    build_script      = cfg["app"]["build_script"]  # False (HeCBench), True for Altis only
+    # make_script / build_script were used by the Miniapps / Altis collections, which are not
+    # part of LASSI-Verify (their support code was removed). Only plain HeCBench-style
+    # single-file nvcc/hipcc compilation is supported.
+    make_script       = False
+    build_script      = False
+    if cfg["app"].get("make_script") or cfg["app"].get("build_script"):
+        sys.exit("make_script / build_script (Miniapps, Altis) are not supported in LASSI-Verify; "
+                 "set both to false in config.yaml.")
 
 
     """
     Valid source code folder names (under source_codes):
     1. HeCBench
-    2. altis/src/cuda
-    3. miniMDock/bin/
     """
-    source_folder = source_apps[source_collection]["source_folder"]  # "altis/src/cuda/level2"    #  "HeCBench" "altis/src/cuda/level1"
+    source_folder = source_apps[source_collection]["source_folder"]  # "HeCBench"
     app_folder_name = source_apps[source_collection][source_app]["app_folder"]
     lines_of_code = source_apps[source_collection][source_app]["code_lines"]
     if make_script:
@@ -274,20 +269,11 @@ def experimental_setup(cfg):
     code_compiler = ""
     code_compiler_kwds = ""
     if source_lang == "CUDA":
-        if build_script:
-            code_build_script = "build_" + app_name
-        elif make_script:
-            if source_app == "miniMDock":
-                code_compiler = "make"
-                code_compiler_kwds = "API=CUDA DEVICE=GPU CARD=NVIDIA NUMWI=64"
-            elif source_app == "XSBench":
-                code_compiler = "cuda/make"
-        else:
-            code_compiler = "nvcc"
-            code_compiler_kwds = "-std=c++14 -Xcompiler -Wall -arch=sm_89 -O3"
-            # -arch=sm_70 for aiops01 GPU (Argonne)  # -arch=sm_80 for A100s
-            # -arch=sm_60 for P100
-            # -arch=sm_89 for RTX 5000
+        code_compiler = "nvcc"
+        code_compiler_kwds = "-std=c++14 -Xcompiler -Wall -arch=sm_89 -O3"
+        # -arch=sm_70 for aiops01 GPU (Argonne)  # -arch=sm_80 for A100s
+        # -arch=sm_60 for P100
+        # -arch=sm_89 for RTX 5000
         if yes_power_feedback:
             context_knowledge_selection = "cuda_optimization_summary"
             context_fewshot_examples = "cuda_c_few_shot_examples"
@@ -303,19 +289,8 @@ def experimental_setup(cfg):
         code_compiler_kwds = "-Wall -O3 -Minfo=accel -mp=gpu -gpu=cc89"  # "-fopenmp -O3"
         context_knowledge_selection = "omp"
     elif source_lang == "HIP":
-        if build_script:
-            code_build_script = "build_" + app_name
-        elif make_script:
-            if source_app == "miniMDock":
-                code_compiler = "make"
-                code_compiler_kwds = "API=HIP DEVICE=GPU CARD=AMD NUMWI=64 HIP_PATH=/opt/rocm-6.3.3"
-            elif source_app == "XSBench":
-                code_compiler = "hip/make"
-            else:
-                code_compiler_kwds = ""
-        else:
-            code_compiler = "hipcc"
-            code_compiler_kwds = "-std=c++14 -Wall -O3 --amdgpu-target=gfx908"
+        code_compiler = "hipcc"
+        code_compiler_kwds = "-std=c++14 -Wall -O3 --amdgpu-target=gfx908"
         if yes_power_feedback:
             context_knowledge_selection = "hip_optimization_summary"
             context_fewshot_examples = "hip_c_few_shot_examples"
@@ -698,38 +673,6 @@ while trial_number <= total_trials:
     # from the previous trial's run. gpu_vendor is re-set because it is not populated by the pipeline.
     experiment_data = dict.fromkeys(DATAFIELDNAMES, None)
     experiment_data["gpu_vendor"] = str(detected_vendor.upper())
-    # For the miniApp, we need to reset the source kernel file
-    #  because the pipeline for this scenario must overwrite the
-    #  source code in the generated_codes folder.
-    if make_script:
-        if source_lang == "CUDA":
-            if app_name == "miniMDock":
-                working_kernel_file = "/home/cc/lassi/LASSI-EE/generated_codes/Miniapps/miniMDock/device/cuda/kernels.cu"
-                clean_kernel_file = "/home/cc/lassi/LASSI-EE/generated_codes/Miniapps/miniMDock/device/cuda/kernels_orig_merged.cu"
-            elif app_name == "XSBench":
-                working_kernel_file = "/home/cc/lassi/LASSI-EE/generated_codes/Miniapps/XSBench/cuda/Main.cu"
-                clean_kernel_file = "/home/cc/lassi/LASSI-EE/generated_codes/Miniapps/XSBench/cuda/Main_orig_merged.cu"
-        elif source_lang == "HIP":
-            if app_name == "miniMDock":
-                working_kernel_file = "/home/cc/lassi/LASSI-EE/generated_codes/Miniapps/miniMDock/device/hip/kernels.cpp"
-                clean_kernel_file = "/home/cc/lassi/LASSI-EE/generated_codes/Miniapps/miniMDock/device/hip/kernels_orig_merged.cpp"
-            elif app_name == "XSBench":
-                working_kernel_file = "/home/cc/lassi/LASSI-EE/generated_codes/Miniapps/XSBench/hip/Main.cpp"
-                clean_kernel_file = "/home/cc/lassi/LASSI-EE/generated_codes/Miniapps/XSBench/hip/Main_orig_merged.cpp"
-        try:
-            print(f"[reset] Copying clean kernel -> working file\n"
-                  f"        src: {clean_kernel_file}\n"
-                  f"        dst: {working_kernel_file}")
-            shutil.copyfile(clean_kernel_file, working_kernel_file)
-            print("[reset] Success: working file reset to clean copy.")
-        except FileNotFoundError as e:
-            print(f"[reset] ERROR: file not found: {e.filename}")
-        except PermissionError as e:
-            print(f"[reset] ERROR: permission denied: {e.filename}")
-        except OSError as e:
-            # catches other IO errors (disk full, cross-device issues, etc.)
-            print(f"[reset] ERROR: {e.__class__.__name__}: {e}")
-
     # CREATE METADATA RECORD CONTENT
     meta_data_file = "***** EXPERIMENT CONFIGURATION SUMMARY *****\n"
     meta_data_file += "\nGPU Vendor: " + str(detected_vendor.upper())

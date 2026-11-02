@@ -2,8 +2,6 @@
 
 <img src="lassi/lassi-verify-logo.png" alt="LASSI-Verify Logo" width="300"/>
 
-> **Status:** This repository is being prepared for public release and is pending institutional open-source clearance. (Remove this line once cleared.)
-
 ## What is LASSI-Verify?
 
 LASSI-Verify is an adaptive empirical verification framework for parallel scientific GPU code transformations. Its goal is to determine whether an LLM-generated refactoring of a CUDA kernel (optimized for energy efficiency or runtime) is functionally equivalent to the original source and genuinely better-performing. The framework is adaptive in that verification properties are drawn from structured catalogs and instantiated relative to each specific transformation, while the three-tier architecture and mandatory coverage requirements remain fixed.

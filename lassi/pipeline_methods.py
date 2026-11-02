@@ -153,28 +153,7 @@ def test_source_code(app_name, experiment_data_directory,
     code_source = "source"  # generated
     print("\n\n----- " + color.BLUE + "SOURCE CODE: Test compile and execute" + color.END + " -----")
     print("\nTest compile the original source code: " + str(source_file_path))
-    if build_script:
-        compile_result = lassi.code_manager.build_script_code("source_codes", code_build_script)
-        execute_file = "/home/cc/lassi/LASSI_dev/source_codes/altis/build/bin/level1/" + file_nameexe_input_parameters
-    elif make_script:
-        compile_result = lassi.code_manager.make_script_code(directory, code_compiler_kwds, source_lang)
-        if compile_result == "":
-            if source_lang == "CUDA":
-                if app_name == "miniMDock":
-                    execute_file = "bin/autodock_gpu_64wi"  # HARD CODED FOR MINIMDOCK
-                    exe_input_parameters = "-lfile ./input/7cpa/7cpa_ligand.pdbqt -nrun 250".split()
-                elif app_name == "XSBench":
-                    execute_file = "XSBench"  # HARD CODED FOR XSBENCH
-                    exe_input_parameters = "-m event -l 1700000000".split()
-            elif source_lang == "HIP":
-                if app_name == "miniMDock":
-                    execute_file = "bin/autodock_hip_gpu_64wi"  # HARD CODED FOR MINIMDOCK
-                    exe_input_parameters = "-lfile ./input/7cpa/7cpa_ligand.pdbqt -nrun 250".split()
-                elif app_name == "XSBench":
-                    execute_file = "XSBench"  # HARD CODED FOR XSBENCH
-                    exe_input_parameters = "-m event -l 1700000000".split()
-    else:
-        compile_result, execute_file = lassi.code_manager.compile_code(source_file_path, source_lang, code_compiler, code_compiler_kwds)
+    compile_result, execute_file = lassi.code_manager.compile_code(source_file_path, source_lang, code_compiler, code_compiler_kwds)
     
     if compile_result != "":
         print("\n\nFailed compile result: " + str(compile_result))

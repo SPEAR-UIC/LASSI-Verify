@@ -2377,24 +2377,7 @@ def auto_code_llmgeneration_pipeline(prompts,
         file.close()
     
         # Compile the generated code, compile_result == "" if no error
-        if build_script:
-            compile_result = lassi.code_manager.build_script_code("generated_codes", code_build_script)
-            # execute_file = "/home/cc/lassi/LASSI_dev/generated_codes/altis/build/bin/level1/bfs"
-            # execute_file = "/home/cc/lassi/LASSI_dev/generated_codes/altis/build/bin/level2/raytracing"
-            execute_file = "/home/cc/lassi/LASSI_dev/generated_codes/altis/build/bin/level1/" + file_name_save
-        elif make_script:
-            # run make command
-            print("\n** RUN MAKE COMMAND TO COMPILE **")
-            compile_result = lassi.code_manager.make_script_code(directory, code_compiler_kwds, source_lang)
-            # print("compile_result: ", compile_result)
-            if app_name == "miniMDock":
-                execute_file = "bin/autodock_gpu_64wi"  # HARD CODED FOR MINIMDOCK
-                exe_input_parameters = "-lfile ./input/7cpa/7cpa_ligand.pdbqt -nrun 100".split()
-            elif app_name == "XSBench":
-                execute_file = "XSBench"  # HARD CODED FOR XSBENCH
-                exe_input_parameters = "-m event -l 1700000000".split()
-        else:
-            compile_result, execute_file = lassi.code_manager.compile_code(file_path, target_lang, code_compiler, code_compiler_kwds)
+        compile_result, execute_file = lassi.code_manager.compile_code(file_path, target_lang, code_compiler, code_compiler_kwds)
 
         print("\nExecute file: " + str(execute_file))
 
