@@ -5,9 +5,7 @@ import os
 import requests
 import subprocess
 import re
-import html
 import time
-from IPython.display import display, HTML, clear_output
 import lassi.argostream_curl
 import lassi.token_analysis
 
@@ -69,21 +67,10 @@ def ollama_llm_nostream(model, num_ctx, system_prompt, content_prompt, temp=0.2,
 
     response_text = response['message']['content']
 
-    print(response_text)
-    
-    # Final cleaning of the complete response
-    # Conditional cleaning only if <think> tags exist
-    if re.search(r'<think>.*?</think>', response_text, flags=re.DOTALL):
-        cleaned_response = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
-    else:
-        cleaned_response = response_text.strip()
-    
-    return cleaned_response  # response_text
+    return response_text
 
 
 def ollama_llm(model, num_ctx, system_prompt, content_prompt, temp=0.2, verifyprompt=False):
-    # Create an HTML display object with a <pre> tag for formatted text
-    html_display = display(HTML(""), display_id=True)
 
     if verifyprompt:
         _tok = lassi.token_analysis.token_count(system_prompt + " " + content_prompt)
@@ -117,39 +104,8 @@ def ollama_llm(model, num_ctx, system_prompt, content_prompt, temp=0.2, verifypr
     try:
         for chunk in stream:
             chunk_content = chunk['message']['content']
+            print(chunk_content, end='', flush=True)
             response_text += chunk_content
-    
-            # Escape HTML and highlight <think> tags
-            escaped_text = html.escape(response_text)
-    
-            # Style opening tags
-            styled_text = re.sub(
-                r'&lt;think&gt;',
-                '<span style="color: #d32f2f; font-weight: bold;">&lt;think&gt;</span>',
-                escaped_text
-            )
-            # Style closing tags
-            styled_text = re.sub(
-                r'&lt;/think&gt;',
-                '<span style="color: #d32f2f; font-weight: bold;">&lt;/think&gt;</span>',
-                styled_text
-            )
-            
-            # Create typewriter effect with cursor
-            display_text = f"{styled_text}<span style='border-right:2px solid;animation:blink 1s infinite'> </span>"  
-            # Put everything on one line to avoid extra whitespace
-            html_content = (
-                f"<pre class='lassi-out' style='padding:10px;border-radius:5px;"
-                f"white-space:pre-wrap;font-family:monospace;margin:0;'>{display_text}</pre>"
-                f"<style>"
-                f".lassi-out{{background:#f0f0f0;color:#1e1e1e;border:1px solid #ccc;}}"
-                f"@media(prefers-color-scheme:dark){{.lassi-out{{background:#1e1e1e;color:#d4d4d4;border:1px solid #444;}}}}"
-                f"@keyframes blink {{0%{{opacity:1}}50%{{opacity:0}}100%{{opacity:1}}}}"
-                f"</style>"
-            )
-        
-        # Update the display output with styled text
-        html_display.update(HTML(html_content))
         
     except ResponseError as e:
         if "unexpected EOF" in str(e):
@@ -161,14 +117,7 @@ def ollama_llm(model, num_ctx, system_prompt, content_prompt, temp=0.2, verifypr
     # Clear the streaming display after completion
     # clear_output(wait=True)
 
-    # Final cleaning of the complete response
-    # Conditional cleaning only if <think> tags exist
-    if re.search(r'<think>.*?</think>', response_text, flags=re.DOTALL):
-        cleaned_response = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
-    else:
-        cleaned_response = response_text.strip()
-    
-    return cleaned_response  # response_text
+    return response_text
 
 
 def unload_ollama_model(model):
