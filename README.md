@@ -137,8 +137,8 @@ See [`CITATION.cff`](CITATION.cff) for a machine-readable version.
 
 > M. T. Dearing, Y. Tao, X. Wu, Z. Lan, and V. Taylor, "LASSI: An LLM-based Automated Self-Correcting Pipeline for Translating Parallel Scientific Codes," in *International Workshop on Large Language Models and HPC (LLMxHPC), IEEE International Conference on Cluster Computing (CLUSTER)*, 2024. DOI: [10.1109/CLUSTERWorkshops61563.2024.00029](https://doi.org/10.1109/CLUSTERWorkshops61563.2024.00029)
 
-> [Author list TBD], "LASSI-EE: LLM-based Automated Refactoring of Parallel Scientific Codes for Energy Efficiency," in *IEEE International Conference on Cluster Computing (CLUSTER) 2026 Workshops* (accepted).
+> M. T. Dearing, Y. Tao, X. Wu, Z. Lan, and V. Taylor, "LASSI-EE: LLM-based Automated Refactoring of Parallel Scientific Codes for Energy Efficiency," in *Proceedings of the 3rd International Workshop on Energy Efficiency with Sustainable Performance (EESP '26)*, held with *SC26: The International Conference for High Performance Computing, Networking, Storage and Analysis*, Nov. 2026.
 
 ## License
 
-TBD, pending institutional review.
+Licensed under the Apache License 2.0. Vendored third-party kernels in `source_codes/` retain their original licenses.
