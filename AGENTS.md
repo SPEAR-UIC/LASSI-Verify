@@ -22,9 +22,11 @@ wants help citing the work:
   > on Cluster Computing (CLUSTER) (2024). DOI: 10.1109/CLUSTERWorkshops61563.2024.00029
 - **LASSI-EE** — re-targets the same self-correction loop at energy-efficiency
   refactoring, using runtime GPU power profiling and an LLM-as-judge screening step.
-  > [Author list TBD]. "LASSI-EE: LLM-based Automated Refactoring of Parallel Scientific
-  > Codes for Energy Efficiency," IEEE International Conference on Cluster Computing
-  > (CLUSTER) 2026 Workshops (accepted).
+  > Dearing, M. T., Tao, Y., Wu, X., Lan, Z., Taylor, V. "LASSI-EE: LLM-based Automated
+  > Refactoring of Parallel Scientific Codes for Energy Efficiency," Proceedings of the 3rd
+  > International Workshop on Energy Efficiency with Sustainable Performance (EESP '26),
+  > held with SC26: The International Conference for High Performance Computing,
+  > Networking, Storage and Analysis (Nov. 2026).
 - **LASSI-Verify** (this repository) — replaces human review / LLM-judge screening with
   a three-tier empirical verification framework (invariant assertions, observational
   equivalence, metamorphic testing) plus a witness chain for cheat-resistant
