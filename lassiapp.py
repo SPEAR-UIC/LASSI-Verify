@@ -102,14 +102,14 @@ col_app, col_task, col_llm = st.columns([1, 1, 1.4])
 with col_app:
     st.subheader("App")
     # Miniapps/Altis support was removed from source_apps.json when the repo was
-    # trimmed to the exact 21 HeCBench kernels reported in the paper — HeCBench
+    # trimmed to the HeCBench kernels reported in the paper — HeCBench
     # is the only collection with data behind it today.
     collection = "HeCBench"
     app_list    = HECBENCH_APPS
     make_script = False
     build_script = False
 
-    default_app = _get(["app", "name"], "jacobi")
+    default_app = _get(["app", "name"], "atomicCost")
     app_name = st.selectbox(
         "Application",
         app_list,
@@ -141,6 +141,13 @@ with col_app:
     for _lang in LANG_OPTIONS:
         st.checkbox(_lang, value=(_lang == "CUDA"), disabled=True,
                     help=_lang_help(_lang), key=f"target_lang_{_lang}")
+
+    cuda_arch = st.text_input(
+        "CUDA architecture (nvcc -arch)",
+        value=str(_get(["compiler", "cuda_arch"], "native")),
+        help="'native' lets nvcc detect your GPU (CUDA 11.5+). Or set explicitly, "
+             "e.g. sm_80 (A100) or sm_89 (the paper's RTX 5000 Ada).",
+    ).strip() or "native"
 
 # ── Column 2: Task Mode ───────────────────────────────────────────────────────
 with col_task:
@@ -302,6 +309,7 @@ new_cfg = {
         "build_script": build_script,
     },
     "language": {"source": source_lang, "target": target_lang},
+    "compiler": {"cuda_arch": cuda_arch},
     "task": {
         "power_measure":     power_measure,
         "yes_power_feedback": yes_power_feedback,

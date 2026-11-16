@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import os
+import re
 import sys
 
 # ── Argument parsing ───────────────────────────────────────────────────────────
@@ -130,13 +131,10 @@ def experimental_setup(cfg):
      (this one may show a lot of failures)
 
     HeCBench apps:
-    -- matrix-rotate ["30000", "100"]  ["10000", "1"]  # Usage: %s <matrix size> <repeat>
-    -- jacobi [""] (none required)
     -- layout ["2500"] ["1"]
     -- atomicCost ["16", "10"] ["1"]
     -- segment-reduce ["16384", "100"] (a replacement for atomicCost, same "Data compression and reduction" category in HeCBench)
        --> (may be trivial for LASSI-Verify)
-    -- dense-embedding ["100000", "128", "100"] ["10000", "8", "1"]
     -- pathfinder ["100000", "10000", "2500"] ["100000", "1000", "5"] ["10000", "1000", "1000"]  # Usage: <column length> <row length> <pyramid_height>
     -- bsearch ["8388608", "1000"] ["10000", "1"]  # Usage: <number of elements> <repeat>
     -- entropy ["10000", "1024", "1"] ["8192", "8192", "500"]   # Usage: <width> <height> <repeat>
@@ -147,12 +145,10 @@ def experimental_setup(cfg):
     -- murmurhash3 ["750000, 500"]
     -- chacha20 ["300000"]
     -- jaccard ["1024, 512, 1000"]
-    -- keogh ["256", "22500000", "100"]
     -- floydwarshall ["2048", "100", "16"]
     -- extrema ["750"]
     -- threadfence ["100", "250000000"]
     -- all-pairs-distance ["10000"]
-    -- marchingCubes ["100"]
 
     """
 
@@ -270,7 +266,15 @@ def experimental_setup(cfg):
     code_compiler_kwds = ""
     if source_lang == "CUDA":
         code_compiler = "nvcc"
-        code_compiler_kwds = "-std=c++14 -Xcompiler -Wall -arch=sm_89 -O3"
+        # GPU architecture comes from config.yaml's compiler.cuda_arch ("native" =
+        # nvcc detects the installed GPU, needs CUDA 11.5+; or an explicit value such
+        # as sm_80). The reported experiment used sm_89 (RTX 5000 Ada).
+        cuda_arch = str(cfg.get("compiler", {}).get("cuda_arch", "native")).strip()
+        if not re.fullmatch(r"native|(sm|compute)_\d+[a-z]?", cuda_arch):
+            print(f"ERROR: compiler.cuda_arch '{cuda_arch}' is invalid. "
+                  "Use 'native' or a value like sm_80, sm_89.")
+            sys.exit(1)
+        code_compiler_kwds = f"-std=c++14 -Xcompiler -Wall -arch={cuda_arch} -O3"
         # -arch=sm_70 for aiops01 GPU (Argonne)  # -arch=sm_80 for A100s
         # -arch=sm_60 for P100
         # -arch=sm_89 for RTX 5000

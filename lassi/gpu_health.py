@@ -363,9 +363,9 @@ def _ensure_nvidia_smoke_bin():
     bin_path = os.path.join(tmpdir, 'smoke')
     with open(src_path, 'w') as f:
         f.write(_NVCC_SMOKE_SRC)
-    # Use sm_89 to match LASSI's target arch; falls back to PTX JIT on
-    # other Ada/Hopper GPUs. If you migrate to a different arch, update here.
-    rc, out, err = _run(['nvcc', '-std=c++14', '-arch=sm_89', '-O3',
+    # -arch=native builds for whatever GPU is installed (CUDA 11.5+), so the health
+    # check no longer hardcodes an architecture (previously sm_89).
+    rc, out, err = _run(['nvcc', '-std=c++14', '-arch=native', '-O3',
                          src_path, '-o', bin_path], timeout=30)
     if rc != 0:
         return None, f'nvcc rc={rc}: {(err or out).strip()[:200]}'

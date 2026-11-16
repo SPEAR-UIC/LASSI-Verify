@@ -4,7 +4,7 @@
 
 ## What is LASSI-Verify?
 
-LASSI-Verify is an adaptive empirical verification framework for parallel scientific GPU code transformations. Its goal is to determine whether an LLM-generated refactoring of a CUDA kernel (optimized for energy efficiency or runtime) is functionally equivalent to the original source and genuinely better-performing. The framework is adaptive in that verification properties are drawn from structured catalogs and instantiated relative to each specific transformation, while the three-tier architecture and mandatory coverage requirements remain fixed.
+LASSI-Verify is an adaptive empirical verification framework for parallel scientific GPU code transformations. Its goal is to determine whether an LLM-generated refactoring of a CUDA kernel (optimized for runtime performance) is functionally equivalent to the original source and genuinely better-performing. The framework is adaptive in that verification properties are drawn from structured catalogs and instantiated relative to each specific transformation, while the three-tier architecture and mandatory coverage requirements remain fixed.
 It wraps around a multi-iteration LLM self-improvement loop ("LASSI") with three formal-methods-grounded verification tiers that together provide correctness evidence without requiring formal proofs or exhaustive testing.
 
 ## How It Works
@@ -19,6 +19,8 @@ A **witness chain** — a seeded, cheat-resistant instrumentation mechanism — 
 
 See the paper for the full design and preliminary results (citation below).
 
+> **Scope of this release.** The code and kernels here are what is needed to reproduce the paper's CUDA runtime-performance experiment. Energy/power-aware refactoring (see [LASSI-EE](#related-projects)), other target languages (OpenMP, HIP, SYCL), and further kernels will be added in future updates. The raw per-trial experiment data behind the paper's numbers will also be released separately.
+
 ## Repository Layout
 
 - `run_lassi.py` — CLI entry point for running the pipeline (config via `config.yaml`)
@@ -27,12 +29,12 @@ See the paper for the full design and preliminary results (citation below).
 - `source_codes/HeCBench/` — the vendored CUDA kernels used in the reported experiment (see `source_apps.json` for per-kernel build parameters)
 - `lassi_verify_analysis/` — post-hoc analysis package that computes the paper's tables/figures from raw per-trial logs
 - `scripts/` — standalone utility/validation scripts
-- `AGENTS.md` — background and architecture notes for AI coding assistants working in this repo
+- `config.yaml.example` — experiment configuration template (copy to `config.yaml`)
 
 ## Benchmark Kernels
 
-The 16 HeCBench kernels used in the reported experiment (exec params are the positional
-arguments passed to each benchmark binary, from `source_apps.json`):
+`source_codes/HeCBench/` contains exactly the 16 HeCBench kernels used in the reported experiment (exec params are the positional
+arguments passed to each benchmark binary, from `source_apps.json`). The kernels are vendored from [HeCBench](https://github.com/zjin-lcf/HeCBench) and keep their original authorship and license terms:
 
 | Kernel | Lines of Code | Exec Params | Local Header |
 |---|---|---|---|
@@ -60,6 +62,12 @@ LLM's refactoring prompt — only the `.cu` file's own text is sent, so the LLM 
 
 ## Getting Started
 
+### Requirements
+
+- Linux with a CUDA-capable NVIDIA GPU and `nvcc` on `PATH` (CUDA 11.5+ for the default `native` architecture setting; see below)
+- Python 3.12+
+- Access to an LLM backend (see [LLM Backend Setup](#llm-backend-setup)). Runs make real LLM API calls, which cost money on hosted services.
+
 ```bash
 # Create and activate a virtual environment
 python3 -m venv .venv
@@ -73,7 +81,13 @@ pip install -r requirements.txt
 cp config.yaml.example config.yaml
 ```
 
-A Linux system with a CUDA-capable NVIDIA GPU and `nvcc` on `PATH` is required. The pipeline is not pinned to a specific architecture beyond the `-arch` flag passed to `nvcc` (set in `config.yaml`); the reported experiment used an NVIDIA RTX 5000 Ada (`sm_89`).
+> **Do not also install the `pynvml` package.** `requirements.txt` uses `nvidia-ml-py`, and the two conflict on the same `pynvml` Python namespace.
+
+### GPU architecture
+
+The `compiler.cuda_arch` field in `config.yaml` is passed to `nvcc` as `-arch=<value>` (full flags: `nvcc -std=c++14 -Xcompiler -Wall -arch=<value> -O3`). The default, `native`, lets `nvcc` detect your installed GPU. Set an explicit value such as `sm_80` (A100) or `sm_89` (Ada) if you use an older CUDA toolkit or want to pin it. The reported experiment used an NVIDIA RTX 5000 Ada (`sm_89`). The GUI exposes the same setting.
+
+The analysis oracle harness (`lassi_verify_analysis/oracle_harness.py`) defaults to `sm_89`; set the `LASSI_CUDA_ARCH` environment variable to override it.
 
 ### LLM Backend Setup
 
@@ -86,13 +100,19 @@ LASSI-Verify's `llm.backend` config field selects which LLM backend the pipeline
 
 See `config.yaml.example` for the full field layout, and `lassiapp.py`'s GUI for an interactive way to configure this — for `openai_compatible`, the GUI's model dropdowns are populated dynamically from the endpoint's `/models` list rather than typed by hand.
 
+### Quick first run
+
+The template `config.yaml.example` is set to `atomicCost`, the smallest kernel (10 lines), which makes it the fastest way to confirm your setup works end to end. After copying it to `config.yaml`, set `llm.model`, `llm.model_coder` and `llm.model_judge` (and `base_url` / API key for `openai_compatible`), then run the CLI below. Larger kernels take considerably longer; the slowest runs in the paper take an hour or more per trial.
+
 ### Run via the CLI
 
 ```bash
-python run_lassi.py
+python run_lassi.py                      # reads config.yaml
+python run_lassi.py --config my_exp.yaml # use a different config file
+python run_lassi.py --no-monitor         # skip the live web dashboard
 ```
 
-Experiment configuration (kernel selection, LLM backend/model, verification tier toggles, trial count, etc.) is read from `config.yaml` on every run.
+Experiment configuration (kernel selection, LLM backend/model, GPU architecture, verification tier toggles, trial count, etc.) is read from the config file on every run. While the pipeline runs, a live dashboard streaming its output is served at `http://localhost:5007` (disable with `--no-monitor`).
 
 ### Run via the GUI
 
@@ -100,7 +120,23 @@ Experiment configuration (kernel selection, LLM backend/model, verification tier
 streamlit run lassiapp.py
 ```
 
-Opens a browser-based form at `http://localhost:8501` for configuring and launching a run without editing `config.yaml` directly.
+Opens a browser-based form at `http://localhost:8501` for configuring and launching a run without editing `config.yaml` directly. The GUI writes `config.yaml` and then launches `run_lassi.py` for you.
+
+## Output
+
+Each run writes to `generated_codes/` (gitignored): per-trial refactored code, the instrumented verification variants, logs, and the result CSVs (`result_lassi-verify_pipeline_data.csv` and `result_lassi-verify_attempt_log.csv`). Experiment-level files, including each trial's best uninstrumented variant (`*_best_clean.cu`), are written to `generated_codes/experiment/<label>__<timestamp>/`.
+
+## Analysis
+
+The `lassi_verify_analysis/` package computes the paper's metrics and figures (verified pass@k, verification effectiveness, ablations, oracle-anchored confusion matrix) from those CSVs:
+
+```bash
+python -m lassi_verify_analysis.run_all \
+  --data-dir path/to/experiment/csvs \
+  --output-dir path/to/results
+```
+
+Point `--data-dir` at a run's `generated_codes/experiment/<label>__<timestamp>/` folder, or at a folder you've collected CSVs into. It must contain `lassi-verify_pipeline_data.csv` (required) and `lassi-verify_attempt_log.csv` (optional); the pipeline's `result_` filename prefix is also recognized.
 
 ## Adding a New Kernel
 
@@ -141,4 +177,4 @@ See [`CITATION.cff`](CITATION.cff) for a machine-readable version.
 
 ## License
 
-Licensed under the Apache License 2.0. Vendored third-party kernels in `source_codes/` retain their original licenses.
+Licensed under the Apache License 2.0 (see [`LICENSE`](LICENSE)). Vendored third-party kernels in `source_codes/` (from [HeCBench](https://github.com/zjin-lcf/HeCBench)) retain their original licenses. To report a security issue, see [`SECURITY.md`](SECURITY.md); to contribute, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
