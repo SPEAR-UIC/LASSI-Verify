@@ -60,7 +60,8 @@ log = logging.getLogger("oracle_harness")
 # ---------------------------------------------------------------------------
 
 NVCC = "nvcc"
-NVCC_FLAGS = ["-std=c++14", "-arch=sm_89", "-O3"]
+# sm_89 matches the paper's RTX 5000 Ada; set LASSI_CUDA_ARCH (e.g. sm_80, native) for other GPUs.
+NVCC_FLAGS = ["-std=c++14", "-arch=" + os.environ.get("LASSI_CUDA_ARCH", "sm_89"), "-O3"]
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HECBENCH = os.path.join(REPO_ROOT, "source_codes", "HeCBench")
 

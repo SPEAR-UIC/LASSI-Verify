@@ -39,8 +39,8 @@ def test_tier1_assertions():
 
     # Configuration
     source_lang = "CUDA"
-    app_name = "jacobi"
-    source_file = "source_codes/HeCBench/jacobi/jacobi-cuda_main.cu"
+    app_name = "atomicCost"
+    source_file = "source_codes/HeCBench/atomicCost/atomicCost-cuda_main.cu"
 
     # LLM settings (using minimal config)
     llm_source = "argo"
@@ -96,7 +96,7 @@ def test_tier1_assertions():
 
     now = datetime.now(ZoneInfo("America/Chicago"))
     timestamp = now.strftime("%Y%m%d_%H%M%S")
-    output_file = f"{output_dir}/jacobi_tier1_{timestamp}.cu"
+    output_file = f"{output_dir}/atomicCost_tier1_{timestamp}.cu"
 
     with open(output_file, 'w') as f:
         f.write(instrumented_code)
@@ -106,7 +106,7 @@ def test_tier1_assertions():
     # Compile test
     print("🔨 Step 3: Compile instrumented code...")
     code_compiler = "nvcc"
-    code_compiler_kwds = "-std=c++14 -Xcompiler -Wall -arch=sm_89 -O3"
+    code_compiler_kwds = "-std=c++14 -Xcompiler -Wall -arch=native -O3"
 
     compile_result, execute_file = lassi.code_manager.compile_code(
         output_file,

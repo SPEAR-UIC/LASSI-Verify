@@ -1,11 +1,6 @@
 {
     "HeCBench": {
         "source_folder": "HeCBench",
-        "matrix-rotate": {
-            "app_folder": "matrix-rotate",
-            "app_params": ["5000", "101"],
-            "code_lines": 107
-        },
         "all-pairs-distance": {
             "app_folder": "all-pairs-distance",
             "app_params": ["10000"],
@@ -25,16 +20,6 @@
             "app_folder": "floydwarshall",
             "app_params": ["2048", "100", "16"],
             "code_lines": 295
-        },
-        "keogh": {
-            "app_folder": "keogh",
-            "app_params": ["256", "22500000", "100"],
-            "code_lines": 143
-        },
-        "jacobi": {
-            "app_folder": "jacobi",
-            "app_params": [""],
-            "code_lines": 235
         },
         "jaccard": {
             "app_folder": "jaccard",
@@ -60,11 +45,6 @@
             "app_folder": "segment-reduce",
             "app_params": ["16384", "100"],
             "code_lines": 95
-        },
-        "dense-embedding": {
-            "app_folder": "dense-embedding",
-            "app_params": ["100000", "128", "100"],
-            "code_lines": 193
         },
         "pathfinder": {
             "app_folder": "pathfinder",
@@ -100,11 +80,6 @@
             "app_folder": "lid-driven-cavity",
             "app_params": [""],
             "code_lines": 1079
-        },
-        "marchingCubes": {
-            "app_folder": "marchingCubes",
-            "app_params": ["100"],
-            "code_lines": 574
         }
     }
 }

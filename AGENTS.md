@@ -170,7 +170,8 @@ it requires live GPU hardware and a configured LLM backend.
 - **Compilation:** code is compiled at runtime via subprocess calls in
   `lassi/code_manager.py` (`nvcc` for CUDA, `hipcc` for HIP). Compiler flags are set in
   `config.yaml`/code, not a build system. Default NVIDIA flags:
-  `nvcc -std=c++14 -Xcompiler -Wall -arch=sm_89 -O3`.
+  `nvcc -std=c++14 -Xcompiler -Wall -arch=native -O3` (`-arch` comes from `compiler.cuda_arch` in
+  `config.yaml`, default `native`; the paper used `sm_89`).
 - **Generated file naming** (all gitignored): `*_verify.cu`, `*_mt_*.cu`,
   `*_zs_t1_Trial*.cu`, `*_zs_t2_Trial*.cu`, `*_best_clean.cu`, and compiled binaries like
   `*-cuda_main`.

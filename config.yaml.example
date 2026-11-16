@@ -14,6 +14,12 @@ app:
 language:
   source: CUDA
   target: CUDA
+compiler:
+  # GPU architecture passed to nvcc as -arch=<value>.
+  #   native  = nvcc detects the installed GPU (needs CUDA 11.5+). Recommended.
+  #   sm_XX   = explicit target, e.g. sm_80 (A100), sm_86 (RTX 30xx), sm_89 (Ada, used in
+  #             the paper), sm_90 (H100). Use this for older CUDA toolkits.
+  cuda_arch: native
 task:
   power_measure: false
   yes_power_feedback: true
